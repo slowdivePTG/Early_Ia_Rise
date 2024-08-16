@@ -65,7 +65,16 @@ def f_t(t, tfl, C, A, alpha, eps: float = 1e-12):
 ####################################################################################################
 
 
-def single_model(t, flux_err, n_fcqfid, idx_fcqfid, n_filt, idx_filt, flux=None, prop_prior: dict = None):
+def single_model(
+    t: list,
+    flux: list = None,
+    flux_err: list = None,
+    n_fcqfid: int = 1,
+    n_filt: int = 1,
+    idx_fcqfid: list = None,
+    idx_filt: list = None,
+    prior_params: dict = {},
+) -> None:
     """
     Function to model the single light curve of a supernova
     in multiple fields, CCDs, quadrants, as well as filters.
@@ -83,12 +92,12 @@ def single_model(t, flux_err, n_fcqfid, idx_fcqfid, n_filt, idx_filt, flux=None,
         Flux values of the light curve.
     flux_err : array-like
         Flux error values of the light curve.
-    n_fcqfid, idx_fcqfid : int
+    n_fcqfid, idx_fcqfid : int, array-like
         Number of unique fcqf IDs and indices used to index the fcqf IDs
         for each measurement.
-    n_filt, idx_filt : int
+    n_filt, idx_filt : int, array-like
         Number of unique filters and their indices.
-    prop_prior : dict, optional
+    prior_params : dict, optional
         Dictionary containing the prior information for the model.
         The dictionary should contain the following keys:
             - prior_type : str
@@ -97,7 +106,7 @@ def single_model(t, flux_err, n_fcqfid, idx_fcqfid, n_filt, idx_filt, flux=None,
             - mean_alpha : float, optional
                 Mean value of the prior distribution for alpha.
                 Required if prior_type == "Maximum_Entropy".
-            - sig_alpha : float, optional
+            - std_alpha : float, optional
                 Standard deviation of the prior distribution for alpha.
                 Required if prior_type == "Maximum_Entropy".
 
@@ -106,7 +115,7 @@ def single_model(t, flux_err, n_fcqfid, idx_fcqfid, n_filt, idx_filt, flux=None,
     None
     """
 
-    prior_type = prop_prior.get("prior_type", "Miller")
+    prior_type = prior_params.get("prior_type", "Miller")
 
     # t_fl : Time of the first light
     tfl = numpyro.sample("t_fl", dist.Uniform(-100, 0))
@@ -145,20 +154,20 @@ def single_model(t, flux_err, n_fcqfid, idx_fcqfid, n_filt, idx_filt, flux=None,
             alpha = numpyro.deterministic("alpha", jnp.power(10, log_alpha))
 
         elif prior_type == "Maximum_Entropy":  # Maximum entropy prior
-            mean_alpha = prop_prior.get("mean_alpha", 2)
-            sig_alpha = prop_prior.get("sig_alpha", None)
+            mean_alpha = prior_params.get("mean_alpha", 2)
+            std_alpha = prior_params.get("std_alpha", None)
 
-            if sig_alpha is None:  # alpha > 0, known E --> Exponential
+            if std_alpha is None:  # alpha > 0, known E --> Exponential
                 lambda_ = 1 / mean_alpha
                 alpha = numpyro.sample("alpha", dist.Exponential(lambda_), sample_shape=(n_filt,))
 
             else:  # alpha > 0, known E and Var --> Gamma
-                kappa_ = mean_alpha**2 / sig_alpha**2
-                lambda_ = mean_alpha / sig_alpha**2
+                kappa_ = mean_alpha**2 / std_alpha**2
+                lambda_ = mean_alpha / std_alpha**2
                 alpha = numpyro.sample("alpha", dist.Gamma(kappa_, lambda_), sample_shape=(n_filt,))
         else:
-            raise ValueError("Invalid prior type.")
-        
+            raise ValueError("Invalid prior type. Options: 'Miller', 'Jeffreys', 'Maximum_Entropy'")
+
         log_A = numpyro.sample(
             "log_A",
             dist.Uniform(-5, 5),
@@ -257,8 +266,10 @@ class Ia_lc:
         self,
         num_samples: int = 2000,
         num_warmup: int = 2000,
+        num_chains: int = 2,
         random_seed: int = 11,
         prior_pred_samples: int = 500,
+        prior_params: dict = {},
     ):
         """
         Perform MCMC sampling using NUTS algorithm.
@@ -269,10 +280,14 @@ class Ia_lc:
             Number of samples to draw from the posterior distribution (default: 2000).
         num_warmup : int, optional
             Number of warmup samples to discard (default: 2000).
+        num_chains : int, optional
+            Number of chains to run (default: 2).
         random_seed : int, optional
             Random seed for reproducibility (default: 11).
         prior_pred_samples : int, optional
             Number of samples to draw from the prior predictive distribution (default: 500).
+        prior_params : dict, optional
+            Dictionary containing the prior information for the model.
 
         Returns
         -------
@@ -298,19 +313,26 @@ class Ia_lc:
             infer.NUTS(single_model),
             num_warmup=num_warmup,
             num_samples=num_samples,
-            num_chains=2,
+            num_chains=num_chains,
             progress_bar=True,
         )
-        self.sampler.run(
-            jax.random.PRNGKey(random_seed), Phase, flux_err, n_fcqfid, idx_fcqfid, n_filt, idx_filt, flux=flux
-        )
+        running_params = {
+            "t": Phase,
+            "flux": flux,
+            "flux_err": flux_err,
+            "n_fcqfid": n_fcqfid,
+            "n_filt": n_filt,
+            "idx_fcqfid": idx_fcqfid,
+            "idx_filt": idx_filt,
+        }
+        self.sampler.run(jax.random.PRNGKey(random_seed), **running_params, prior_params=prior_params)
 
         # prior and posterior predictive checks
         prior_pred = infer.Predictive(single_model, num_samples=prior_pred_samples)(
-            jax.random.PRNGKey(1919810), Phase, flux_err, n_fcqfid, idx_fcqfid, n_filt, idx_filt
+            jax.random.PRNGKey(1919810), **running_params, prior_params=prior_params
         )
         post_pred = infer.Predictive(single_model, self.sampler.get_samples())(
-            jax.random.PRNGKey(114514), Phase, flux_err, n_fcqfid, idx_fcqfid, n_filt, idx_filt
+            jax.random.PRNGKey(114514), **running_params, prior_params=prior_params
         )
         # convert to arviz InferenceData
         self.inf_data = az.from_numpyro(self.sampler, prior=prior_pred, posterior_predictive=post_pred)
