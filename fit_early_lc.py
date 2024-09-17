@@ -1,4 +1,3 @@
-from math import log
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -12,6 +11,8 @@ import jax
 import jax.numpy as jnp
 from numpyro import distributions as dist, infer
 import arviz as az
+
+from sklearn.preprocessing import LabelEncoder
 
 plt.rcParams.update(
     {
@@ -31,7 +32,7 @@ plt.rcParams.update(
 )
 
 
-def f_t(t, tfl, C, A, alpha, eps: float = 1e-12):
+def f_t(t, tfl, C, A, alpha, eps: float = 1e-10):
     """
     Calculate the flux with a power-law rise model.
 
@@ -47,15 +48,14 @@ def f_t(t, tfl, C, A, alpha, eps: float = 1e-12):
         Proportionality factor.
     alpha : float or array-like
         Rising power-law index.
-    eps : float, optional
-        Small value to avoid numerical issues (default: 1e-12).
+    eps : float, optional, default = 1e-10
+        Small value to avoid numerical issues when t - tfl is small and alpha < 1
 
     Returns:
     --------
     float
         The calculated value of f(t).
     """
-    eps = 1e-20  # avoid numerical issues when t - tfl is small and alpha < 1
     f = jnp.where(t < tfl, 0, A * jnp.power(jnp.maximum(t - tfl, eps), alpha)) + C
     return f
 
@@ -69,14 +69,12 @@ def single_model(
     t: list,
     flux: list = None,
     flux_err: list = None,
-    n_fcqfid: int = 1,
-    n_filt: int = 1,
     idx_fcqfid: list = None,
     idx_filt: list = None,
     prior_params: dict = {},
 ) -> None:
     """
-    Function to model the single light curve of a supernova
+    Bayesian model of the early rise for a single supernova
     in multiple fields, CCDs, quadrants, as well as filters.
 
     Each measurement has a unique fcqf ID defined in Yao et al. (2019)
@@ -87,94 +85,101 @@ def single_model(
     ----------
     t : array-like
         Time values (phase) of the light curve.
-        Phase = (t_obs - t_max) / (1 + z)
+        phase = (t_obs - t_max) / (1 + z)
     flux : array-like
         Flux values of the light curve.
     flux_err : array-like
         Flux error values of the light curve.
-    n_fcqfid, idx_fcqfid : int, array-like
-        Number of unique fcqf IDs and indices used to index the fcqf IDs
-        for each measurement.
-    n_filt, idx_filt : int, array-like
-        Number of unique filters and their indices.
+    idx_fcqfid : int, array-like
+        Indices used to index the fcqf IDs for each measurement.
+    idx_filt : int, array-like
+        Indices of unique filters.
     prior_params : dict, optional
         Dictionary containing the prior information for the model.
         The dictionary should contain the following keys:
             - prior_type : str
                 Type of prior to use for the model.
-                Options: "Miller", "Jeffreys", "Maximum_Entropy"
+                Options: "Miller", "Jeffreys", "Maximum_Entropy", "Flat"
             - mean_alpha : float, optional
                 Mean value of the prior distribution for alpha.
                 Required if prior_type == "Maximum_Entropy".
             - std_alpha : float, optional
                 Standard deviation of the prior distribution for alpha.
                 Required if prior_type == "Maximum_Entropy".
+            - min_alpha : float, optional, default = 0
+                Minimum value of the prior distribution for alpha.
 
     Returns
     -------
     None
     """
 
+    # single filter, single fcqfid
+    if idx_fcqfid is None:
+        idx_fcqfid = jnp.ones_like(t, dtype=int)
+    if idx_filt is None:
+        idx_filt = jnp.zeros_like(t, dtype=int)
+
     prior_type = prior_params.get("prior_type", "Miller")
+
+    n_fcqfid = len(np.unique(idx_fcqfid))
+    n_filt = len(np.unique(idx_filt))
+
+    with numpyro.plate("n_fcqfid", n_fcqfid):
+        # Parameters specific to each fcqf ID (n_fcqfid)
+        # C : Baseline flux
+        # beta : Uncertainty scale factor
+        C = numpyro.sample("C", dist.Uniform(-50, 50))
+        log_beta = numpyro.sample("log_beta", dist.Uniform(-0.3, 0.3))  # ~50%
+        beta = numpyro.deterministic("beta", jnp.power(10, log_beta))
+
+    with numpyro.plate("n_filt", n_filt):
+
+        # Parameters specific to each filter (n_filt)
+        # alpha : Rising power-law index
+        # A : Proportionality factor
+
+        min_alpha = prior_params.get("min_alpha", 0)
+        assert min_alpha >= 0, "Minimum value of alpha must be non-negative"
+        if prior_type == "Miller":  # priors adopted in Miller+2020
+            # Aprime = A * 10**alpha
+            prior_alpha_Miller = dist.Exponential(jnp.log(10))
+            prior_alpha_Miller.support = dist.constraints.interval(min_alpha, 10)
+            alpha = numpyro.sample("alpha", prior_alpha_Miller)
+            log_Aprime = numpyro.sample("log_Aprime", dist.Uniform(-5, 5))
+            A = numpyro.deterministic("A", jnp.power(10, log_Aprime - alpha))
+            numpyro.deterministic("Aprime", jnp.power(10, log_Aprime))
+        else:
+            if prior_type == "Jeffreys":  # Jeffreys prior
+                log_alpha = numpyro.sample("log_alpha-", dist.Uniform(-3, 1))
+                alpha = numpyro.deterministic("alpha", jnp.power(10, log_alpha) + min_alpha)
+
+            elif prior_type in ["Flat", "Uniform"]:
+                alpha = numpyro.sample("alpha", dist.Uniform(min_alpha, 10))
+
+            elif prior_type == "Maximum_Entropy":  # Maximum entropy prior
+                mean_alpha = prior_params.get("mean_alpha", 2)
+                std_alpha = prior_params.get("std_alpha", None)
+
+                if std_alpha is None:  # alpha > min_alpha, known E --> Exponential
+                    lambda_ = 1 / (mean_alpha - min_alpha)
+                    alpha_ = numpyro.sample("alpha-", dist.Exponential(lambda_))
+                else:  # alpha > 1, known E and Var --> Gamma
+                    kappa_ = (mean_alpha - min_alpha) ** 2 / std_alpha**2
+                    lambda_ = (mean_alpha - min_alpha) / std_alpha**2
+                    alpha_ = numpyro.sample("alpha-", dist.Gamma(kappa_, lambda_))
+                alpha = numpyro.deterministic("alpha", alpha_ + min_alpha)
+            else:
+                raise ValueError(
+                    "Invalid prior type. Options: 'Miller', 'Jeffreys', 'Maximum_Entropy', 'Flat' (or 'Uniform')"
+                )
+
+            log_A = numpyro.sample("log_A", dist.Uniform(-5, 5))
+            A = numpyro.deterministic("A", jnp.power(10, log_A))
+            numpyro.deterministic("Aprime", A * jnp.power(10, alpha))
 
     # t_fl : Time of the first light
     tfl = numpyro.sample("t_fl", dist.Uniform(-100, 0))
-
-    # Parameters specific to each fcqf ID (n_fcqfid)
-    # C : Baseline flux
-    # beta : Uncertainty scale factor
-    C = numpyro.sample(
-        "C",
-        dist.Uniform(-100, 100),
-        sample_shape=(n_fcqfid,),
-    )
-    log_beta = numpyro.sample(
-        "log_beta",
-        dist.Uniform(-1, 1),
-        sample_shape=(n_fcqfid,),
-    )
-    beta = numpyro.deterministic("beta", 10**log_beta)
-
-    # Parameters specific to each filter (n_filt)
-    # alpha : Rising power-law index
-    # A : Proportionality factor
-    if prior_type == "Miller":  # priors adopted in Miller+2020
-        # Aprime = A * 10^alpha
-        alpha = numpyro.sample("alpha", dist.Exponential(jnp.log(10)), sample_shape=(n_filt,))
-        log_Aprime = numpyro.sample(
-            "log_Aprime",
-            dist.Uniform(-5, 5),
-            sample_shape=(n_filt,),
-        )
-        numpyro.deterministic("Aprime", jnp.power(10, log_Aprime))
-        A = numpyro.deterministic("A", jnp.power(10, log_Aprime - alpha))
-    else:
-        if prior_type == "Jeffreys":  # Jeffreys prior
-            log_alpha = numpyro.sample("log_alpha", dist.Uniform(-1, 1), sample_shape=(n_filt,))
-            alpha = numpyro.deterministic("alpha", jnp.power(10, log_alpha))
-
-        elif prior_type == "Maximum_Entropy":  # Maximum entropy prior
-            mean_alpha = prior_params.get("mean_alpha", 2)
-            std_alpha = prior_params.get("std_alpha", None)
-
-            if std_alpha is None:  # alpha > 0, known E --> Exponential
-                lambda_ = 1 / mean_alpha
-                alpha = numpyro.sample("alpha", dist.Exponential(lambda_), sample_shape=(n_filt,))
-
-            else:  # alpha > 0, known E and Var --> Gamma
-                kappa_ = mean_alpha**2 / std_alpha**2
-                lambda_ = mean_alpha / std_alpha**2
-                alpha = numpyro.sample("alpha", dist.Gamma(kappa_, lambda_), sample_shape=(n_filt,))
-        else:
-            raise ValueError("Invalid prior type. Options: 'Miller', 'Jeffreys', 'Maximum_Entropy'")
-
-        log_A = numpyro.sample(
-            "log_A",
-            dist.Uniform(-5, 5),
-            sample_shape=(n_filt,),
-        )
-        A = numpyro.deterministic("A", jnp.power(10, log_A))
-        Aprime = numpyro.deterministic("Aprime", A * jnp.power(10, alpha))
 
     with numpyro.plate("data", len(t)):
         numpyro.sample(
@@ -187,9 +192,17 @@ def single_model(
         )
 
 
-def hierarchical_model(t, flux_err, n_fcqfid, idx_fcqfid, n_filt, idx_filt, flux=None):
+def hierarchical_model(
+    t: list,
+    flux: list = None,
+    flux_err: list = None,
+    idx_obj: list = None,
+    idx_fcqfid: list = None,
+    idx_filt: list = None,
+    hyperprior_params: dict = {},
+):
     """
-    Function to model the single light curve of a supernova
+    Hierarchical Bayesian model of the early rise for a library of supernovae
     in multiple fields, CCDs, quadrants, as well as filters.
 
     Each measurement has a unique fcqf ID defined in Yao et al. (2019)
@@ -198,52 +211,116 @@ def hierarchical_model(t, flux_err, n_fcqfid, idx_fcqfid, n_filt, idx_filt, flux
 
     Parameters
     ----------
-    t : array-like
-        Time values (phase) of the light curve.
-        Phase = (t_obs - t_max) / (1 + z)
-    flux : array-like
-        Flux values of the light curve.
-    flux_err : array-like
-        Flux error values of the light curve.
-    n_fcqfid, idx_fcqfid : int
-        Number of unique fcqf IDs and indices used to index the fcqf IDs
-        for each measurement.
-    n_filt, idx_filt : int
-        Number of unique filters and their indices.
+    t : list
+        A list of time value (phase) array of each light curve.
+        phase = (t_obs - t_max) / (1 + z)
+    flux : list
+        A list of flux array of each light curve.
+    flux_err : list
+        A list of flux error array of each light curve.
+    idx_obj : list
+        Indices used to index the objects.
+    idx_fcqfid : list
+        Indices used to index the fcqf IDs for each measurement.
+    idx_filt : list
+        Indices of unique filters.
+    hyperprior_params : dict, optional
+        Dictionary containing the prior information for the model.
+        The dictionary should contain the following keys:
+            - hyperprior_type : str
+                Type of prior to use for the model.
+                Options: "Maximum_Entropy", "Gaussian"/"Gauss"/"Normal"
+            - fix_mean_alpha : bool, default = False
+                Fix the mean of the hyperprior for alpha.
+            - fix_std_alpha : bool, default = False
+                Fix the standard deviation of the hyperprior for alpha.
+            - mean_alpha_0 : float, optional
+                Mean value of the prior distribution for alpha.
+            - std_alpha_0 : float, optional
+                Standard deviation of the prior distribution for alpha.
+            - min_alpha : float, optional, default = 1
+                Minimum value of the prior distribution for alpha.
 
     Returns
     -------
     None
     """
 
-    pass
+    # hyperpriors
+    hyperprior_type = hyperprior_params.get("hyperprior_type", "Maximum_Entropy")
 
-    # # t_fl : Time of the first light
-    # tfl = numpyro.sample("t_fl", dist.Uniform(-50, 0))
+    # maximum entropy prior --> alpha > 1
+    min_alpha = hyperprior_params.get("min_alpha", 0)
+    assert min_alpha >= 0, "Minimum value of alpha must be non-negative"
+    mean_alpha = numpyro.sample("mean_alpha", dist.Uniform(min_alpha, 10))
 
-    # # Parameters specific to each fcqf ID (n_fcqfid)
-    # # C : Baseline flux
-    # C = numpyro.sample(
-    #     "C",
-    #     dist.Normal(0, 1e2),
-    #     sample_shape=(n_fcqfid,),
-    # )
-    # # Uncertainty scale factor
-    # log_beta = numpyro.sample(
-    #     "log_beta",
-    #     dist.Uniform(jnp.zeros(n_fcqfid), 1 * jnp.ones(n_fcqfid)),
-    # )
-    # beta = numpyro.deterministic("beta", 10**log_beta)
+    fix_mean_alpha = hyperprior_params.get("fix_mean_alpha", False)
+    fix_std_alpha = hyperprior_params.get("fix_std_alpha", False)
+    if not fix_mean_alpha:
+        # maximum entropy prior --> positive
+        # log_std_alpha = numpyro.sample("log_std_alpha", dist.Uniform(-3, 1))
+        # std_alpha = numpyro.deterministic("std_alpha", jnp.power(10, log_std_alpha))
+        if fix_std_alpha:
+            std_alpha = hyperprior_params.get("std_alpha_0", 1)
+        else:
+            std_alpha = numpyro.sample("std_alpha", dist.HalfNormal(1))
 
-    # # Parameters specific to each filter (n_filt)
-    # # alpha : Rising power-law index
-    # alpha = numpyro.sample("alpha", dist.Uniform(jnp.zeros(n_filt), 5 * jnp.ones(n_filt)))
-    # # Aprime : Proportionality factor
-    # log_Aprime = numpyro.sample(
-    #     "log_A_prime",
-    #     dist.Uniform(0 * jnp.ones(n_filt), 5 * jnp.ones(n_filt)),
-    # )
-    # A =
+    n_fcqfid = len(np.unique(idx_fcqfid))
+    n_filt = len(np.unique(idx_filt))
+    n_obj = len(np.unique(idx_obj))
+
+    with numpyro.plate("fcqfid", n_fcqfid):
+        # Parameters specific to each fcqf ID for each object (n_fcqfid)
+        # C : Baseline flux
+        # beta : Uncertainty scale factor
+        C = numpyro.sample("C", dist.Uniform(-50, 50))
+        log_beta = numpyro.sample(
+            "log_beta",
+            dist.Uniform(-0.3, 0.3),  # ~50%
+        )
+        beta = numpyro.deterministic(f"beta", jnp.power(10, log_beta))
+
+    if fix_mean_alpha:
+        alpha_input = alpha = mean_alpha
+    else:
+        with numpyro.plate("filt", n_filt):
+            # Parameters specific to each filter (n_filt)
+            # alpha : Rising power-law index
+            if hyperprior_type in ["Gaussian", "Gauss", "Normal"]:  # Gaussian hyperpriors
+                prior_alpha = dist.Normal(mean_alpha, std_alpha)
+                prior_alpha.support = dist.constraints.interval(min_alpha, 10)
+                alpha = numpyro.sample(f"alpha", prior_alpha)
+            elif hyperprior_type == "Maximum_Entropy":  # Maximum entropy (Gamma) hyperpriors
+                concentration_alpha = (mean_alpha - min_alpha) ** 2 / std_alpha**2
+                rate_alpha = (mean_alpha - min_alpha) / std_alpha**2
+                alpha_ = numpyro.sample(f"alpha-", dist.Gamma(concentration_alpha, rate_alpha))
+                alpha = numpyro.deterministic(f"alpha", alpha_ + min_alpha)
+            else:
+                raise ValueError("Invalid hyperprior type. Options: 'Maximum_Entropy' and 'Gaussian'/'Gauss'/'Normal'")
+
+        alpha_input = alpha[idx_filt]
+
+    with numpyro.plate("filt", n_filt):
+        # Parameters specific to each filter (n_filt)
+        # A : Proportionality factor
+        log_A = numpyro.sample(f"log_A", dist.Uniform(-5, 5))
+        A = numpyro.deterministic("A", jnp.power(10, log_A))
+        numpyro.deterministic(f"Aprime", A * jnp.power(10, alpha))
+
+    with numpyro.plate("obj", n_obj):
+        # Parameters specific to each object (n_obj)
+        # t_fl : Time of the first light
+        tfl = numpyro.sample(f"t_fl", dist.Uniform(-100, 0))
+
+    with numpyro.plate(f"data", len(t)):
+        numpyro.sample(
+            f"flux",
+            dist.Normal(
+                f_t(t, tfl[idx_obj], C[idx_fcqfid], A[idx_filt], alpha_input),
+                flux_err * beta[idx_fcqfid],
+            ),
+            obs=flux,
+        )
 
 
 ####################################################################################################
@@ -251,16 +328,64 @@ def hierarchical_model(t, flux_err, n_fcqfid, idx_fcqfid, n_filt, idx_filt, flux
 ####################################################################################################
 
 
+def init_lc_package(lc):
+    """
+    Initialize a light curve package.
+
+    Parameters
+    ----------
+    lc : dict
+        A dictionary containing the light curve data.
+
+    Returns
+    -------
+    dict
+        A dictionary containing the initialized light curve package.
+
+    Raises
+    ------
+    AssertionError
+        If 'phase', 'flux', or 'flux_err' columns are missing in the lc dictionary.
+    AssertionError
+        If the lengths of 'phase', 'flux', and 'flux_err' columns do not match.
+    """
+
+    if lc is None:
+        return None
+    assert "phase" in lc.keys(), "'phase' column required"
+    assert "flux" in lc.keys(), "'flux' column required"
+    assert "flux_err" in lc.keys(), "'flux_err' column required"
+    phase = lc["phase"]
+    flux = lc["flux"]
+    flux_err = lc["flux_err"]
+    assert len(phase) == len(flux) == len(flux_err), "Lengths of the data columns do not match"
+
+    fcqfid = lc.get("fcqfid", np.ones_like(phase, dtype=int))
+    filt = lc.get("filt", np.zeros_like(phase, dtype=int))
+
+    return dict(phase=phase, flux=flux, flux_err=flux_err, fcqfid=fcqfid, filt=filt)
+
+
 class Ia_lc:
 
-    def __init__(self, lc_early: dict = {}, lc_peak: dict = None, ZTFID: str = None) -> None:
-        self.ID = ZTFID
+    def __init__(self, lc_early: dict = {}, lc_peak: dict = None, ztfid: str = None) -> None:
+        self.ID = ztfid
 
         # observations between 40% and 100% of max flux
-        self.lc_early = lc_early
+        self.lc_early = init_lc_package(lc_early)
+
+        fcqfid = self.lc_early["fcqfid"]
+        filt = self.lc_early["filt"]
+
+        # calculate number of unique fcqfid and filter and their indices
+        fcqfid_encoder = LabelEncoder()
+        self.idx_fcqfid = fcqfid_encoder.fit_transform(fcqfid)
+
+        filt_encoder = LabelEncoder()
+        self.idx_filt = filt_encoder.fit_transform(filt)
 
         # observations between -100 days and peak
-        self.lc_peak = lc_peak
+        self.lc_peak = init_lc_package(lc_peak)
 
     def sampling(
         self,
@@ -294,36 +419,24 @@ class Ia_lc:
         None
         """
 
-        fcqfid = self.lc_early["fcqfid"]
-        filt = self.lc_early["filt"]
-        Phase = self.lc_early["Phase"]
-        flux = self.lc_early["flux"]
-        flux_err = self.lc_early["flux_err"]
-
-        # calculate number of unique fcqfid and filter and their indices
-        uni_fcqfid = sorted(list(set(fcqfid)))
-        n_fcqfid = len(uni_fcqfid)
-        idx_fcqfid = np.array([jnp.where(uni_fcqfid == fcqf)[0][0] for fcqf in fcqfid])
-
-        uni_filt = sorted(list(set(filt)))
-        n_filt = len(uni_filt)
-        idx_filt = np.array([jnp.where(uni_filt == f)[0][0] for f in filt])
-
         self.sampler = infer.MCMC(
-            infer.NUTS(single_model),
+            infer.NUTS(
+                single_model,
+                # init_strategy=infer.init_to_value(values={"log_beta": jnp.zeros(self.n_fcqfid)}),
+                target_accept_prob=0.9,
+                step_size=10,
+            ),
             num_warmup=num_warmup,
             num_samples=num_samples,
             num_chains=num_chains,
             progress_bar=True,
         )
         running_params = {
-            "t": Phase,
-            "flux": flux,
-            "flux_err": flux_err,
-            "n_fcqfid": n_fcqfid,
-            "n_filt": n_filt,
-            "idx_fcqfid": idx_fcqfid,
-            "idx_filt": idx_filt,
+            "t": self.lc_early["phase"],
+            "flux": self.lc_early["flux"],
+            "flux_err": self.lc_early["flux_err"],
+            "idx_fcqfid": self.idx_fcqfid,
+            "idx_filt": self.idx_filt,
         }
         self.sampler.run(jax.random.PRNGKey(random_seed), **running_params, prior_params=prior_params)
 
@@ -367,7 +480,7 @@ class Ia_lc:
             is_g = np.all(self.lc_early["filt"][self.lc_early["fcqfid"] == fcqf] == 1)
             color = "tab:green" if is_g else "tab:red"
             ax.errorbar(
-                self.lc_early["Phase"][self.lc_early["fcqfid"] == fcqf],
+                self.lc_early["phase"][self.lc_early["fcqfid"] == fcqf],
                 self.lc_early["flux"][self.lc_early["fcqfid"] == fcqf] - C_ + (is_g - 0.5) * offset,
                 yerr=self.lc_early["flux_err"][self.lc_early["fcqfid"] == fcqf] * beta_,
                 color="w",
@@ -378,7 +491,7 @@ class Ia_lc:
             )
             if self.lc_peak is not None:
                 ax.errorbar(
-                    self.lc_peak["Phase"][self.lc_peak["fcqfid"] == fcqf],
+                    self.lc_peak["phase"][self.lc_peak["fcqfid"] == fcqf],
                     self.lc_peak["flux"][self.lc_peak["fcqfid"] == fcqf] - C_ + (is_g - 0.5) * offset,
                     yerr=self.lc_peak["flux_err"][self.lc_peak["fcqfid"] == fcqf] * beta_,
                     color="w",
@@ -395,7 +508,7 @@ class Ia_lc:
             t_pred = jnp.linspace(ax.get_xlim()[0], ax.get_xlim()[1], 1000)
             for i in idx_post_check:
                 # ax.plot(
-                #     Phase[fcqfid == fcqf],
+                #     phase[fcqfid == fcqf],
                 #     post_pred["flux"][i, fcqfid == fcqf] - C_ + (is_g - 0.5) * offset,
                 #     ".",
                 #     color="0.5",
@@ -428,12 +541,12 @@ class Ia_lc:
                 filename = self.ID
             plt.savefig(filename + ".pdf")
 
-    def plot_corner(self, save: bool = False, filename: str = None, var_names: list = ["t_fl", "alpha", "Aprime"]):
+    def plot_corner(self, save: bool = False, filename: str = None, var_name: list = ["t_fl", "alpha", "Aprime"]):
         import corner
 
         corner.corner(
-            self.inf_data,
-            var_names=var_names,
+            self.inf_data.posterior[var_name],
+            # var_name=var_name,
             show_titles=True,
             title_kwargs={"fontsize": 12},
             quantiles=[0.05, 0.5, 0.95],
@@ -448,7 +561,7 @@ class Ia_lc:
 
 class ZTF_SN_Ia(Ia_lc):
 
-    def __init__(self, tab_info, tab_lc, ZTFID: str) -> None:
+    def __init__(self, tab_info, tab_lc, ztfid: str) -> None:
         """
         Initialize the class instance.
 
@@ -458,7 +571,7 @@ class ZTF_SN_Ia(Ia_lc):
             DataFrame containing information about the object.
         tab_lc : astropy.table.Table
             DataFrame containing light curve data.
-        ZTFID : str
+        ztfid : str
             ZTF ID of the object.
 
         Returns
@@ -466,10 +579,10 @@ class ZTF_SN_Ia(Ia_lc):
         None
         """
 
-        info = tab_info[tab_info["name"] == ZTFID]
-        dat = tab_lc[tab_lc["ZTF"] == ZTFID]
+        info = tab_info[tab_info["name"] == ztfid]
+        dat = tab_lc[tab_lc["ZTF"] == ztfid]
 
-        # Phase = dat["Phase"].value.astype("<f4")
+        # phase = dat["phase"].value.astype("<f4")
         ZP = dat["ZP"].value.astype("<f4")
         flux = dat["Flux"].value.astype("<f4") / (10 ** (0.4 * ZP))
         flux_err = dat["e_Flux"].value.astype("<f4") / (10 ** (0.4 * ZP))
@@ -481,15 +594,15 @@ class ZTF_SN_Ia(Ia_lc):
 
         z = info["z_adopt"].value[0]
 
-        Phase = (dat["JD"].value - self.t0_B) / (1 + z)
+        phase = (dat["JD"].value - self.t0_B) / (1 + z)
 
         fcqfid = dat["fcqfid"].value
         filt = fcqfid % 10
 
         from spec_tool.data_binning import data_binning
 
-        t_g, f_g, _ = data_binning(np.array([Phase, flux, flux_err]).T[filt == 1], 0.5).T
-        t_r, f_r, _ = data_binning(np.array([Phase, flux, flux_err]).T[filt == 2], 0.5).T
+        t_g, f_g, _ = data_binning(np.array([phase, flux, flux_err]).T[filt == 1], 0.5).T
+        t_r, f_r, _ = data_binning(np.array([phase, flux, flux_err]).T[filt == 2], 0.5).T
 
         # max flux from data
         # flux_g_max = np.max(f_g)
@@ -509,14 +622,14 @@ class ZTF_SN_Ia(Ia_lc):
         flux_err[filt == 2] /= flux_r_max / 100
 
         # filter out observations < 40% of max flux
-        idx_rise = (Phase < 0) & (Phase > -100)
-        idx_g = (filt == 1) & (Phase < t_g_40)
-        idx_r = (filt == 2) & (Phase < t_r_40)
+        idx_rise = (phase < 0) & (phase > -100)
+        idx_g = (filt == 1) & (phase < t_g_40)
+        idx_r = (filt == 2) & (phase < t_r_40)
         idx = idx_rise & (idx_g | idx_r)
 
         # observations between 40% and 100% of max flux
         lc_early = {
-            "Phase": Phase[idx],
+            "phase": phase[idx],
             "flux": flux[idx],
             "flux_err": flux_err[idx],
             "fcqfid": fcqfid[idx],
@@ -525,11 +638,218 @@ class ZTF_SN_Ia(Ia_lc):
 
         # observations between -100 days and peak
         lc_peak = {
-            "Phase": Phase[idx_rise],
+            "phase": phase[idx_rise],
             "flux": flux[idx_rise],
             "flux_err": flux_err[idx_rise],
             "fcqfid": fcqfid[idx_rise],
             "filt": filt[idx_rise],
         }
 
-        super().__init__(lc_early=lc_early, lc_peak=lc_peak, ZTFID=ZTFID)
+        super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid)
+
+
+class Ia_lc_library:
+
+    def __init__(self, lc_early_lib: list = None, lc_peak_lib: list = None, ztfid_lib: list = None) -> None:
+
+        self.lc_library = []
+        if (lc_peak_lib is not None) and (ztfid_lib is not None):
+            for k, lc_early in enumerate(lc_early_lib):
+                self.lc_library.append(Ia_lc(lc_early=lc_early, lc_peak=lc_peak_lib[k], ztfid=ztfid_lib[k]))
+        elif lc_peak_lib is not None:
+            for k, lc_early in enumerate(lc_early_lib):
+                self.lc_library.append(Ia_lc(lc_early=lc_early, lc_peak=lc_peak_lib[k]))
+        elif ztfid_lib is not None:
+            for k, lc_early in enumerate(lc_early_lib):
+                self.lc_library.append(Ia_lc(lc_early=lc_early, ztfid=ztfid_lib[k]))
+        else:
+            for k, lc_early in enumerate(lc_early_lib):
+                self.lc_library.append(Ia_lc(lc_early=lc_early))
+
+        self.phase, self.flux, self.flux_err = [], [], []
+        self.idx_filt, self.idx_fcqfid = np.array([], dtype=int), np.array([], dtype=int)
+        self.idx_obj = np.array([], dtype=int)
+
+        for k in range(len(lc_early_lib)):
+            # concatenate the light curve data
+            self.phase = np.append(self.phase, self.lc_library[k].lc_early["phase"])
+            self.flux = np.append(self.flux, self.lc_library[k].lc_early["flux"])
+            self.flux_err = np.append(self.flux_err, self.lc_library[k].lc_early["flux_err"])
+            # concatenate the indices
+            self.idx_filt = np.append(self.idx_filt, self.lc_library[k].idx_filt + len(self.phase))
+            self.idx_fcqfid = np.append(self.idx_fcqfid, self.lc_library[k].idx_fcqfid + len(self.phase))
+            self.idx_obj = np.append(self.idx_obj, np.ones_like(self.lc_library[k].idx_filt) * k)
+
+        print("Number of objects:", len(lc_early_lib))
+        print("Number of unique filters:", len(np.unique(self.idx_filt)))
+        print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
+        print("Light curves compiled...")
+
+    def sampling(
+        self,
+        num_samples: int = 2000,
+        num_warmup: int = 2000,
+        num_chains: int = 2,
+        random_seed: int = 11,
+        prior_pred_samples: int = 500,
+        hyperprior_params: dict = {},
+    ):
+        """
+        Perform MCMC sampling using NUTS algorithm.
+
+        Parameters
+        ----------
+        num_samples : int, optional
+            Number of samples to draw from the posterior distribution (default: 2000).
+        num_warmup : int, optional
+            Number of warmup samples to discard (default: 2000).
+        num_chains : int, optional
+            Number of chains to run (default: 2).
+        random_seed : int, optional
+            Random seed for reproducibility (default: 11).
+        prior_pred_samples : int, optional
+            Number of samples to draw from the prior predictive distribution (default: 500).
+        hyperprior_params : dict, optional
+            Dictionary containing the prior information for the model.
+
+        Returns
+        -------
+        None
+        """
+
+        self.sampler = infer.MCMC(
+            infer.NUTS(hierarchical_model),
+            num_warmup=num_warmup,
+            num_samples=num_samples,
+            num_chains=num_chains,
+            progress_bar=True,
+        )
+        running_params = {
+            "t": self.phase,
+            "flux": self.flux,
+            "flux_err": self.flux_err,
+            "idx_obj": self.idx_obj,
+            "idx_fcqfid": self.idx_fcqfid,
+            "idx_filt": self.idx_filt,
+        }
+        self.sampler.run(jax.random.PRNGKey(random_seed), **running_params, hyperprior_params=hyperprior_params)
+
+        # prior and posterior predictive checks
+        prior_pred = infer.Predictive(hierarchical_model, num_samples=prior_pred_samples)(
+            jax.random.PRNGKey(1919810), **running_params, hyperprior_params=hyperprior_params
+        )
+        post_pred = infer.Predictive(hierarchical_model, self.sampler.get_samples())(
+            jax.random.PRNGKey(114514), **running_params, hyperprior_params=hyperprior_params
+        )
+        # convert to arviz InferenceData
+        self.inf_data = az.from_numpyro(self.sampler, prior=prior_pred, posterior_predictive=post_pred)
+
+    def plot_lc(self, save: bool = False, filename: str = None, offset: float = 30, post_pred_samples: int = 25):
+        """
+        Plot the light curve and the inferred model.
+
+        Parameters
+        ----------
+        save : bool, optional
+            Save the figure if True (default: False).
+        filename : str, optional, default=self.ID
+            Filename to save the figure.
+        offset : float, optional, default=30
+            Offset to separate g & r light curves in the plot.
+
+        Returns
+        -------
+        None
+        """
+
+        # _, ax = plt.subplots(figsize=(8, 4), sharex=True, sharey=True, constrained_layout=True)
+
+        # post_sample = self.sampler.get_samples()
+
+        # idx_post_check = np.random.choice(len(post_sample["t_fl"]), post_pred_samples)
+
+        # for k, fcqf in enumerate(np.sort(np.unique(self.lc_early["fcqfid"]))):
+        #     C_ = np.median(post_sample["C"][:, k])
+        #     beta_ = np.median(post_sample["beta"][:, k])
+        #     is_g = np.all(self.lc_early["filt"][self.lc_early["fcqfid"] == fcqf] == 1)
+        #     color = "tab:green" if is_g else "tab:red"
+        #     ax.errorbar(
+        #         self.lc_early["phase"][self.lc_early["fcqfid"] == fcqf],
+        #         self.lc_early["flux"][self.lc_early["fcqfid"] == fcqf] - C_ + (is_g - 0.5) * offset,
+        #         yerr=self.lc_early["flux_err"][self.lc_early["fcqfid"] == fcqf] * beta_,
+        #         color="w",
+        #         markeredgecolor=color,
+        #         ecolor=color,
+        #         fmt="o",
+        #         zorder=10,
+        #     )
+        #     if self.lc_peak is not None:
+        #         ax.errorbar(
+        #             self.lc_peak["phase"][self.lc_peak["fcqfid"] == fcqf],
+        #             self.lc_peak["flux"][self.lc_peak["fcqfid"] == fcqf] - C_ + (is_g - 0.5) * offset,
+        #             yerr=self.lc_peak["flux_err"][self.lc_peak["fcqfid"] == fcqf] * beta_,
+        #             color="w",
+        #             markeredgecolor=color,
+        #             ecolor=color,
+        #             fmt="o",
+        #             alpha=0.25,
+        #             zorder=10,
+        #         )
+
+        #     ax.set_xlim(-31, -4)
+        #     ax.set_ylim(-offset * 1.5, 100)
+
+        #     t_pred = jnp.linspace(ax.get_xlim()[0], ax.get_xlim()[1], 1000)
+        #     for i in idx_post_check:
+        #         # ax.plot(
+        #         #     phase[fcqfid == fcqf],
+        #         #     post_pred["flux"][i, fcqfid == fcqf] - C_ + (is_g - 0.5) * offset,
+        #         #     ".",
+        #         #     color="0.5",
+        #         #     alpha=0.1,
+        #         # )
+
+        #         A = post_sample["A"][i, fcqf % 10 - 1]
+        #         alpha = post_sample["alpha"][i, fcqf % 10 - 1]
+        #         ax.plot(
+        #             t_pred,
+        #             f_t(t_pred, post_sample["t_fl"][i], 0, A, alpha) + (is_g - 0.5) * offset,
+        #             color="0.2",
+        #             lw=0.1,
+        #             zorder=-1,
+        #         )
+
+        # for i in idx_post_check:
+        #     ax.axvline(post_sample["t_fl"][i], color="0.2", lw=0.1)
+
+        # ax.set_xlabel(r"$t - T_{B, \mathrm{max}}\ [\mathrm{restframe\ d}]$")
+        # ax.set_ylabel(r"$f + \mathrm{offset}$")
+        # ax.xaxis.set_major_locator(MultipleLocator(5))
+        # ax.xaxis.set_minor_locator(MultipleLocator(1))
+        # ax.yaxis.set_major_locator(MultipleLocator(25))
+        # ax.yaxis.set_minor_locator(MultipleLocator(5))
+        # ax.set_title(self.ID)
+
+        # if save:
+        #     if filename is None:
+        #         filename = self.ID
+        #     plt.savefig(filename + ".pdf")
+        pass
+
+    def plot_corner(self, save: bool = False, filename: str = None, var_name: list = ["mean_alpha", "std_alpha"]):
+
+        import corner
+
+        corner.corner(
+            self.inf_data.posterior[var_name],
+            # var_name=var_name,
+            show_titles=True,
+            title_kwargs={"fontsize": 12},
+            quantiles=[0.05, 0.5, 0.95],
+            title_quantiles=[0.05, 0.5, 0.95],
+        )
+
+        if save:
+            if filename is None:
+                filename = self.ID
+            plt.savefig(filename + "_corner.pdf")
