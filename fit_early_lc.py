@@ -191,6 +191,153 @@ def single_model(
             obs=flux,
         )
 
+def unpooled_model(
+    t: list,
+    flux: list = None,
+    flux_err: list = None,
+    idx_obj: list = None,
+    idx_fcqfid: list = None,
+    idx_filt: list = None,
+    prior_params: dict = {},
+):
+    """
+
+    Returns
+    -------
+    None
+    """
+
+    pass
+
+def pooled_model(
+    t: list,
+    flux: list = None,
+    flux_err: list = None,
+    idx_obj: list = None,
+    idx_fcqfid: list = None,
+    idx_filt: list = None,
+    idx_filt_grz: list = None,
+    prior_params: dict = {},
+):
+    """
+    Bayesian model of the early rise for a library of supernovae
+    in multiple fields, CCDs, quadrants, as well as filters.
+
+    In this pooled model, it is assumed that the rising power-law index alpha is the same
+    in each filter among different objects.
+
+    Each measurement has a unique fcqf ID defined in Yao et al. (2019)
+        (fcqf ID) = (field ID) * 10000 + (CCD ID) * 100
+                  + (quadrant ID) * 10 + (filter ID)
+
+    Parameters
+    ----------
+    t : list
+        A list of time value (phase) array of each light curve.
+        phase = (t_obs - t_max) / (1 + z)
+    flux : list
+        A list of flux array of each light curve.
+    flux_err : list
+        A list of flux error array of each light curve.
+    idx_obj : list
+        Indices used to index the objects.
+    idx_fcqfid : list
+        Indices used to index the fcqf IDs for each measurement.
+        Same icqf IDs on different objects are labeled as different.
+    idx_filt : list
+        Indices of unique filters.
+        Same filters on different objects are labeled as different.
+    idx_filt_grz : list
+        Indices of unique filters for g, r, and z bands.
+    prior_params : dict, optional
+        Dictionary containing the prior information for the model.
+        The dictionary should contain the following keys:
+            - prior_type : str
+                Type of prior to use for the model.
+                Options: "Miller", "Jeffreys", "Maximum_Entropy", "Flat"
+            - mean_alpha : float, optional
+                Mean value of the prior distribution for alpha.
+                Required if prior_type == "Maximum_Entropy".
+            - std_alpha : float, optional
+                Standard deviation of the prior distribution for alpha.
+                Required if prior_type == "Maximum_Entropy".
+            - min_alpha : float, optional, default = 0
+                Minimum value of the prior distribution for alpha.
+
+    Returns
+    -------
+    None
+    """
+
+    n_fcqfid = len(np.unique(idx_fcqfid))
+    n_filt = len(np.unique(idx_filt))
+    n_filt_grz = len(np.unique(idx_filt_grz))
+    n_obj = len(np.unique(idx_obj))
+
+    with numpyro.plate("fcqfid", n_fcqfid):
+        # Parameters specific to each fcqf ID for each object (n_fcqfid)
+        # C : Baseline flux
+        C = numpyro.sample("C", dist.Uniform(-50, 50))
+
+        # beta : Uncertainty scale factor
+        log_beta = numpyro.sample(
+            "log_beta",
+            dist.Uniform(-0.3, 0.3),  # ~50%
+        )
+        beta = numpyro.deterministic(f"beta", jnp.power(10, log_beta))
+
+    prior_type = prior_params.get("prior_type", "Maximum_Entropy")
+    min_alpha = prior_params.get("min_alpha", 0)
+    with numpyro.plate("filt_grz", n_filt_grz):
+        # Parameters specific to each filter for g, r, z bands (n_filt_grz)
+        # alpha : Rising power-law index
+        if prior_type == "Jeffreys":  # Jeffreys prior
+            log_alpha = numpyro.sample("log_alpha-", dist.Uniform(-3, 1))
+            alpha = numpyro.deterministic("alpha", jnp.power(10, log_alpha) + min_alpha)
+
+        elif prior_type in ["Flat", "Uniform"]:
+            alpha = numpyro.sample("alpha", dist.Uniform(min_alpha, 10))
+
+        elif prior_type == "Maximum_Entropy":  # Maximum entropy prior
+            mean_alpha = prior_params.get("mean_alpha", 2)
+            std_alpha = prior_params.get("std_alpha", None)
+
+            if std_alpha is None:  # alpha > min_alpha, known E --> Exponential
+                lambda_ = 1 / (mean_alpha - min_alpha)
+                alpha_ = numpyro.sample("alpha-", dist.Exponential(lambda_))
+            else:  # alpha > 1, known E and Var --> Gamma
+                kappa_ = (mean_alpha - min_alpha) ** 2 / std_alpha**2
+                lambda_ = (mean_alpha - min_alpha) / std_alpha**2
+                alpha_ = numpyro.sample("alpha-", dist.Gamma(kappa_, lambda_))
+            alpha = numpyro.deterministic("alpha", alpha_ + min_alpha)
+        else:
+            raise ValueError(
+                "Invalid prior type. Options: 'Jeffreys', 'Maximum_Entropy', 'Flat' (or 'Uniform')"
+            )
+
+    with numpyro.plate("filt", n_filt):
+        # Parameters specific to each filter (n_filt)
+        # A : Proportionality factor
+        log_A = numpyro.sample(f"log_A", dist.Uniform(-5, 5))
+        A = numpyro.deterministic("A", jnp.power(10, log_A))
+
+    numpyro.deterministic(f"Aprime", A[idx_filt] * jnp.power(10, alpha[idx_filt_grz]))
+
+    with numpyro.plate("obj", n_obj):
+        # Parameters specific to each object (n_obj)
+        # t_fl : Time of the first light
+        tfl = numpyro.sample(f"t_fl", dist.Uniform(-100, 0))
+
+    with numpyro.plate(f"data", len(t)):
+        numpyro.sample(
+            f"flux",
+            dist.Normal(
+                f_t(t, tfl[idx_obj], C[idx_fcqfid], A[idx_filt], alpha[idx_filt]),
+                flux_err * beta[idx_fcqfid],
+            ),
+            obs=flux,
+        )
+
 
 def hierarchical_model(
     t: list,
@@ -199,7 +346,7 @@ def hierarchical_model(
     idx_obj: list = None,
     idx_fcqfid: list = None,
     idx_filt: list = None,
-    hyperprior_params: dict = {},
+    prior_params: dict = {},
 ):
     """
     Hierarchical Bayesian model of the early rise for a library of supernovae
@@ -222,22 +369,16 @@ def hierarchical_model(
         Indices used to index the objects.
     idx_fcqfid : list
         Indices used to index the fcqf IDs for each measurement.
+        Same icqf IDs on different objects are labeled as different.
     idx_filt : list
         Indices of unique filters.
-    hyperprior_params : dict, optional
+        Same filters on different objects are labeled as different.
+    prior_params : dict, optional
         Dictionary containing the prior information for the model.
         The dictionary should contain the following keys:
-            - hyperprior_type : str
+            - prior_type : str
                 Type of prior to use for the model.
                 Options: "Maximum_Entropy", "Gaussian"/"Gauss"/"Normal"
-            - fix_mean_alpha : bool, default = False
-                Fix the mean of the hyperprior for alpha.
-            - fix_std_alpha : bool, default = False
-                Fix the standard deviation of the hyperprior for alpha.
-            - mean_alpha_0 : float, optional
-                Mean value of the prior distribution for alpha.
-            - std_alpha_0 : float, optional
-                Standard deviation of the prior distribution for alpha.
             - min_alpha : float, optional, default = 1
                 Minimum value of the prior distribution for alpha.
 
@@ -247,23 +388,23 @@ def hierarchical_model(
     """
 
     # hyperpriors
-    hyperprior_type = hyperprior_params.get("hyperprior_type", "Maximum_Entropy")
+    # alpha : Rising power-law index
+    prior_type = prior_params.get("prior_type", "Maximum_Entropy")
 
     # maximum entropy prior --> alpha > 1
-    min_alpha = hyperprior_params.get("min_alpha", 0)
+    min_alpha = prior_params.get("min_alpha", 0)
     assert min_alpha >= 0, "Minimum value of alpha must be non-negative"
     mean_alpha = numpyro.sample("mean_alpha", dist.Uniform(min_alpha, 10))
 
-    fix_mean_alpha = hyperprior_params.get("fix_mean_alpha", False)
-    fix_std_alpha = hyperprior_params.get("fix_std_alpha", False)
-    if not fix_mean_alpha:
-        # maximum entropy prior --> positive
-        # log_std_alpha = numpyro.sample("log_std_alpha", dist.Uniform(-3, 1))
-        # std_alpha = numpyro.deterministic("std_alpha", jnp.power(10, log_std_alpha))
-        if fix_std_alpha:
-            std_alpha = hyperprior_params.get("std_alpha_0", 1)
-        else:
-            std_alpha = numpyro.sample("std_alpha", dist.HalfNormal(1))
+    ## maximum entropy prior --> positive
+    # log_std_alpha = numpyro.sample("log_std_alpha", dist.Uniform(-3, 1))
+    # std_alpha = numpyro.deterministic("std_alpha", jnp.power(10, log_std_alpha))
+    std_alpha = numpyro.sample("std_alpha", dist.HalfNormal(0.1))
+
+    mean_tfl = numpyro.sample("mean_t_fl", dist.Uniform(-100, 0))
+    # log_std_tfl = numpyro.sample("log_std_t_fl", dist.Uniform(-3, 1))
+    # std_tfl = numpyro.deterministic("std_t_fl", jnp.power(10, log_std_tfl))
+    std_tfl = numpyro.sample("std_t_fl", dist.HalfNormal(1))
 
     n_fcqfid = len(np.unique(idx_fcqfid))
     n_filt = len(np.unique(idx_filt))
@@ -272,36 +413,30 @@ def hierarchical_model(
     with numpyro.plate("fcqfid", n_fcqfid):
         # Parameters specific to each fcqf ID for each object (n_fcqfid)
         # C : Baseline flux
-        # beta : Uncertainty scale factor
         C = numpyro.sample("C", dist.Uniform(-50, 50))
+
+        # beta : Uncertainty scale factor
         log_beta = numpyro.sample(
             "log_beta",
             dist.Uniform(-0.3, 0.3),  # ~50%
         )
         beta = numpyro.deterministic(f"beta", jnp.power(10, log_beta))
 
-    if fix_mean_alpha:
-        alpha_input = alpha = mean_alpha
-    else:
-        with numpyro.plate("filt", n_filt):
-            # Parameters specific to each filter (n_filt)
-            # alpha : Rising power-law index
-            if hyperprior_type in ["Gaussian", "Gauss", "Normal"]:  # Gaussian hyperpriors
-                prior_alpha = dist.Normal(mean_alpha, std_alpha)
-                prior_alpha.support = dist.constraints.interval(min_alpha, 10)
-                alpha = numpyro.sample(f"alpha", prior_alpha)
-            elif hyperprior_type == "Maximum_Entropy":  # Maximum entropy (Gamma) hyperpriors
-                concentration_alpha = (mean_alpha - min_alpha) ** 2 / std_alpha**2
-                rate_alpha = (mean_alpha - min_alpha) / std_alpha**2
-                alpha_ = numpyro.sample(f"alpha-", dist.Gamma(concentration_alpha, rate_alpha))
-                alpha = numpyro.deterministic(f"alpha", alpha_ + min_alpha)
-            else:
-                raise ValueError("Invalid hyperprior type. Options: 'Maximum_Entropy' and 'Gaussian'/'Gauss'/'Normal'")
-
-        alpha_input = alpha[idx_filt]
-
     with numpyro.plate("filt", n_filt):
         # Parameters specific to each filter (n_filt)
+        # alpha : Rising power-law index
+        if prior_type in ["Gaussian", "Gauss", "Normal"]:  # Gaussian hyperpriors
+            prior_alpha = dist.Normal(mean_alpha, std_alpha)
+            prior_alpha.support = dist.constraints.interval(min_alpha, 10)
+            alpha = numpyro.sample(f"alpha", prior_alpha)
+        elif prior_type == "Maximum_Entropy":  # Maximum entropy (Gamma) hyperpriors
+            concentration_alpha = (mean_alpha - min_alpha) ** 2 / std_alpha**2
+            rate_alpha = (mean_alpha - min_alpha) / std_alpha**2
+            alpha_ = numpyro.sample(f"alpha-", dist.Gamma(concentration_alpha, rate_alpha))
+            alpha = numpyro.deterministic(f"alpha", alpha_ + min_alpha)
+        else:
+            raise ValueError("Invalid hyperprior type. Options: 'Maximum_Entropy' and 'Gaussian'/'Gauss'/'Normal'")
+
         # A : Proportionality factor
         log_A = numpyro.sample(f"log_A", dist.Uniform(-5, 5))
         A = numpyro.deterministic("A", jnp.power(10, log_A))
@@ -310,13 +445,14 @@ def hierarchical_model(
     with numpyro.plate("obj", n_obj):
         # Parameters specific to each object (n_obj)
         # t_fl : Time of the first light
-        tfl = numpyro.sample(f"t_fl", dist.Uniform(-100, 0))
+        # tfl = numpyro.sample(f"t_fl", dist.Uniform(-100, 0))
+        tfl = numpyro.sample(f"t_fl", dist.Normal(mean_tfl, std_tfl))
 
     with numpyro.plate(f"data", len(t)):
         numpyro.sample(
             f"flux",
             dist.Normal(
-                f_t(t, tfl[idx_obj], C[idx_fcqfid], A[idx_filt], alpha_input),
+                f_t(t, tfl[idx_obj], C[idx_fcqfid], A[idx_filt], alpha[idx_filt]),
                 flux_err * beta[idx_fcqfid],
             ),
             obs=flux,
@@ -389,12 +525,13 @@ class Ia_lc:
 
     def sampling(
         self,
-        num_samples: int = 2000,
-        num_warmup: int = 2000,
+        num_samples: int = 3000,
+        num_warmup: int = 1000,
         num_chains: int = 2,
         random_seed: int = 11,
         prior_pred_samples: int = 500,
         prior_params: dict = {},
+        nuts_params: dict = {},
     ):
         """
         Perform MCMC sampling using NUTS algorithm.
@@ -413,6 +550,8 @@ class Ia_lc:
             Number of samples to draw from the prior predictive distribution (default: 500).
         prior_params : dict, optional
             Dictionary containing the prior information for the model.
+        nuts_params : dict, optional
+            Dictionary containing the parameters for infer.NUTS.
 
         Returns
         -------
@@ -420,12 +559,7 @@ class Ia_lc:
         """
 
         self.sampler = infer.MCMC(
-            infer.NUTS(
-                single_model,
-                # init_strategy=infer.init_to_value(values={"log_beta": jnp.zeros(self.n_fcqfid)}),
-                target_accept_prob=0.9,
-                step_size=10,
-            ),
+            infer.NUTS(single_model, **nuts_params),
             num_warmup=num_warmup,
             num_samples=num_samples,
             num_chains=num_chains,
@@ -671,14 +805,16 @@ class Ia_lc_library:
         self.idx_obj = np.array([], dtype=int)
 
         for k in range(len(lc_early_lib)):
+            # concatenate the indices
+            self.idx_filt = np.append(self.idx_filt, self.lc_library[k].idx_filt + len(np.unique(self.idx_filt)))
+            self.idx_fcqfid = np.append(
+                self.idx_fcqfid, self.lc_library[k].idx_fcqfid + len(np.unique(self.idx_fcqfid))
+            )
+            self.idx_obj = np.append(self.idx_obj, np.ones_like(self.lc_library[k].idx_filt) * k)
             # concatenate the light curve data
             self.phase = np.append(self.phase, self.lc_library[k].lc_early["phase"])
             self.flux = np.append(self.flux, self.lc_library[k].lc_early["flux"])
             self.flux_err = np.append(self.flux_err, self.lc_library[k].lc_early["flux_err"])
-            # concatenate the indices
-            self.idx_filt = np.append(self.idx_filt, self.lc_library[k].idx_filt + len(self.phase))
-            self.idx_fcqfid = np.append(self.idx_fcqfid, self.lc_library[k].idx_fcqfid + len(self.phase))
-            self.idx_obj = np.append(self.idx_obj, np.ones_like(self.lc_library[k].idx_filt) * k)
 
         print("Number of objects:", len(lc_early_lib))
         print("Number of unique filters:", len(np.unique(self.idx_filt)))
@@ -687,12 +823,13 @@ class Ia_lc_library:
 
     def sampling(
         self,
-        num_samples: int = 2000,
-        num_warmup: int = 2000,
+        num_samples: int = 1000,
+        num_warmup: int = 3000,
         num_chains: int = 2,
         random_seed: int = 11,
         prior_pred_samples: int = 500,
-        hyperprior_params: dict = {},
+        prior_params: dict = {},
+        nuts_params: dict = {},
     ):
         """
         Perform MCMC sampling using NUTS algorithm.
@@ -700,17 +837,19 @@ class Ia_lc_library:
         Parameters
         ----------
         num_samples : int, optional
-            Number of samples to draw from the posterior distribution (default: 2000).
+            Number of samples to draw from the posterior distribution (default: 1000).
         num_warmup : int, optional
-            Number of warmup samples to discard (default: 2000).
+            Number of warmup samples to discard (default: 3000).
         num_chains : int, optional
             Number of chains to run (default: 2).
         random_seed : int, optional
             Random seed for reproducibility (default: 11).
         prior_pred_samples : int, optional
             Number of samples to draw from the prior predictive distribution (default: 500).
-        hyperprior_params : dict, optional
+        prior_params : dict, optional
             Dictionary containing the prior information for the model.
+        nuts_params : dict, optional
+            Dictionary containing the parameters for infer.NUTS.
 
         Returns
         -------
@@ -718,11 +857,10 @@ class Ia_lc_library:
         """
 
         self.sampler = infer.MCMC(
-            infer.NUTS(hierarchical_model),
+            infer.NUTS(hierarchical_model, **nuts_params),
             num_warmup=num_warmup,
             num_samples=num_samples,
             num_chains=num_chains,
-            progress_bar=True,
         )
         running_params = {
             "t": self.phase,
@@ -732,14 +870,18 @@ class Ia_lc_library:
             "idx_fcqfid": self.idx_fcqfid,
             "idx_filt": self.idx_filt,
         }
-        self.sampler.run(jax.random.PRNGKey(random_seed), **running_params, hyperprior_params=hyperprior_params)
+        self.sampler.run(
+            jax.random.PRNGKey(random_seed),
+            **running_params,
+            prior_params=prior_params,
+        )
 
         # prior and posterior predictive checks
         prior_pred = infer.Predictive(hierarchical_model, num_samples=prior_pred_samples)(
-            jax.random.PRNGKey(1919810), **running_params, hyperprior_params=hyperprior_params
+            jax.random.PRNGKey(1919810), **running_params, prior_params=prior_params
         )
         post_pred = infer.Predictive(hierarchical_model, self.sampler.get_samples())(
-            jax.random.PRNGKey(114514), **running_params, hyperprior_params=hyperprior_params
+            jax.random.PRNGKey(114514), **running_params, prior_params=prior_params
         )
         # convert to arviz InferenceData
         self.inf_data = az.from_numpyro(self.sampler, prior=prior_pred, posterior_predictive=post_pred)
