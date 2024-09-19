@@ -1,11 +1,5 @@
-from matplotlib.pylab import ranf
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
-from astropy.io import fits
-from astropy.table import Table
-from matplotlib.ticker import MultipleLocator
-from requests import post
 import seaborn as sns
 
 import numpyro
@@ -32,7 +26,7 @@ plt.rcParams.update(
     }
 )
 
-from fit_early_lc import f_t, Ia_lc
+from fit_early_lc import f_t, Ia_lc, Ia_lc_library
 
 
 def generate_flux_err(flux, ZP=0, method="broken_power_law"):
@@ -46,36 +40,62 @@ def generate_flux_err(flux, ZP=0, method="broken_power_law"):
             """
             Broken power law function - mag v.s. S/N (default values adopted from the fit to the r-band data in Yao et al. 2019)
             """
-            log_err = 0.5 * jnp.log10((jnp.power(10, (y0 + k1 * (x - x0)) * 2) + jnp.power(10, (y0 + k2 * (x - x0)) * 2)))
+            log_err = 0.5 * jnp.log10(
+                (jnp.power(10, (y0 + k1 * (x - x0)) * 2) + jnp.power(10, (y0 + k2 * (x - x0)) * 2))
+            )
             log_sky_noise = y0
             return np.where(np.isfinite(x) & ~np.isnan(x), log_err, log_sky_noise)
-                
+
         return 10 ** (log_broken_powerlaw(mag) + 0.4 * ZP)
     else:
         raise ValueError("Method not recognized")
 
 
-class Ia_lc_lib:
-
-    def __init__(self, cadence, n_lc, tfl_true, C_true, A_true, alpha_true, mag_peak: float = 17.5):
+class mock_lc_library(Ia_lc_library):
+    def __init__(
+        self,
+        cadence: float = 1,
+        n_lc: int = 10,
+        var_true: dict = dict(t_fl=-20.0, C=0.0, A=0.4, alpha=2.0),
+        var_std: dict = dict(t_fl=1.0, C=0.1, A=0.1, alpha=0.1),
+        fix_values: bool = True,
+        mag_peak: float = 17.5,
+    ) -> None:
         t_sample = jnp.arange(-100, 0, step=cadence)
         n_sample = len(t_sample)
 
-        lc_lib = np.empty(shape=n_lc, dtype=object)
+        lc_early_lib = np.empty(shape=n_lc, dtype=object)
+
+        t_fl_true = var_true.get("t_fl", -20.0)
+        C_true = var_true.get("C", 0.0)
+        A_true = var_true.get("A", 0.4)
+        alpha_true = var_true.get("alpha", 2.0)
+
+        if fix_values:
+            t_fl = t_fl_true * jnp.ones(n_lc)
+            C = C_true * jnp.ones(n_lc)
+            A = A_true * jnp.ones(n_lc)
+            alpha = alpha_true * jnp.ones(n_lc)
+        else:
+            t_fl = jnp.random.randn(n_lc) * (var_std.get("t_fl", 1.0)) + t_fl_true
+            C = jnp.random.randn(n_lc) * (var_std.get("C", 0.1)) + C_true
+            A = jnp.random.randn(n_lc) * (var_std.get("A", 0.1)) + A_true
+            alpha = jnp.random.randn(n_lc) * (var_std.get("alpha", 0.1)) + alpha_true
 
         for k in range(n_lc):
             np.random.seed(k + 114514)
-            t_jitter = np.random.randn(n_sample) * 0.05
+            t_jitter = np.random.randn(n_sample) * 0.05  # 0.05 days = 1.2 hours
             t_jitter -= t_jitter[
-                np.argmin(np.abs(t_sample - tfl_true))
+                np.argmin(np.abs(t_sample - t_fl[k]))
             ]  # ensure jitter=0 when t=t_fl -> SN observed right after the exposion
             t_shift = cadence / n_lc * k  # delay the first detection time
+            self.t_first_det = t_shift
             t_mock = t_sample + t_jitter + t_shift
-            flux_true = f_t(t=t_mock, tfl=tfl_true, C=C_true, A=A_true, alpha=alpha_true)
+            flux_true = f_t(t=t_mock, t_fl=t_fl[k], C=C[k], A=A[k], alpha=alpha[k])
 
             mag_40 = mag_peak + 2.5 * np.log10(0.4)  # 40% of peak
             idx_early = t_mock < -10  # assuming 40% of peak is achieved at phase=-10 days
-            flux_40 = f_t(t=-10, tfl=tfl_true, C=0, A=A_true, alpha=alpha_true)
+            flux_40 = f_t(t=-10, t_fl=t_fl[k], C=0, A=A[k], alpha=alpha[k])
             ZP_mock = 2.5 * np.log10(flux_40) + mag_40
 
             t_mock_early = t_mock[idx_early]
@@ -83,23 +103,12 @@ class Ia_lc_lib:
             flux_err_mock_early = generate_flux_err(flux_true_early, ZP=ZP_mock, method="broken_power_law")
             flux_mock_early = flux_true_early + np.random.randn(idx_early.sum()) * flux_err_mock_early
 
-            mock = Ia_lc(lc_early=dict(phase=t_mock_early, flux=flux_mock_early, flux_err=flux_err_mock_early))
-            lc_lib[k] = mock
+            lc_early_lib[k] = dict(phase=t_mock_early, flux=flux_mock_early, flux_err=flux_err_mock_early)
 
-        self.lc_lib = lc_lib
+        super().__init__(lc_early_lib=lc_early_lib)
         self.n_lc = n_lc
-        self.var_true = dict(t_fl=tfl_true, C=C_true, A=A_true, alpha=alpha_true)
+        self.var_true = var_true
         self.var_name = dict(t_fl=r"$t_\mathrm{fl}$", C=r"$C$", A=r"$A$", alpha=r"$\alpha$")
-
-    def sampling(self, prior_params: dict = None, prior_pred_samples: int = 4000, hierarchical: bool = False):
-        if not hierarchical:
-            lc_lib_inf = np.empty(shape=len(self.lc_lib), dtype=object)
-            for k, mock in enumerate(self.lc_lib):
-                mock.sampling(prior_params=prior_params, prior_pred_samples=prior_pred_samples)
-                lc_lib_inf[k] = mock.inf_data
-            self.lc_lib_inf = lc_lib_inf
-        else:
-            pass
 
     def plot_prior_posterior(self, var_name: list = ["alpha", "t_fl"], var_range: dict = None):
         if var_range is None:
@@ -110,15 +119,14 @@ class Ia_lc_lib:
         cmap = plt.get_cmap("coolwarm")  # Choose a colormap
 
         for i, var in enumerate(var_name):
-            prior, posterior = [], []
+            prior = self.inf_data.prior[var].data.ravel()
+            posterior = self.inf_data.posterior[var].data
             for k in range(self.n_lc):
-                prior.append(self.lc_lib_inf[k].prior[var].data.ravel())
-                posterior.append(self.lc_lib_inf[k].posterior[var].data.ravel())
                 ax[1, i].hist(
-                    posterior[k],
+                    posterior[:, :, k].ravel(),  # only valid for single filter (as assumed in the mock data)
                     histtype="step",
                     bins=50,
-                    color=cmap(k / self.n_lc),  # Use color mapping based on k
+                    color=cmap(k / self.n_lc),
                     range=var_range[var],
                 )
             ax[0, i].hist(
