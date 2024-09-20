@@ -133,8 +133,7 @@ def unpooled_model(
         # C : Baseline flux
         # beta : Uncertainty scale factor
         C = numpyro.sample("C", dist.Uniform(-50, 50))
-        log_beta = numpyro.sample("log_beta", dist.Uniform(-0.3, 0.3))  # ~50%
-        beta = numpyro.deterministic("beta", jnp.power(10, log_beta))
+        beta = numpyro.sample("beta", dist.LogUniform(0.7, 1.3))  # ~30%
 
     with numpyro.plate("n_filt", n_filt):
         # Parameters specific to each filter for g, r, z bands (n_filt_gr)
@@ -147,13 +146,12 @@ def unpooled_model(
             prior_alpha_Miller = dist.Exponential(jnp.log(10))
             prior_alpha_Miller.support = dist.constraints.interval(min_alpha, 10)
             alpha = numpyro.sample("alpha", prior_alpha_Miller)
-            log_Aprime = numpyro.sample("log_Aprime", dist.Uniform(-5, 5))
-            A = numpyro.deterministic("A", jnp.power(10, log_Aprime - alpha))
-            numpyro.deterministic("Aprime", jnp.power(10, log_Aprime))
         else:
             if prior_type == "Jeffreys":  # Jeffreys prior
-                log_alpha = numpyro.sample("log_alpha-", dist.Uniform(-3, 1))
-                alpha = numpyro.deterministic("alpha", jnp.power(10, log_alpha) + min_alpha)
+                alpha = numpyro.sample(
+                    "alpha",
+                    dist.LogUniform(max(min_alpha, 1e-2), 10),
+                )
 
             elif prior_type in ["Flat", "Uniform"]:
                 alpha = numpyro.sample("alpha", dist.Uniform(min_alpha, 10))
@@ -165,7 +163,7 @@ def unpooled_model(
                 if std_alpha_0 is None:  # alpha > min_alpha, known E --> Exponential
                     rate_alpha_ = 1 / (mean_alpha_0 - min_alpha)
                     alpha_ = numpyro.sample("alpha-", dist.Exponential(rate_alpha_))
-                else:  # alpha > 1, known E and Var --> Gamma
+                else:  # alpha > alpha_min, known E and Var --> Gamma
                     concentration_alpha_ = (mean_alpha_0 - min_alpha) ** 2 / std_alpha_0**2
                     rate_alpha_ = (mean_alpha_0 - min_alpha) / std_alpha_0**2
                     alpha_ = numpyro.sample("alpha-", dist.Gamma(concentration_alpha_, rate_alpha_))
@@ -175,14 +173,13 @@ def unpooled_model(
                     "Invalid prior type. Options: 'Miller', 'Jeffreys', 'Maximum_Entropy', 'Flat' (or 'Uniform')"
                 )
 
-            log_A = numpyro.sample("log_A", dist.Uniform(-5, 5))
-            A = numpyro.deterministic("A", jnp.power(10, log_A))
-            numpyro.deterministic("Aprime", A * jnp.power(10, alpha))
+        Aprime = numpyro.sample("Aprime", dist.LogUniform(1e-5, 1e5))
+        A = numpyro.deterministic("A", Aprime / jnp.power(10, alpha))
 
     with numpyro.plate("obj", n_obj):
         # Parameters specific to each object (n_obj)
         # t_fl : Time of the first light
-        t_fl = numpyro.sample(f"t_fl", dist.Uniform(-100, 0))
+        t_fl = numpyro.sample(f"t_fl", dist.Uniform(-40, 0))
 
     with numpyro.plate(f"data", len(t)):
         numpyro.sample(
@@ -258,19 +255,13 @@ def pooled_model(
     n_fcqfid = len(np.unique(idx_fcqfid))
     n_filt = len(np.unique(idx_filt))
     n_filt_gr = len(np.unique(idx_filt_gr))
-    n_obj = len(np.unique(idx_obj))
 
     with numpyro.plate("fcqfid", n_fcqfid):
         # Parameters specific to each fcqf ID for each object (n_fcqfid)
         # C : Baseline flux
-        C = numpyro.sample("C", dist.Uniform(-50, 50))
-
         # beta : Uncertainty scale factor
-        log_beta = numpyro.sample(
-            "log_beta",
-            dist.Uniform(-0.3, 0.3),  # ~50%
-        )
-        beta = numpyro.deterministic(f"beta", jnp.power(10, log_beta))
+        C = numpyro.sample("C", dist.Uniform(-50, 50))
+        beta = numpyro.sample("beta", dist.LogUniform(0.7, 1.3))  # ~30%
 
     prior_type = prior_params.get("prior_type", "Maximum_Entropy")
     min_alpha = prior_params.get("min_alpha", 0)
@@ -278,8 +269,10 @@ def pooled_model(
         # Parameters specific to each filter for g, r, z bands (n_filt_gr)
         # alpha : Rising power-law index
         if prior_type == "Jeffreys":  # Jeffreys prior
-            log_alpha = numpyro.sample("log_alpha-", dist.Uniform(-3, 1))
-            alpha = numpyro.deterministic("alpha", jnp.power(10, log_alpha) + min_alpha)
+            alpha = numpyro.sample(
+                "alpha",
+                dist.LogUniform(max(min_alpha, 1e-2), 10),
+            )
 
         elif prior_type in ["Flat", "Uniform"]:
             alpha = numpyro.sample("alpha", dist.Uniform(min_alpha, 10))
@@ -302,21 +295,18 @@ def pooled_model(
     with numpyro.plate("filt", n_filt):
         # Parameters specific to each filter (n_filt)
         # A : Proportionality factor
-        log_A = numpyro.sample(f"log_A", dist.Uniform(-5, 5))
-        A = numpyro.deterministic("A", jnp.power(10, log_A))
+        Aprime = numpyro.sample("Aprime", dist.LogUniform(1e-5, 1e5))
 
-    numpyro.deterministic(f"Aprime", A[idx_filt] * jnp.power(10, alpha[idx_filt_gr]))
+    A = numpyro.deterministic(f"A", Aprime[idx_filt] / jnp.power(10, alpha[idx_filt_gr]))
 
-    with numpyro.plate("obj", n_obj):
-        # Parameters specific to each object (n_obj)
-        # t_fl : Time of the first light
-        t_fl = numpyro.sample(f"t_fl", dist.Uniform(-100, 0))
+    # t_fl : Time of the first light
+    t_fl = numpyro.sample(f"t_fl", dist.Uniform(-40, 0))
 
     with numpyro.plate(f"data", len(t)):
         numpyro.sample(
             f"flux",
             dist.Normal(
-                f_t(t, t_fl[idx_obj], C[idx_fcqfid], A[idx_filt], alpha[idx_filt_gr]),
+                f_t(t, t_fl, C[idx_fcqfid], A[idx_filt], alpha[idx_filt_gr]),
                 flux_err * beta[idx_fcqfid],
             ),
             obs=flux,
@@ -379,15 +369,9 @@ def hierarchical_model(
     min_alpha = prior_params.get("min_alpha", 0)
     assert min_alpha >= 0, "Minimum value of alpha must be non-negative"
     mean_alpha = numpyro.sample("mean_alpha", dist.Uniform(min_alpha, 10))
-
-    ## maximum entropy prior --> positive
-    # log_std_alpha = numpyro.sample("log_std_alpha", dist.Uniform(-3, 1))
-    # std_alpha = numpyro.deterministic("std_alpha", jnp.power(10, log_std_alpha))
     std_alpha = numpyro.sample("std_alpha", dist.HalfNormal(0.1))
 
-    mean_t_fl = numpyro.sample("mean_t_fl", dist.Uniform(-100, 0))
-    # log_std_t_fl = numpyro.sample("log_std_t_fl", dist.Uniform(-3, 1))
-    # std_t_fl = numpyro.deterministic("std_t_fl", jnp.power(10, log_std_t_fl))
+    mean_t_fl = numpyro.sample("mean_t_fl", dist.Uniform(-40, 0))
     std_t_fl = numpyro.sample("std_t_fl", dist.HalfNormal(1))
 
     n_fcqfid = len(np.unique(idx_fcqfid))
@@ -400,11 +384,8 @@ def hierarchical_model(
         C = numpyro.sample("C", dist.Uniform(-50, 50))
 
         # beta : Uncertainty scale factor
-        log_beta = numpyro.sample(
-            "log_beta",
-            dist.Uniform(-0.3, 0.3),  # ~50%
-        )
-        beta = numpyro.deterministic(f"beta", jnp.power(10, log_beta))
+        # beta = numpyro.sample("beta", dist.LogUniform(0.8, 1.2))  # ~20%
+        beta = numpyro.sample("beta", dist.LogNormal(0, 0.1))
 
     with numpyro.plate("filt", n_filt):
         # Parameters specific to each filter (n_filt)
@@ -422,14 +403,13 @@ def hierarchical_model(
             raise ValueError("Invalid hyperprior type. Options: 'Maximum_Entropy' and 'Gaussian'/'Gauss'/'Normal'")
 
         # A : Proportionality factor
-        log_A = numpyro.sample(f"log_A", dist.Uniform(-5, 5))
-        A = numpyro.deterministic("A", jnp.power(10, log_A))
+        A = numpyro.sample("A", dist.LogUniform(1e-5, 1e5))
         numpyro.deterministic(f"Aprime", A * jnp.power(10, alpha))
 
     with numpyro.plate("obj", n_obj):
         # Parameters specific to each object (n_obj)
         # t_fl : Time of the first light
-        # t_fl = numpyro.sample(f"t_fl", dist.Uniform(-100, 0))
+        # t_fl = numpyro.sample(f"t_fl", dist.Uniform(-40, 0))
         t_fl = numpyro.sample(f"t_fl", dist.Normal(mean_t_fl, std_t_fl))
 
     with numpyro.plate(f"data", len(t)):
@@ -511,6 +491,77 @@ class Ia_lc:
         self.lc_peak = init_lc_package(lc_peak)
 
         self.post_sample = None
+
+    def sampling(
+        self,
+        num_samples: int = 1000,
+        num_warmup: int = 5000,
+        num_chains: int = 2,
+        random_seed: int = 11,
+        prior_pred_samples: int = 500,
+        prior_params: dict = {},
+        nuts_params: dict = {},
+    ):
+        """
+        Perform MCMC sampling using NUTS algorithm.
+
+        Parameters
+        ----------
+        num_samples : int, optional
+            Number of samples to draw from the posterior distribution (default: 1000).
+        num_warmup : int, optional
+            Number of warmup samples to discard (default: 3000).
+        num_chains : int, optional
+            Number of chains to run (default: 2).
+        random_seed : int, optional
+            Random seed for reproducibility (default: 11).
+        prior_pred_samples : int, optional
+            Number of samples to draw from the prior predictive distribution (default: 500).
+        prior_params : dict, optional
+            Dictionary containing the prior information for the model.
+        nuts_params : dict, optional
+            Dictionary containing the parameters for infer.NUTS.
+
+        Returns
+        -------
+        None
+        """
+
+        kernel = unpooled_model
+        init_strategy = nuts_params.pop("init_strategy", infer.init_to_median())
+        self.sampler = infer.MCMC(
+            infer.NUTS(kernel, init_strategy=init_strategy, **nuts_params),
+            num_warmup=num_warmup,
+            num_samples=num_samples,
+            num_chains=num_chains,
+            progress_bar=False,
+        )
+        running_params = {
+            "t": self.lc_early["phase"],
+            "flux": self.lc_early["flux"],
+            "flux_err": self.lc_early["flux_err"],
+            "idx_obj": np.zeros_like(self.idx_fcqfid, dtype=int),  # only one object
+            "idx_fcqfid": self.idx_fcqfid,
+            "idx_filt": self.idx_filt,
+        }
+        self.sampler.run(
+            jax.random.PRNGKey(random_seed),
+            **running_params,
+            prior_params=prior_params,
+        )
+
+        # prior and posterior predictive checks
+        prior_pred = infer.Predictive(kernel, num_samples=prior_pred_samples)(
+            jax.random.PRNGKey(1919810 + random_seed), **running_params, prior_params=prior_params
+        )
+        post_pred = infer.Predictive(kernel, self.sampler.get_samples())(
+            jax.random.PRNGKey(114514 + random_seed), **running_params, prior_params=prior_params
+        )
+        # convert to arviz InferenceData
+        self.inf_data = az.from_numpyro(self.sampler, prior=prior_pred, posterior_predictive=post_pred)
+
+        # store the posterior samples
+        self.post_sample = self.inf_data.posterior
 
     def plot_lc(self, save: bool = False, filename: str = None, offset: float = 30, post_pred_samples: int = 25):
         """
@@ -636,7 +687,7 @@ class Ia_lc:
         if save:
             if filename is None:
                 filename = self.ID
-            plt.savefig(filename + "_corner.pdf")
+            plt.savefig(filename + "_corner.pdf", bbox_inches="tight")
 
 
 class Ia_lc_library:
@@ -738,8 +789,9 @@ class Ia_lc_library:
             kernel = hierarchical_model
         else:
             raise ValueError("Invalid model structure. Options: 'pooled', 'unpooled', 'hierarchical'")
+        init_strategy = nuts_params.pop("init_strategy", infer.init_to_median())
         self.sampler = infer.MCMC(
-            infer.NUTS(kernel, **nuts_params),
+            infer.NUTS(kernel, init_strategy=init_strategy, **nuts_params),
             num_warmup=num_warmup,
             num_samples=num_samples,
             num_chains=num_chains,
@@ -762,10 +814,10 @@ class Ia_lc_library:
 
         # prior and posterior predictive checks
         prior_pred = infer.Predictive(kernel, num_samples=prior_pred_samples)(
-            jax.random.PRNGKey(1919810), **running_params, prior_params=prior_params
+            jax.random.PRNGKey(1919810 + random_seed), **running_params, prior_params=prior_params
         )
         post_pred = infer.Predictive(kernel, self.sampler.get_samples())(
-            jax.random.PRNGKey(114514), **running_params, prior_params=prior_params
+            jax.random.PRNGKey(114514 + random_seed), **running_params, prior_params=prior_params
         )
         # convert to arviz InferenceData
         self.inf_data = az.from_numpyro(self.sampler, prior=prior_pred, posterior_predictive=post_pred)
@@ -777,22 +829,21 @@ class Ia_lc_library:
             fcqfid_in_obj = np.unique(self.idx_fcqfid[self.idx_obj == k])
             filt_in_obj = np.unique(self.idx_filt[self.idx_obj == k])
 
-            lc.post_sample = {} #self.post_sample[["C", "beta", "A", "alpha", "t_fl"]]
+            lc.post_sample = {}  # self.post_sample[["C", "beta", "A", "alpha", "t_fl"]]
             lc.post_sample["C"] = self.post_sample["C"][:, :, fcqfid_in_obj]
             lc.post_sample["beta"] = self.post_sample["beta"][:, :, fcqfid_in_obj]
             lc.post_sample["A"] = self.post_sample["A"][:, :, filt_in_obj]
-            lc.post_sample["t_fl"] = self.post_sample["t_fl"][:, :, k]
             if model_structure != "pooled":
                 lc.post_sample["alpha"] = self.post_sample["alpha"][:, :, filt_in_obj]
+                lc.post_sample["t_fl"] = self.post_sample["t_fl"][:, :, k]
+            else:
+                lc.post_sample["alpha"] = self.post_sample["alpha"]
+                lc.post_sample["t_fl"] = self.post_sample["t_fl"]
             lc.post_sample = xr.Dataset(lc.post_sample)
 
     def plot_corner(self, save: bool = False, filename: str = None, var_name: list = ["mean_alpha", "std_alpha"]):
-
-        import corner
-
         corner.corner(
             self.inf_data.posterior[var_name],
-            # var_name=var_name,
             show_titles=True,
             title_kwargs={"fontsize": 12},
             quantiles=[0.05, 0.5, 0.95],
@@ -802,4 +853,4 @@ class Ia_lc_library:
         if save:
             if filename is None:
                 filename = self.ID
-            plt.savefig(filename + "_corner.pdf")
+            plt.savefig(filename + "_corner.pdf", bbox_inches="tight")

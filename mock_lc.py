@@ -6,6 +6,7 @@ import numpyro
 import jax
 import jax.numpy as jnp
 from numpyro import distributions as dist, infer
+import corner
 
 # %matplotlib notebook
 
@@ -26,7 +27,7 @@ plt.rcParams.update(
     }
 )
 
-from fit_early_lc import f_t, Ia_lc, Ia_lc_library
+from fit_early_lc import f_t, Ia_lc_library
 
 
 def generate_flux_err(flux, ZP=0, method="broken_power_law"):
@@ -57,30 +58,33 @@ class mock_lc_library(Ia_lc_library):
         cadence: float = 1,
         n_lc: int = 10,
         var_true: dict = dict(t_fl=-20.0, C=0.0, A=0.4, alpha=2.0),
+        var_mean: dict = dict(t_fl=-20.0, C=0.0, A=0.4, alpha=2.0),
         var_std: dict = dict(t_fl=1.0, C=0.1, A=0.1, alpha=0.1),
         fix_values: bool = True,
         mag_peak: float = 17.5,
+        t_40: float = -12,
     ) -> None:
         t_sample = jnp.arange(-100, 0, step=cadence)
         n_sample = len(t_sample)
 
         lc_early_lib = np.empty(shape=n_lc, dtype=object)
 
-        t_fl_true = var_true.get("t_fl", -20.0)
-        C_true = var_true.get("C", 0.0)
-        A_true = var_true.get("A", 0.4)
-        alpha_true = var_true.get("alpha", 2.0)
-
         if fix_values:
-            t_fl = t_fl_true * jnp.ones(n_lc)
-            C = C_true * jnp.ones(n_lc)
-            A = A_true * jnp.ones(n_lc)
-            alpha = alpha_true * jnp.ones(n_lc)
+            t_fl = var_true.get("t_fl", -20.0) * jnp.ones(n_lc)
+            C = var_true.get("C", 0.0) * jnp.ones(n_lc)
+            A = var_true.get("A", 0.4) * jnp.ones(n_lc)
+            alpha = var_true.get("alpha", 2.0) * jnp.ones(n_lc)
+            self.var_true = dict(t_fl=t_fl, C=C, A=A, alpha=alpha)
         else:
-            t_fl = jnp.random.randn(n_lc) * (var_std.get("t_fl", 1.0)) + t_fl_true
-            C = jnp.random.randn(n_lc) * (var_std.get("C", 0.1)) + C_true
-            A = jnp.random.randn(n_lc) * (var_std.get("A", 0.1)) + A_true
-            alpha = jnp.random.randn(n_lc) * (var_std.get("alpha", 0.1)) + alpha_true
+            t_fl = np.random.randn(n_lc) * (var_std.get("t_fl", 1.0)) + var_mean.get("t_fl", -20.0)
+            C = np.random.randn(n_lc) * (var_std.get("C", 0.1)) + var_mean.get("C", 0.0)
+            A = np.random.randn(n_lc) * (var_std.get("A", 0.1)) + var_mean.get("A", 0.4)
+            alpha = np.random.randn(n_lc) * (var_std.get("alpha", 0.1)) + var_mean.get("alpha", 2.0)
+            self.var_true = dict(t_fl=t_fl, C=C, A=A, alpha=alpha)
+            self.var_true["mean_alpha"] = var_mean.get("alpha", 2.0)
+            self.var_true["std_alpha"] = var_std.get("alpha", 0.1)
+            self.var_true["mean_t_fl"] = var_mean.get("t_fl", -20.0)
+            self.var_true["std_t_fl"] = var_std.get("t_fl", 1.0)
 
         for k in range(n_lc):
             np.random.seed(k + 114514)
@@ -94,8 +98,8 @@ class mock_lc_library(Ia_lc_library):
             flux_true = f_t(t=t_mock, t_fl=t_fl[k], C=C[k], A=A[k], alpha=alpha[k])
 
             mag_40 = mag_peak + 2.5 * np.log10(0.4)  # 40% of peak
-            idx_early = t_mock < -10  # assuming 40% of peak is achieved at phase=-10 days
-            flux_40 = f_t(t=-10, t_fl=t_fl[k], C=0, A=A[k], alpha=alpha[k])
+            idx_early = t_mock <= t_40  # 40% of maximum flux is achieved at t_40 (default: -12 days)
+            flux_40 = f_t(t=t_40, t_fl=t_fl[k], C=0, A=A[k], alpha=alpha[k])
             ZP_mock = 2.5 * np.log10(flux_40) + mag_40
 
             t_mock_early = t_mock[idx_early]
@@ -107,8 +111,18 @@ class mock_lc_library(Ia_lc_library):
 
         super().__init__(lc_early_lib=lc_early_lib)
         self.n_lc = n_lc
-        self.var_true = var_true
-        self.var_name = dict(t_fl=r"$t_\mathrm{fl}$", C=r"$C$", A=r"$A$", alpha=r"$\alpha$")
+        self.var_name = dict(
+            t_fl=r"$t_\mathrm{fl}$",
+            C=r"$C$",
+            A=r"$A$",
+            alpha=r"$\alpha$",
+            mean_alpha=r"$\mu_\alpha$",
+            std_alpha=r"$\sigma_\alpha$",
+            mean_t_fl=r"$\mu_{t_\mathrm{fl}}$",
+            std_t_fl=r"$\sigma_{t_\mathrm{fl}}$",
+        )
+
+        self.inf_data = None
 
     def plot_prior_posterior(self, var_name: list = ["alpha", "t_fl"], var_range: dict = None):
         if var_range is None:
@@ -119,18 +133,19 @@ class mock_lc_library(Ia_lc_library):
         cmap = plt.get_cmap("coolwarm")  # Choose a colormap
 
         for i, var in enumerate(var_name):
-            prior = self.inf_data.prior[var].data.ravel()
-            posterior = self.inf_data.posterior[var].data
-            for k in range(self.n_lc):
-                ax[1, i].hist(
-                    posterior[:, :, k].ravel(),  # only valid for single filter (as assumed in the mock data)
-                    histtype="step",
-                    bins=50,
-                    color=cmap(k / self.n_lc),
-                    range=var_range[var],
-                )
+            # overall
+            if self.inf_data is None:
+                prior, posterior = [], []
+                for lc in self.lc_library:
+                    prior = np.append(prior, lc.inf_data.prior[var].data)
+                    posterior = np.append(posterior, lc.inf_data.posterior[var].data)
+                prior = np.array(prior).ravel()
+                posterior = np.array(posterior).ravel()
+            else:
+                prior = self.inf_data.prior[var].data.ravel()
+                posterior = self.inf_data.posterior[var].data.ravel()
             ax[0, i].hist(
-                np.array(prior).ravel(),
+                prior,
                 histtype="step",
                 bins=50,
                 color="k",
@@ -138,9 +153,21 @@ class mock_lc_library(Ia_lc_library):
                 weights=np.ones_like(np.array(prior).ravel()) / len(prior),
                 range=var_range[var],
             )
-            ax[1, i].hist(
-                np.array(posterior).ravel(), histtype="step", bins=25 * self.n_lc, color="k", lw=2, range=var_range[var]
-            )
+            ax[1, i].hist(posterior, histtype="step", bins=25 * self.n_lc, color="k", lw=2, range=var_range[var])
+
+            # posterior for each light curve
+            for k in range(self.n_lc):
+                if self.inf_data is None:
+                    posterior_k = self.lc_library[k].inf_data.posterior[var].data.ravel()
+                else:
+                    posterior_k = self.post_sample[var].data[:, :, k].ravel()
+                ax[1, i].hist(
+                    posterior_k,  # only valid for single filter (as assumed in the mock data)
+                    histtype="step",
+                    bins=50,
+                    color=cmap(k / self.n_lc),
+                    range=var_range[var],
+                )
 
             ax[1, i].axvline(self.var_true[var], color="crimson", ls="--")
             ax[1, i].axvline(np.median(np.array(posterior).ravel()), color="k", ls="--")
@@ -153,3 +180,37 @@ class mock_lc_library(Ia_lc_library):
         ax[1, 0].set_ylabel("Normalized count")
 
         return ax
+
+    def plot_corner(self, save: bool = False, filename: str = None, **kwargs):
+        """
+        Plot the corner plot of the posterior samples.
+
+        Parameters
+        ----------
+        save : bool, optional
+            Save the figure if True (default: False).
+        filename : str, optional, default=self.ID
+            Filename to save the figure.
+
+        Returns
+        -------
+        None
+        """
+
+        var_name = kwargs.pop("var_name", ["alpha", "t_fl"])
+
+        corner.corner(
+            self.post_sample,
+            show_titles=True,
+            title_kwargs={"fontsize": 12},
+            quantiles=[0.05, 0.5, 0.95],
+            title_quantiles=[0.05, 0.5, 0.95],
+            var_names=var_name,
+            # truths=[self.var_true[var] for var in var_name],
+            **kwargs,
+        )
+
+        if save:
+            if filename is None:
+                filename = self.ID
+            plt.savefig(filename + "_corner.pdf", bbox_inches="tight")
