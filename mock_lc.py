@@ -57,37 +57,50 @@ class mock_lc_library(Ia_lc_library):
         self,
         cadence: float = 1,
         n_lc: int = 10,
-        var_true: dict = dict(t_fl=-20.0, C=0.0, A=0.4, alpha=2.0),
-        var_mean: dict = dict(t_fl=-20.0, C=0.0, A=0.4, alpha=2.0),
-        var_std: dict = dict(t_fl=1.0, C=0.1, A=0.1, alpha=0.1),
+        var_true: dict = dict(t_fl=-20.0, C=0.0, Aprime=50, alpha=2.0),
+        var_mean: dict = dict(t_fl=-20.0, C=0.0, Aprime=50, alpha=2.0),
+        var_std: dict = dict(t_fl=1.0, C=0.1, Aprime=5, alpha=0.1),
         fix_values: bool = True,
         mag_peak: float = 17.5,
-        t_40: float = -12,
+        realistic_mag : bool = False,
     ) -> None:
         t_sample = jnp.arange(-100, 0, step=cadence)
         n_sample = len(t_sample)
 
         lc_early_lib = np.empty(shape=n_lc, dtype=object)
 
+        np.random.seed(n_lc * int(cadence) + 114514)
+
         if fix_values:
             t_fl = var_true.get("t_fl", -20.0) * jnp.ones(n_lc)
             C = var_true.get("C", 0.0) * jnp.ones(n_lc)
-            A = var_true.get("A", 0.4) * jnp.ones(n_lc)
+            Aprime = var_true.get("Aprime", 50) * jnp.ones(n_lc)
             alpha = var_true.get("alpha", 2.0) * jnp.ones(n_lc)
-            self.var_true = dict(t_fl=t_fl, C=C, A=A, alpha=alpha)
+            self.var_true = var_true
         else:
             t_fl = np.random.randn(n_lc) * (var_std.get("t_fl", 1.0)) + var_mean.get("t_fl", -20.0)
             C = np.random.randn(n_lc) * (var_std.get("C", 0.1)) + var_mean.get("C", 0.0)
-            A = np.random.randn(n_lc) * (var_std.get("A", 0.1)) + var_mean.get("A", 0.4)
+            Aprime = np.random.randn(n_lc) * (var_std.get("Aprime", 0.1)) + var_mean.get("Aprime", 50)
             alpha = np.random.randn(n_lc) * (var_std.get("alpha", 0.1)) + var_mean.get("alpha", 2.0)
-            self.var_true = dict(t_fl=t_fl, C=C, A=A, alpha=alpha)
+            self.var_true = dict(t_fl=t_fl, C=C, Aprime=Aprime, alpha=alpha)
             self.var_true["mean_alpha"] = var_mean.get("alpha", 2.0)
             self.var_true["std_alpha"] = var_std.get("alpha", 0.1)
             self.var_true["mean_t_fl"] = var_mean.get("t_fl", -20.0)
             self.var_true["std_t_fl"] = var_std.get("t_fl", 1.0)
 
+        A = Aprime / jnp.power(10, alpha)
+
+        if realistic_mag:
+            # n(mag) ~ 10^(0.6*mag)
+            # dmag = mag_peak - mag_peak_0 ~ Exponential(0.6)
+            dmag = np.random.exponential(0.6, n_lc)
+        else:
+            # mag_peak = constant
+            dmag = np.zeros(n_lc)
+
+        self.mag_peak = mag_peak - dmag
+
         for k in range(n_lc):
-            np.random.seed(k + 114514)
             t_jitter = np.random.randn(n_sample) * 0.05  # 0.05 days = 1.2 hours
             t_jitter -= t_jitter[
                 np.argmin(np.abs(t_sample - t_fl[k]))
@@ -97,10 +110,10 @@ class mock_lc_library(Ia_lc_library):
             t_mock = t_sample + t_jitter + t_shift
             flux_true = f_t(t=t_mock, t_fl=t_fl[k], C=C[k], A=A[k], alpha=alpha[k])
 
-            mag_40 = mag_peak + 2.5 * np.log10(0.4)  # 40% of peak
-            idx_early = t_mock <= t_40  # 40% of maximum flux is achieved at t_40 (default: -12 days)
-            flux_40 = f_t(t=t_40, t_fl=t_fl[k], C=0, A=A[k], alpha=alpha[k])
-            ZP_mock = 2.5 * np.log10(flux_40) + mag_40
+            mag_40 = self.mag_peak[k] + 2.5 * np.log10(0.4)  # 40% of peak
+            t_40 = (40 / A[k]) ** (1 / alpha[k]) + t_fl[k] # 40% of maximum flux is achieved at t_40
+            idx_early = t_mock <= t_40
+            ZP_mock = 2.5 * np.log10(40) + mag_40
 
             t_mock_early = t_mock[idx_early]
             flux_true_early = flux_true[idx_early]
@@ -167,9 +180,12 @@ class mock_lc_library(Ia_lc_library):
                     bins=50,
                     color=cmap(k / self.n_lc),
                     range=var_range[var],
+                    zorder=-1,
                 )
-
-            ax[1, i].axvline(self.var_true[var], color="crimson", ls="--")
+            try:
+                ax[1, i].axvline(self.var_true[var], color="crimson", ls="--")
+            except ValueError:
+                ax[1, i].axvline(self.var_true["mean_" + var], color="crimson", ls="--")
             ax[1, i].axvline(np.median(np.array(posterior).ravel()), color="k", ls="--")
             ax[0, i].set_title(f"Prior: {self.var_name[var]}")
             ax[1, i].set_title(f"Posterior: {self.var_name[var]}")

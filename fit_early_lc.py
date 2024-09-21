@@ -631,7 +631,7 @@ class Ia_lc:
                     )
 
             ax.set_xlim(-31, -4)
-            ax.set_ylim(-offset * 1.5, 100)
+            ax.set_ylim(-offset, 75)
 
             if post_sample is not None:
                 A_ = np.ravel(post_sample["A"][:, :, flt])
