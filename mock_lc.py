@@ -61,7 +61,7 @@ class mock_lc_library(Ia_lc_library):
         var_mean: dict = dict(t_fl=-20.0, C=0.0, Aprime=50, alpha=2.0),
         var_std: dict = dict(t_fl=1.0, C=0.1, Aprime=5, alpha=0.1),
         fix_values: bool = True,
-        mag_peak: float = 17.5,
+        mag_peak: float = 18,
         realistic_mag : bool = False,
     ) -> None:
         t_sample = jnp.arange(-100, 0, step=cadence)
@@ -110,7 +110,7 @@ class mock_lc_library(Ia_lc_library):
             t_mock = t_sample + t_jitter + t_shift
             flux_true = f_t(t=t_mock, t_fl=t_fl[k], C=C[k], A=A[k], alpha=alpha[k])
 
-            mag_40 = self.mag_peak[k] + 2.5 * np.log10(0.4)  # 40% of peak
+            mag_40 = self.mag_peak[k] - 2.5 * np.log10(0.4)  # 40% of peak
             t_40 = (40 / A[k]) ** (1 / alpha[k]) + t_fl[k] # 40% of maximum flux is achieved at t_40
             idx_early = t_mock <= t_40
             ZP_mock = 2.5 * np.log10(40) + mag_40

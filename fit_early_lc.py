@@ -133,7 +133,10 @@ def unpooled_model(
         # C : Baseline flux
         # beta : Uncertainty scale factor
         C = numpyro.sample("C", dist.Uniform(-50, 50))
-        beta = numpyro.sample("beta", dist.LogUniform(0.7, 1.3))  # ~30%
+        if prior_type == "Miller": # Jeffreys prior applied to beta in Miller+2020
+            beta = numpyro.sample("beta", dist.LogUniform(0.7, 1.3))  # ~30%
+        else: # LogNormal prior for beta
+            beta = numpyro.sample("beta", dist.LogNormal(0, 0.1))
 
     with numpyro.plate("n_filt", n_filt):
         # Parameters specific to each filter for g, r, z bands (n_filt_gr)
@@ -261,7 +264,8 @@ def pooled_model(
         # C : Baseline flux
         # beta : Uncertainty scale factor
         C = numpyro.sample("C", dist.Uniform(-50, 50))
-        beta = numpyro.sample("beta", dist.LogUniform(0.7, 1.3))  # ~30%
+        # beta = numpyro.sample("beta", dist.LogUniform(0.7, 1.3))  # ~30%
+        beta = numpyro.sample("beta", dist.LogNormal(0, 0.1))
 
     prior_type = prior_params.get("prior_type", "Maximum_Entropy")
     min_alpha = prior_params.get("min_alpha", 0)
