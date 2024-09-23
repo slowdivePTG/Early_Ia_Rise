@@ -1,5 +1,6 @@
 import numpy as np
-from fit_early_lc import Ia_lc
+from fit_early_lc import Ia_lc, Ia_lc_library
+
 
 class ZTF_SN_Ia(Ia_lc):
 
@@ -54,8 +55,10 @@ class ZTF_SN_Ia(Ia_lc):
         flux_g_max = info["fratio_gmax_2adam"].value[0]
         flux_r_max = info["fratio_rmax_2adam"].value[0]
 
-        t_g_40 = t_g[np.where((f_g < 0.4 * flux_g_max) & (t_g < 0))[0][-1]] + 0.25
-        t_r_40 = t_r[np.where((f_r < 0.4 * flux_r_max) & (t_r < 0))[0][-1]] + 0.25
+        # t_g_40 = t_g[np.where((f_g > 0.4 * flux_g_max) & (t_g < 0))[0][0]] - 0.25
+        # t_r_40 = t_r[np.where((f_r > 0.4 * flux_r_max) & (t_r < 0))[0][0]] - 0.25
+        t_g_40 = t_g[np.where((f_g <= 0.4 * flux_g_max) & (t_g < -5))[0][-1]] + 0.25
+        t_r_40 = t_r[np.where((f_r <= 0.4 * flux_r_max) & (t_r < -5))[0][-1]] + 0.25
 
         # normalization
         flux[filt == 1] /= flux_g_max / 100
@@ -88,3 +91,34 @@ class ZTF_SN_Ia(Ia_lc):
         }
 
         super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid)
+
+
+class ZTF_SN_Ia_library(Ia_lc_library):
+
+    def __init__(self, tab_info, tab_lc, ztfid_lib) -> None:
+        """
+        Initialize the class instance.
+
+        Parameters
+        ----------
+        tab_info : astropy.table.Table
+            DataFrame containing information about the object.
+        tab_lc : astropy.table.Table
+            DataFrame containing light curve data.
+        ztfid_list : list
+            List of ZTF IDs of the objects.
+
+        Returns
+        -------
+        None
+        """
+
+        lc_early_lib = []
+        lc_peak_lib = []
+
+        for ztfid in ztfid_lib:
+            ztf_sn = ZTF_SN_Ia(tab_info=tab_info, tab_lc=tab_lc, ztfid=ztfid)
+            lc_early_lib.append(ztf_sn.lc_early)
+            lc_peak_lib.append(ztf_sn.lc_peak)
+
+        super().__init__(lc_early_lib=lc_early_lib, lc_peak_lib=lc_peak_lib, ztfid_lib=ztfid_lib)

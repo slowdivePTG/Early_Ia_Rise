@@ -116,6 +116,8 @@ def unpooled_model(
                 Required if prior_type == "Maximum_Entropy".
             - min_alpha : float, optional, default = 0
                 Minimum value of the prior distribution for alpha.
+            - max_alpha : float, optional, default = 10
+                Maximum value of the prior distribution for alpha.
 
     Returns
     -------
@@ -133,31 +135,31 @@ def unpooled_model(
         # C : Baseline flux
         # beta : Uncertainty scale factor
         C = numpyro.sample("C", dist.Uniform(-50, 50))
-        if prior_type == "Miller": # Jeffreys prior applied to beta in Miller+2020
+        if prior_type == "Miller":  # Jeffreys prior applied to beta in Miller+2020
             beta = numpyro.sample("beta", dist.LogUniform(0.7, 1.3))  # ~30%
-        else: # LogNormal prior for beta
+        else:  # LogNormal prior for beta
             beta = numpyro.sample("beta", dist.LogNormal(0, 0.1))
 
     with numpyro.plate("n_filt", n_filt):
-        # Parameters specific to each filter for g, r, z bands (n_filt_gr)
+        # Parameters specific to each filter for g, r, i bands (n_filt_gr)
         # alpha : Rising power-law index
         # A : Proportionality factor
         min_alpha = prior_params.get("min_alpha", 0)
+        max_alpha = prior_params.get("max_alpha", 10)
         assert min_alpha >= 0, "Minimum value of alpha must be non-negative"
         if prior_type == "Miller":  # priors adopted in Miller+2020
             # Aprime = A * 10**alpha
-            prior_alpha_Miller = dist.Exponential(jnp.log(10))
-            prior_alpha_Miller.support = dist.constraints.interval(min_alpha, 10)
+            prior_alpha_Miller = dist.TruncatedDistribution(dist.Exponential(jnp.log(10)), low=min_alpha, high=max_alpha)
             alpha = numpyro.sample("alpha", prior_alpha_Miller)
         else:
             if prior_type == "Jeffreys":  # Jeffreys prior
                 alpha = numpyro.sample(
                     "alpha",
-                    dist.LogUniform(max(min_alpha, 1e-2), 10),
+                    dist.LogUniform(max(min_alpha, 1e-2), max_alpha),
                 )
 
             elif prior_type in ["Flat", "Uniform"]:
-                alpha = numpyro.sample("alpha", dist.Uniform(min_alpha, 10))
+                alpha = numpyro.sample("alpha", dist.Uniform(min_alpha, max_alpha))
 
             elif prior_type == "Maximum_Entropy":  # Maximum entropy prior
                 mean_alpha_0 = prior_params.get("mean_alpha_0", 2)
@@ -249,6 +251,8 @@ def pooled_model(
                 Required if prior_type == "Maximum_Entropy".
             - min_alpha : float, optional, default = 0
                 Minimum value of the prior distribution for alpha.
+            - max_alpha : float, optional, default = 10
+                Maximum value of the prior distribution for alpha.
 
     Returns
     -------
@@ -269,17 +273,19 @@ def pooled_model(
 
     prior_type = prior_params.get("prior_type", "Maximum_Entropy")
     min_alpha = prior_params.get("min_alpha", 0)
+    max_alpha = prior_params.get("max_alpha", 10)
+    assert min_alpha >= 0, "Minimum value of alpha must be non-negative"
     with numpyro.plate("filt_gr", n_filt_gr):
-        # Parameters specific to each filter for g, r, z bands (n_filt_gr)
+        # Parameters specific to each filter for g, r, i bands (n_filt_gr)
         # alpha : Rising power-law index
         if prior_type == "Jeffreys":  # Jeffreys prior
             alpha = numpyro.sample(
                 "alpha",
-                dist.LogUniform(max(min_alpha, 1e-2), 10),
+                dist.LogUniform(max(min_alpha, 1e-2), max_alpha),
             )
 
         elif prior_type in ["Flat", "Uniform"]:
-            alpha = numpyro.sample("alpha", dist.Uniform(min_alpha, 10))
+            alpha = numpyro.sample("alpha", dist.Uniform(min_alpha, max_alpha))
 
         elif prior_type == "Maximum_Entropy":  # Maximum entropy prior
             mean_alpha_0 = prior_params.get("mean_alpha_0", 2)
@@ -324,6 +330,7 @@ def hierarchical_model(
     idx_obj: list = None,
     idx_fcqfid: list = None,
     idx_filt: list = None,
+    idx_filt_gr: list = None,
     prior_params: dict = {},
 ):
     """
@@ -351,36 +358,49 @@ def hierarchical_model(
     idx_filt : list
         Indices of unique filters.
         Same filters on different objects are labeled as different.
+    idx_filt_gr : list
+        Indices of unique filters for g, r, and z bands.
     prior_params : dict, optional
         Dictionary containing the prior information for the model.
         The dictionary should contain the following keys:
             - prior_type : str
                 Type of prior to use for the model.
                 Options: "Maximum_Entropy", "Gaussian"/"Gauss"/"Normal"
-            - min_alpha : float, optional, default = 1
+            - min_alpha : float, optional, default = 0
                 Minimum value of the prior distribution for alpha.
+            - max_alpha : float, optional, default = 10
+                Maximum value of the prior distribution for alpha.
 
     Returns
     -------
     None
     """
 
-    # hyperpriors
-    # alpha : Rising power-law index
-    prior_type = prior_params.get("prior_type", "Maximum_Entropy")
-
-    # maximum entropy prior --> alpha > 1
-    min_alpha = prior_params.get("min_alpha", 0)
-    assert min_alpha >= 0, "Minimum value of alpha must be non-negative"
-    mean_alpha = numpyro.sample("mean_alpha", dist.Uniform(min_alpha, 10))
-    std_alpha = numpyro.sample("std_alpha", dist.HalfNormal(0.1))
-
-    mean_t_fl = numpyro.sample("mean_t_fl", dist.Uniform(-40, 0))
-    std_t_fl = numpyro.sample("std_t_fl", dist.HalfNormal(1))
-
     n_fcqfid = len(np.unique(idx_fcqfid))
     n_filt = len(np.unique(idx_filt))
+    n_filt_gr = len(np.unique(idx_filt_gr))
     n_obj = len(np.unique(idx_obj))
+
+    # the indices of each unique filter in the filter group: n_filt_gr --> n_filt
+    idx_filt_loc = np.zeros(n_filt, dtype=int)
+    for k, filt in enumerate(np.unique(idx_filt)):
+        idx = np.unique(idx_filt_gr[idx_filt == filt])
+        assert len(idx) == 1, "Multiple filters are assigned to the same filter group"
+        idx_filt_loc[k] = idx[0]
+
+    # hyperpriors
+    # alpha : Rising power-law index
+    min_alpha = prior_params.get("min_alpha", 0)
+    max_alpha = prior_params.get("max_alpha", 10)
+    assert min_alpha >= 0, "Minimum value of alpha must be non-negative"
+    with numpyro.plate("n_filt_gr", n_filt_gr):
+        # Parameters specific to each filter for g, r, i bands (n_filt_gr)
+        mean_alpha = numpyro.sample("mean_alpha", dist.Uniform(min_alpha, max_alpha))
+        std_alpha = numpyro.sample("std_alpha", dist.HalfNormal(0.1))
+
+    # t_fl : Time of the first light
+    mean_t_fl = numpyro.sample("mean_t_fl", dist.Uniform(-40, 0))
+    std_t_fl = numpyro.sample("std_t_fl", dist.HalfNormal(1))
 
     with numpyro.plate("fcqfid", n_fcqfid):
         # Parameters specific to each fcqf ID for each object (n_fcqfid)
@@ -391,24 +411,26 @@ def hierarchical_model(
         # beta = numpyro.sample("beta", dist.LogUniform(0.8, 1.2))  # ~20%
         beta = numpyro.sample("beta", dist.LogNormal(0, 0.1))
 
+    prior_type = prior_params.get("prior_type", "Maximum_Entropy")
     with numpyro.plate("filt", n_filt):
         # Parameters specific to each filter (n_filt)
         # alpha : Rising power-law index
         if prior_type in ["Gaussian", "Gauss", "Normal"]:  # Gaussian hyperpriors
-            prior_alpha = dist.Normal(mean_alpha, std_alpha)
-            prior_alpha.support = dist.constraints.interval(min_alpha, 10)
-            alpha = numpyro.sample(f"alpha", prior_alpha)
+            alpha = numpyro.sample(
+                "alpha",
+                dist.TruncatedNormal(mean_alpha[idx_filt_loc], std_alpha[idx_filt_loc], low=min_alpha, high=10),
+            )
         elif prior_type == "Maximum_Entropy":  # Maximum entropy (Gamma) hyperpriors
-            concentration_alpha = (mean_alpha - min_alpha) ** 2 / std_alpha**2
-            rate_alpha = (mean_alpha - min_alpha) / std_alpha**2
-            alpha_ = numpyro.sample(f"alpha-", dist.Gamma(concentration_alpha, rate_alpha))
-            alpha = numpyro.deterministic(f"alpha", alpha_ + min_alpha)
+            concentration_alpha = (mean_alpha[idx_filt_loc] - min_alpha) ** 2 / std_alpha[idx_filt_loc] ** 2
+            rate_alpha = (mean_alpha[idx_filt_loc] - min_alpha) / std_alpha[idx_filt_loc] ** 2
+            alpha_ = numpyro.sample("alpha-", dist.Gamma(concentration_alpha, rate_alpha))
+            alpha = numpyro.deterministic("alpha", alpha_ + min_alpha)
         else:
             raise ValueError("Invalid hyperprior type. Options: 'Maximum_Entropy' and 'Gaussian'/'Gauss'/'Normal'")
 
         # A : Proportionality factor
-        A = numpyro.sample("A", dist.LogUniform(1e-5, 1e5))
-        numpyro.deterministic(f"Aprime", A * jnp.power(10, alpha))
+        Aprime = numpyro.sample("Aprime", dist.LogUniform(1e-5, 1e5))
+        A = numpyro.deterministic(f"A", Aprime / jnp.power(10, alpha))
 
     with numpyro.plate("obj", n_obj):
         # Parameters specific to each object (n_obj)
@@ -493,6 +515,12 @@ class Ia_lc:
 
         # observations between -100 days and peak
         self.lc_peak = init_lc_package(lc_peak)
+
+        if self.lc_peak is not None:
+            fcqfid_peak = self.lc_peak["fcqfid"]
+            filt_peak = self.lc_peak["filt"]
+            self.idx_fcqfid_peak = fcqfid_encoder.transform(fcqfid_peak)
+            self.idx_filt_peak = filt_encoder.transform(filt_peak)
 
         self.post_sample = None
 
@@ -603,7 +631,6 @@ class Ia_lc:
                 ax.axvline(t_fl[i], color="0.2", lw=0.1)
 
         colors = np.array(["tab:green", "tab:red", "tab:orange"])
-        color = colors[self.idx_filt[self.idx_fcqfid]]
         n_color = len(np.unique(self.idx_filt))
 
         for k, flt in enumerate(np.sort(np.unique(self.idx_filt))):
@@ -613,7 +640,7 @@ class Ia_lc:
                     continue
                 ax.errorbar(
                     self.lc_early["phase"][idx],
-                    self.lc_early["flux"][idx] - C_[idx] + (flt - 0.5 * (n_color - 1)) * offset,
+                    self.lc_early["flux"][idx] - C_[idx] - (flt - 0.5 * (n_color - 1)) * offset,
                     yerr=self.lc_early["flux_err"][idx] * beta_[idx],
                     color="w",
                     markeredgecolor=colors[k],
@@ -622,13 +649,14 @@ class Ia_lc:
                     zorder=10,
                 )
                 if self.lc_peak is not None:
+                    idx_peak = (self.idx_filt_peak == flt) & (self.idx_fcqfid_peak == fcqfid)
                     ax.errorbar(
-                        self.lc_early["phase"][idx],
-                        self.lc_early["flux"][idx] - C_[idx] + (flt - 0.5 * (n_color - 1)) * offset,
-                        yerr=self.lc_early["flux_err"][idx] * beta_[idx],
+                        self.lc_peak["phase"][idx_peak],
+                        self.lc_peak["flux"][idx_peak] - C_[idx][0] - (flt - 0.5 * (n_color - 1)) * offset,
+                        yerr=self.lc_peak["flux_err"][idx_peak] * beta_[idx][0],
                         color="w",
-                        markeredgecolor=color,
-                        ecolor=color,
+                        markeredgecolor=colors[k],
+                        ecolor=colors[k],
                         fmt="o",
                         alpha=0.25,
                         zorder=10,
@@ -644,7 +672,7 @@ class Ia_lc:
                 for i in idx_post_check:
                     ax.plot(
                         t_pred,
-                        f_t(t_pred, t_fl[i], 0, A_[i], alpha_[i]) + (flt - 0.5 * (n_color - 1)) * offset,
+                        f_t(t_pred, t_fl[i], 0, A_[i], alpha_[i]) - (flt - 0.5 * (n_color - 1)) * offset,
                         color="0.2",
                         lw=0.1,
                         zorder=-1,
@@ -808,7 +836,7 @@ class Ia_lc_library:
             "idx_fcqfid": self.idx_fcqfid,
             "idx_filt": self.idx_filt,
         }
-        if model_structure == "pooled":
+        if model_structure != "unpooled":
             running_params["idx_filt_gr"] = self.idx_filt_gr
         self.sampler.run(
             jax.random.PRNGKey(random_seed),
