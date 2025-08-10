@@ -15,8 +15,9 @@
         - $\alpha$ with given mean and variance (Gamma-distributed)
     - Try inferring population properties (i.e., mean and variance of $\alpha$) with different priors
 5. Test $K$-corrections
-    - SALT4 results from D'Arcy
+    - SALT3+ results from D'Arcy
     - 2D GP model
 6. Define the most recent ZTF Ia sample
     - Till when?
 7. Filter out early SNe Ia in the new sample to which we apply the hierarchical model
+8. Joint study with TESS? [TESSreduce](https://github.com/CheerfulUser/TESSreduce)
