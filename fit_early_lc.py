@@ -397,7 +397,7 @@ def hierarchical_model(
     # hyperpriors
     # alpha : Rising power-law index
     min_alpha = prior_params.get("min_alpha", 0)
-    max_alpha = prior_params.get("max_alpha", 10)
+    max_alpha = prior_params.get("max_alpha", 5)
     assert min_alpha >= 0, "Minimum value of alpha must be non-negative"
     with numpyro.plate("n_filt_gr", n_filt_gr):
         # Parameters specific to each filter for g, r, i bands (n_filt_gr)
@@ -405,7 +405,7 @@ def hierarchical_model(
         std_alpha = numpyro.sample("std_alpha", dist.HalfNormal(0.1))
 
     # t_fl : Time of the first light
-    mean_t_fl = numpyro.sample("mean_t_fl", dist.Uniform(-40, 0))
+    mean_t_fl = numpyro.sample("mean_t_fl", dist.Uniform(-30, -10))
     std_t_fl = numpyro.sample("std_t_fl", dist.HalfNormal(1))
 
     with numpyro.plate("fcqfid", n_fcqfid):
