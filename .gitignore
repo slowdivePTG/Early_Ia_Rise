@@ -160,3 +160,8 @@ Data/
 
 # Figures (temporarily)
 Figures/
+
+# uv lock and compiled files
+requirements.txt
+requirements.lock
+uv.lock

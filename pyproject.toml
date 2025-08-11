@@ -1,0 +1,28 @@
+[project]
+name = "snia_rise"
+version = "0.1.0"
+description = "Hierarchical Bayesian Modeling of Early-time SNe Ia Light Curves"
+authors = [
+  { name = "slowdivePTG" }
+]
+requires-python = ">=3.12"
+
+dependencies = [
+  "numpy",
+  "matplotlib",
+  "seaborn",
+  "numpyro",
+  "jax",
+  "arviz",
+  "corner",
+  "xarray",
+  "scikit-learn",
+  "astropy>=7.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.30.1",
+    "ipywidgets>=8.1.7",
+    "jupyter>=1.1.1",
+]
