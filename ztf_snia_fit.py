@@ -32,6 +32,12 @@ if __name__ == "__main__":
         default=1000,
         help="Number of samples (default: 1000)",
     )
+    parser.add_argument(
+        "--num_chains",
+        type=int,
+        default=4,
+        help="Number of chains (default: 4)",
+    )
 
     args = parser.parse_args()
     dr = args.dr.lower()
@@ -57,17 +63,8 @@ if __name__ == "__main__":
     ztflib.sampling(
         num_warmup=args.num_warmup,
         num_samples=args.num_samples,
-        num_chains=4,
-        nuts_params={
-            "init_strategy": infer.init_to_value(
-                values={
-                    "mean_alpha": jnp.ones(2, dtype=float) * 2.0,
-                    "std_alpha": jnp.ones(2, dtype=float) * 0.1,
-                    "mean_t_fl": -20.0,
-                    "std_t_fl": 1.0,
-                }
-            ),
-        },
+        num_chains=args.num_chains,
+        nuts_params=dict(max_tree_depth=12),
         random_seed=114514,
     )
 

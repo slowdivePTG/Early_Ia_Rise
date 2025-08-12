@@ -907,9 +907,16 @@ class SNLightCurveLib:
             raise ValueError(
                 "Invalid model structure. Options: 'pooled', 'unpooled', 'hierarchical'"
             )
-        init_strategy = nuts_params.pop("init_strategy", infer.init_to_median())
+        init_strategy = nuts_params.pop(
+            "init_strategy",
+            infer.init_to_median(),
+        )
         self.sampler = infer.MCMC(
-            infer.NUTS(kernel, init_strategy=init_strategy, **nuts_params),
+            infer.NUTS(
+                kernel,
+                init_strategy=init_strategy,
+                **nuts_params,
+            ),
             num_warmup=num_warmup,
             num_samples=num_samples,
             num_chains=num_chains,
