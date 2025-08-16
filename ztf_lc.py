@@ -1,5 +1,6 @@
 import glob
 import numpy as np
+import pandas as pd
 
 from astropy.table import Table
 from fit_early_lc import SNLightCurve, SNLightCurveLib
@@ -10,48 +11,55 @@ class ZTFDataProcessor:
     """Helper class to handle common ZTF data processing operations."""
 
     @staticmethod
-    def process_flux_normalization(flux, flux_err, filt, flux_g_max, flux_r_max):
+    def process_flux_normalization(
+        flux, flux_err, filt, flux_g_max, flux_r_max, filtids=[1, 2]
+    ):
         """Normalize flux data by maximum flux values."""
-        flux = flux.copy()
-        flux_err = flux_err.copy()
+        flux = np.asarray(flux, dtype=np.float32)
+        flux_err = np.asarray(flux_err, dtype=np.float32)
 
-        flux[filt == 1] /= flux_g_max / 100
-        flux_err[filt == 1] /= flux_g_max / 100
-        flux[filt == 2] /= flux_r_max / 100
-        flux_err[filt == 2] /= flux_r_max / 100
+        flux[filt == filtids[0]] /= flux_g_max / 100
+        flux_err[filt == filtids[0]] /= flux_g_max / 100
+        flux[filt == filtids[1]] /= flux_r_max / 100
+        flux_err[filt == filtids[1]] /= flux_r_max / 100
 
         return flux, flux_err
 
     @staticmethod
     def calculate_40_percent_times(
-        phase, flux, flux_err, filt, flux_g_max=None, flux_r_max=None
+        phase, flux, flux_err, filt, flux_max=None, filtid=1
     ):
-        """Calculate 40% flux times for g and r bands."""
-        t_g, f_g, _ = data_binning(
-            np.array([phase, flux, flux_err]).T[filt == 1], 0.5
-        ).T
-        t_r, f_r, _ = data_binning(
-            np.array([phase, flux, flux_err]).T[filt == 2], 0.5
-        ).T
+        """Calculate 40% flux times in a filter."""
+        try:
+            t, f, _ = data_binning(
+                np.array([phase, flux, flux_err]).T[filt == filtid], 0.5
+            ).T
+        except ValueError:
+            # Not enough data points
+            return -np.inf, flux_max
 
-        if flux_g_max is None:
-            flux_g_max = np.max(f_g[np.abs(t_g) < 5])
-        if flux_r_max is None:
-            flux_r_max = np.max(f_r[np.abs(t_r) < 5])
+        if flux_max is None:
+            flux_max = np.max(f[np.abs(t) < 5])
 
-        t_g_40 = t_g[np.where((f_g <= 0.4 * flux_g_max) & (t_g < -5))[0][-1]] + 0.25
-        t_r_40 = t_r[np.where((f_r <= 0.4 * flux_r_max) & (t_r < -5))[0][-1]] + 0.25
+        below_40 = (f <= 0.4 * flux_max) & (t < -5)
+        if np.sum(below_40) == 0:
+            print(f"No data below 40% of max flux, skip filter {filtid}.")
+            return -np.inf, flux_max
 
-        return t_g_40, t_r_40, flux_g_max, flux_r_max
+        t_40 = t[below_40][-1] + 0.25
+
+        return t_40, flux_max
 
     @staticmethod
-    def create_light_curve_data(phase, flux, flux_err, fcqfid, filt, t_g_40, t_r_40):
+    def create_light_curve_data(
+        phase, flux, flux_err, fcqfid, filt, t_g_40, t_r_40, filtids=[1, 2]
+    ):
         """Create early and peak light curve dictionaries."""
         # Filter out observations < 40% of max flux
         idx_i = filt == 3
         idx_rise = (phase < 0) & (phase > -100) & ~idx_i
-        idx_g = (filt == 1) & (phase < t_g_40)
-        idx_r = (filt == 2) & (phase < t_r_40)
+        idx_g = (filt == filtids[0]) & (phase < t_g_40)
+        idx_r = (filt == filtids[1]) & (phase < t_r_40)
         idx = idx_rise & (idx_g | idx_r)
 
         lc_early = {
@@ -73,6 +81,200 @@ class ZTFDataProcessor:
         return lc_early, lc_peak
 
 
+class ZTFIaEarlyLate(SNLightCurve):
+    """
+    Liu et al. in prep.
+    ZTF SNe Ia with early light curves and nebular spectra
+    """
+
+    late_dir: str = "./Data/ztf_early_late/"
+    meta_data_path: str = "ztf_early_Ia_meta.csv"
+    salt_path: str = "ztf_early_Ia_salt.csv"
+    lc_path: str = "light_curve_fps_ztf/*fnu.csv"
+    atlas_lc_path: str = "light_curve_fps_atlas/"
+
+    def __init__(self, ztfid: str) -> None:
+        meta_data = Table.read(self.late_dir + self.meta_data_path)
+        salt_data = Table.read(self.late_dir + self.salt_path)
+        lc_list = sorted(glob.glob(self.late_dir + self.lc_path))
+        ztfid_list = meta_data["objid"].data
+        if ztfid not in ztfid_list:
+            raise ValueError(f"ZTF ID {ztfid} not found in early light curves.")
+        tab_lc = pd.read_csv(
+            lc_list[ztfid_list.tolist().index(ztfid)], sep="\s+", comment="#"
+        )
+        tab_lc = tab_lc.rename(
+            columns={key: key.replace(",", "") for key in tab_lc.columns}
+        )
+
+        # Prepare filter id
+        tab_lc["filter_id"] = np.select(
+            [
+                tab_lc["filter"] == "ZTF_g",
+                tab_lc["filter"] == "ZTF_r",
+                tab_lc["filter"] == "ZTF_i",
+            ],
+            [1, 2, 3],
+            default=0,  # Or some other default value if needed
+        )
+
+        # Prepare fcqf id
+        tab_lc["fcqfid"] = (
+            tab_lc["field"].astype(np.int64) * 10000
+            + tab_lc["ccdid"].astype(np.int64) * 100
+            + tab_lc["qid"].astype(np.int64) * 10
+            + tab_lc["filter_id"].astype(np.int64)
+        )
+
+        # Prepare flux and flux error
+        tab_lc["zp"] = np.ones(len(tab_lc), dtype=np.float32) * 30.0
+        delta_zp = tab_lc["zpdiff"] - tab_lc["zp"]
+        tab_lc["flux"] = tab_lc["forcediffimflux"].astype(np.float32) * (
+            10 ** (-0.4 * delta_zp)
+        )
+        tab_lc["flux_err"] = tab_lc["forcediffimfluxunc"].astype(np.float32) * (
+            10 ** (-0.4 * delta_zp)
+        )
+
+        # Quality mask
+        # https://github.com/BrightTransientSurvey/ztf_forced_phot/tree/main/explanation#-flags-bitmask
+        mask = np.isfinite(
+            tab_lc["flux"]
+        )  # tab_lc["infobitssci"] <= 33554432 #TODO: Figure out why some fluxes are NaN
+
+        data = tab_lc[mask]
+        t0 = salt_data[salt_data["ztfid"] == ztfid]["t0"].data[0]
+        z = meta_data[salt_data["ztfid"] == ztfid]["z"].data[0]
+        flux_g_max = salt_data[salt_data["ztfid"] == ztfid]["ztfg_flux_max"].data[0]
+        flux_r_max = salt_data[salt_data["ztfid"] == ztfid]["ztfr_flux_max"].data[0]
+        flux = data["flux"]
+        flux_err = data["flux_err"]
+        phase = (data["jd"] - 2400000.5 - t0) / (1 + z)
+
+        fcqfid = data["fcqfid"]
+        filt = data["filter_id"]
+
+        # Calculate 40% times and max flux from data
+        t_g_40, _ = ZTFDataProcessor.calculate_40_percent_times(
+            phase,
+            flux,
+            flux_err,
+            filt,
+            flux_max=flux_g_max,
+            filtid=1,  # g filter
+        )
+        t_r_40, _ = ZTFDataProcessor.calculate_40_percent_times(
+            phase,
+            flux,
+            flux_err,
+            filt,
+            flux_max=flux_r_max,
+            filtid=2,  # r filter
+        )
+
+        # Normalize flux
+        flux, flux_err = ZTFDataProcessor.process_flux_normalization(
+            flux, flux_err, filt, flux_g_max, flux_r_max
+        )
+
+        # Create light curve data
+        lc_early, lc_peak = ZTFDataProcessor.create_light_curve_data(
+            phase, flux, flux_err, fcqfid, filt, t_g_40, t_r_40
+        )
+
+        # Handle ATLAS light curves
+        atlas_lc_list = sorted(
+            glob.glob(self.late_dir + self.atlas_lc_path + f"{ztfid}_*.csv")
+        )
+        if len(atlas_lc_list) > 0:
+            tab_atlas_lc = pd.read_csv(atlas_lc_list[0])
+            tab_atlas_lc = tab_atlas_lc.rename(
+                columns={key: key.replace(",", "") for key in tab_atlas_lc.columns}
+            )
+            tab_atlas_lc["filter_id"] = np.select(
+                [
+                    tab_atlas_lc["F"] == "c",
+                    tab_atlas_lc["F"] == "o",
+                ],
+                [4, 5],
+                default=0,  # Or some other default value if needed
+            )
+            data_atlas = tab_atlas_lc
+            flux_c_max = salt_data[salt_data["ztfid"] == ztfid]["atlasc_flux_max"].data[
+                0
+            ]
+            flux_o_max = salt_data[salt_data["ztfid"] == ztfid]["atlaso_flux_max"].data[
+                0
+            ]
+            flux_atlas = data_atlas["uJy"]
+            flux_err_atlas = data_atlas["duJy"]
+            phase_atlas = (data_atlas["MJD"] - t0) / (1 + z)
+
+            if (phase_atlas < 0).sum() == 0:
+                print(f"No pre-peak data for ZTF ID {ztfid}, skip ATLAS.")
+
+            fcqfid_atlas = tab_atlas_lc["filter_id"]
+            filt_atlas = tab_atlas_lc["filter_id"]
+
+            # Calculate 40% times and max flux from data
+            if ((phase_atlas < max(t_g_40, t_r_40)) & (filt_atlas == 4)).sum() > 5:
+                t_c_40 = max(t_g_40, t_r_40)
+            else:
+                t_c_40 = -np.inf
+
+            if ((phase_atlas < max(t_g_40, t_r_40)) & (filt_atlas == 5)).sum() > 5:
+                t_o_40 = max(t_g_40, t_r_40)
+            else:
+                t_o_40 = -np.inf
+
+            # Normalize flux
+            flux_atlas, flux_err_atlas = ZTFDataProcessor.process_flux_normalization(
+                flux_atlas,
+                flux_err_atlas,
+                filt_atlas,
+                flux_c_max,
+                flux_o_max,
+                filtids=[4, 5],
+            )
+
+            # Create light curve data
+            lc_early_atlas, lc_peak_atlas = ZTFDataProcessor.create_light_curve_data(
+                phase_atlas,
+                flux_atlas,
+                flux_err_atlas,
+                fcqfid_atlas,
+                filt_atlas,
+                t_c_40,
+                t_o_40,
+                filtids=[4, 5],
+            )
+
+            # Combine early and peak light curves
+            lc_early = {
+                "phase": np.concatenate((lc_early["phase"], lc_early_atlas["phase"])),
+                "flux": np.concatenate((lc_early["flux"], lc_early_atlas["flux"])),
+                "flux_err": np.concatenate(
+                    (lc_early["flux_err"], lc_early_atlas["flux_err"])
+                ),
+                "fcqfid": np.concatenate(
+                    (lc_early["fcqfid"], lc_early_atlas["fcqfid"])
+                ),
+                "filt": np.concatenate((lc_early["filt"], lc_early_atlas["filt"])),
+            }
+
+            lc_peak = {
+                "phase": np.concatenate((lc_peak["phase"], lc_peak_atlas["phase"])),
+                "flux": np.concatenate((lc_peak["flux"], lc_peak_atlas["flux"])),
+                "flux_err": np.concatenate(
+                    (lc_peak["flux_err"], lc_peak_atlas["flux_err"])
+                ),
+                "fcqfid": np.concatenate((lc_peak["fcqfid"], lc_peak_atlas["fcqfid"])),
+                "filt": np.concatenate((lc_peak["filt"], lc_peak_atlas["filt"])),
+            }
+
+        super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid)
+
+
 class ZTFIaDR2(SNLightCurve):
     """
     Rigault et al. 2025
@@ -88,18 +290,24 @@ class ZTFIaDR2(SNLightCurve):
         Initialize the class instance.
         """
         tab_info = Table.read(self.dr2_dir + self.tab_info_path)
-        lst_lc = sorted(glob.glob(self.dr2_dir + self.tab_lc_path))
-        lst_ztdif = [lc.split("/")[-1].split("_")[0] for lc in lst_lc]
-        if ztfid not in lst_ztdif:
+        lc_list = sorted(glob.glob(self.dr2_dir + self.tab_lc_path))
+        ztfid_list = [lc.split("/")[-1].split("_")[0] for lc in lc_list]
+        if ztfid not in ztfid_list:
             raise ValueError(f"ZTF ID {ztfid} not found in DR2 light curves.")
-        tab_lc = Table.read(lst_lc[lst_ztdif.index(ztfid)], format="ascii", comment="#")
+        tab_lc = Table.read(
+            lc_list[ztfid_list.index(ztfid)], format="ascii", comment="#"
+        )
 
         # Prepare filter id and fcqf id
         tab_lc.add_column(
-            np.where(
-                tab_lc["filter"] == "ztfg",
-                1,
-                np.where(tab_lc["filter"] == "ztfr", 2, 3),
+            np.select(
+                [
+                    tab_lc["filter"] == "ZTF_g",
+                    tab_lc["filter"] == "ZTF_r",
+                    tab_lc["filter"] == "ZTF_i",
+                ],
+                [1, 2, 3],
+                default=0,  # Or some other default value if needed
             ),
             name="filter_id",
         )
@@ -130,8 +338,19 @@ class ZTFIaDR2(SNLightCurve):
         filt = data["filter_id"].data
 
         # Calculate 40% times and max flux from data
-        t_g_40, t_r_40, flux_g_max, flux_r_max = (
-            ZTFDataProcessor.calculate_40_percent_times(phase, flux, flux_err, filt)
+        t_g_40, flux_g_max = ZTFDataProcessor.calculate_40_percent_times(
+            phase,
+            flux,
+            flux_err,
+            filt,
+            filtid=1,  # g filter
+        )
+        t_r_40, flux_r_max = ZTFDataProcessor.calculate_40_percent_times(
+            phase,
+            flux,
+            flux_err,
+            filt,
+            filtid=2,  # r filter
         )
 
         # Normalize flux
@@ -204,8 +423,21 @@ class ZTFIaEDR(SNLightCurve):
         flux_r_max = info["fratio_rmax_2adam"].value[0]
 
         # Calculate 40% times and max flux from data
-        t_g_40, t_r_40, _, _ = ZTFDataProcessor.calculate_40_percent_times(
-            phase, flux, flux_err, filt, flux_g_max=flux_g_max, flux_r_max=flux_r_max
+        t_g_40, flux_g_max = ZTFDataProcessor.calculate_40_percent_times(
+            phase,
+            flux,
+            flux_err,
+            filt,
+            flux_max=flux_g_max,
+            filtid=1,  # g filter
+        )
+        t_r_40, flux_r_max = ZTFDataProcessor.calculate_40_percent_times(
+            phase,
+            flux,
+            flux_err,
+            filt,
+            flux_max=flux_r_max,
+            filtid=2,  # r filter
         )
 
         # Normalize flux
@@ -222,7 +454,7 @@ class ZTFIaEDR(SNLightCurve):
 
 
 class ZTFLib(SNLightCurveLib):
-    def __init__(self, ztfid_lib: list, source: str) -> None:
+    def __init__(self, ztfid_lib: list = None, source: str = None) -> None:
         """
         Parameters
         ----------
@@ -236,20 +468,36 @@ class ZTFLib(SNLightCurveLib):
         None
         """
 
+        if ztfid_lib is None or source is None:
+            super().__init__()
+            return
+
         lc_early_lib = []
         lc_peak_lib = []
 
+        ztfid_lib_processed = []
+
         for ztfid in ztfid_lib:
-            if source in ["EDR", "edr"]:
-                ztf_sn = ZTFIaEDR(ztfid=ztfid)
-            elif source in ["DR2", "dr2"]:
-                ztf_sn = ZTFIaDR2(ztfid=ztfid)
-            else:
-                raise ValueError("Source must be 'EDR' or 'DR2'.")
+            try:
+                if source.lower() == "edr":
+                    ztf_sn = ZTFIaEDR(ztfid=ztfid)
+                elif source.lower() == "dr2":
+                    ztf_sn = ZTFIaDR2(ztfid=ztfid)
+                elif source.lower() == "early_late":
+                    ztf_sn = ZTFIaEarlyLate(ztfid=ztfid)
+                else:
+                    raise ValueError("Source must be 'EDR', 'DR2', or 'Early_Late'.")
+                ztfid_lib_processed.append(ztfid)
+            except ValueError as e:
+                print(f"Skipping {ztfid} due to error: {e}")
+                raise e
+                continue
+
             lc_early_lib.append(ztf_sn.lc_early)
             lc_peak_lib.append(ztf_sn.lc_peak)
 
-        self.ztfid_lib = ztfid_lib
         super().__init__(
-            lc_early_lib=lc_early_lib, lc_peak_lib=lc_peak_lib, ztfid_lib=ztfid_lib
+            lc_early_lib=lc_early_lib,
+            lc_peak_lib=lc_peak_lib,
+            ztfid_lib=ztfid_lib_processed,
         )

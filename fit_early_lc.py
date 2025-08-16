@@ -663,8 +663,11 @@ class SNLightCurve:
         None
         """
 
+        colors = np.array(["tab:green", "tab:red", "tab:cyan", "tab:orange"])
+        n_color = len(np.unique(self.idx_filt))
+
         _, ax = plt.subplots(
-            figsize=(8, 4), sharex=True, sharey=True, constrained_layout=True
+            figsize=(8, 2 * n_color), sharex=True, sharey=True, constrained_layout=True
         )
 
         post_sample = self.post_sample
@@ -681,9 +684,6 @@ class SNLightCurve:
             idx_post_check = np.random.choice(len(t_fl), post_pred_samples)
             for i in idx_post_check:
                 ax.axvline(t_fl[i], color="0.2", lw=0.1)
-
-        colors = np.array(["tab:green", "tab:red", "tab:orange"])
-        n_color = len(np.unique(self.idx_filt))
 
         for k, flt in enumerate(np.sort(np.unique(self.idx_filt))):
             for j, fcqfid in enumerate(np.unique(self.idx_fcqfid)):
@@ -721,7 +721,7 @@ class SNLightCurve:
                     )
 
             ax.set_xlim(-31, -4)
-            ax.set_ylim(-offset, 75)
+            ax.set_ylim(-offset * (n_color - 1), 75)
 
             if post_sample is not None:
                 amp_ = np.ravel(post_sample["A"][:, :, flt])
@@ -794,6 +794,19 @@ class SNLightCurveLib:
         ztfid_lib: list = None,
     ) -> None:
         self.lc_library: list[SNLightCurve] = []
+        self.ztfid_lib: list = ztfid_lib if ztfid_lib is not None else []
+
+        self.phase, self.flux, self.flux_err = [], [], []
+        self.idx_filt, self.idx_filt_gr = (
+            np.array([], dtype=int),
+            np.array([], dtype=int),
+        )
+        self.idx_fcqfid = np.array([], dtype=int)
+        self.idx_obj = np.array([], dtype=int)
+
+        if lc_early_lib is None:
+            return
+
         if (lc_peak_lib is not None) and (ztfid_lib is not None):
             for k, lc_early in enumerate(lc_early_lib):
                 self.lc_library.append(
@@ -815,34 +828,22 @@ class SNLightCurveLib:
             for k, lc_early in enumerate(lc_early_lib):
                 self.lc_library.append(SNLightCurve(lc_early=lc_early))
 
-        self.phase, self.flux, self.flux_err = [], [], []
-        self.idx_filt, self.idx_filt_gr = (
-            np.array([], dtype=int),
-            np.array([], dtype=int),
-        )
-        self.idx_fcqfid = np.array([], dtype=int)
-        self.idx_obj = np.array([], dtype=int)
-
-        for k in range(len(lc_early_lib)):
+        for k, lc in enumerate(self.lc_library):
             # concatenate the indices
             self.idx_filt = np.append(
                 self.idx_filt,
-                self.lc_library[k].idx_filt + len(np.unique(self.idx_filt)),
+                lc.idx_filt + len(np.unique(self.idx_filt)),
             )
-            self.idx_filt_gr = np.append(self.idx_filt_gr, self.lc_library[k].idx_filt)
+            self.idx_filt_gr = np.append(self.idx_filt_gr, lc.idx_filt)
             self.idx_fcqfid = np.append(
                 self.idx_fcqfid,
-                self.lc_library[k].idx_fcqfid + len(np.unique(self.idx_fcqfid)),
+                lc.idx_fcqfid + len(np.unique(self.idx_fcqfid)),
             )
-            self.idx_obj = np.append(
-                self.idx_obj, np.ones_like(self.lc_library[k].idx_filt) * k
-            )
+            self.idx_obj = np.append(self.idx_obj, np.ones_like(lc.idx_filt) * k)
             # concatenate the light curve data
-            self.phase = np.append(self.phase, self.lc_library[k].lc_early["phase"])
-            self.flux = np.append(self.flux, self.lc_library[k].lc_early["flux"])
-            self.flux_err = np.append(
-                self.flux_err, self.lc_library[k].lc_early["flux_err"]
-            )
+            self.phase = np.append(self.phase, lc.lc_early["phase"])
+            self.flux = np.append(self.flux, lc.lc_early["flux"])
+            self.flux_err = np.append(self.flux_err, lc.lc_early["flux_err"])
 
         n_obj = len(np.unique(self.idx_obj))
         n_fcqfid = len(np.unique(self.idx_fcqfid))
@@ -857,6 +858,58 @@ class SNLightCurveLib:
         print("Number of unique filters:", n_filt)
         print("Number of gr filters:", n_filt_gr)
         print("Light curves compiled...")
+
+    def append(self, lc_lib: "SNLightCurveLib"):
+        """
+        Append another SNLightCurveLib to the current one.
+
+        Parameters
+        ----------
+        lc_lib : SNLightCurveLib
+            The SNLightCurveLib to append.
+
+        Returns
+        -------
+        None
+        """
+        if not isinstance(lc_lib, SNLightCurveLib):
+            raise TypeError("lc_lib must be an instance of SNLightCurveLib")
+
+        # concatenate the indices and light curve data
+        for k, lc in enumerate(lc_lib.lc_library):
+            self.idx_filt = np.append(
+                self.idx_filt,
+                lc.idx_filt + len(np.unique(self.idx_filt)),
+            )
+            self.idx_filt_gr = np.append(self.idx_filt_gr, lc.idx_filt)
+            self.idx_fcqfid = np.append(
+                self.idx_fcqfid,
+                lc.idx_fcqfid + len(np.unique(self.idx_fcqfid)),
+            )
+            self.idx_obj = np.append(
+                self.idx_obj, np.ones_like(lc.idx_filt) * (len(self.lc_library) + k)
+            )
+            self.phase = np.append(self.phase, lc.lc_early["phase"])
+            self.flux = np.append(self.flux, lc.lc_early["flux"])
+            self.flux_err = np.append(self.flux_err, lc.lc_early["flux_err"])
+
+        self.lc_library.extend(lc_lib.lc_library)
+        self.ztfid_lib.extend(lc_lib.ztfid_lib)
+
+        n_obj = len(np.unique(self.idx_obj))
+        n_fcqfid = len(np.unique(self.idx_fcqfid))
+        n_filt = len(np.unique(self.idx_filt))
+        n_filt_gr = len(np.unique(self.idx_filt_gr))
+
+        assert n_obj == self.idx_obj.max() + 1, "Indexing error: idx_obj"
+        assert n_fcqfid == self.idx_fcqfid.max() + 1, "Indexing error: idx_fcqfid"
+        assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt"
+        assert n_filt_gr == self.idx_filt_gr.max() + 1, "Indexing error: idx_filt_gr"
+        print("Number of objects:", n_obj)
+        print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
+        print("Number of unique filters:", n_filt)
+        print("Number of gr filters:", n_filt_gr)
+        print("Light curves appended...")
 
     def sampling(
         self,

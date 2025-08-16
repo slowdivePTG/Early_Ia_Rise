@@ -16,9 +16,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "dr",
+        nargs="+",
         type=str,
-        default="dr2",
-        help="Data release to use (default: dr2)",
+        default=["dr2"],
+        help="Data release to use (default: dr2; options: dr2, edr, early_late)",
     )
     parser.add_argument(
         "--num_warmup",
@@ -40,25 +41,36 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    dr = args.dr.lower()
+    drs = [dr.lower() for dr in args.dr]
 
-    if dr == "dr2":
-        dr_dir = "ztf_snia_dr2"
-        tab_early_info = Table.read(
-            "./Data/ztf_snia_dr2/tables/snia_early_data.csv", format="ascii.csv"
-        )
-        normal = tab_early_info["sn_type"] != "snia-pec"
-        ztflib = ZTFLib(ztfid_lib=tab_early_info["ztfname"][normal], source="DR2")
+    ztflib = ZTFLib()
 
-    elif dr == "edr":
-        dr_dir = "ztf_snia_edr"
-        tab_salt = Table.read("./Data/ztf_snia_edr/Nobs_cut_salt2_spec_subtype_pec.csv")
-        normal = ~pd.array(tab_salt["Ia subtype"]).isin(
-            ["Ia-CSM", "SC", "SC*", "86G-like", "02cx-like"]
-        )
-        ztflib = ZTFLib(ztfid_lib=tab_salt["name"][normal], source="EDR")
+    dr_dir = None
 
-    print(f"Number of normal Ia in {dr}: {len(ztflib.lc_library)}")
+    for dr in drs:
+
+        if dr == "dr2":
+            dr_dir = "ztf_snia_dr2"
+            tab_early_info = Table.read(
+                "./Data/ztf_snia_dr2/tables/snia_early_data.csv", format="ascii.csv"
+            )
+            normal = tab_early_info["sn_type"] != "snia-pec"
+            ztflib.append(ZTFLib(ztfid_lib=tab_early_info["ztfname"][normal], source="DR2"))
+
+        elif dr == "edr":
+            dr_dir = "ztf_snia_edr"
+            tab_salt = Table.read("./Data/ztf_snia_edr/Nobs_cut_salt2_spec_subtype_pec.csv")
+            normal = ~pd.array(tab_salt["Ia subtype"]).isin(
+                ["Ia-CSM", "SC", "SC*", "86G-like", "02cx-like"]
+            )
+            ztflib.append(ZTFLib(ztfid_lib=tab_salt["name"][normal], source="EDR"))
+
+        elif dr == "early_late":
+            dr_dir = "ztf_early_late"
+            tab_early_info = Table.read("./Data/ztf_early_late/ztf_early_Ia.csv")
+            ztflib.append(
+                ZTFLib(tab_early_info[tab_early_info["not_obs"].mask]["ztfid"], source="early_late")
+            )
 
     ztflib.sampling(
         num_warmup=args.num_warmup,
