@@ -302,9 +302,9 @@ class ZTFIaDR2(SNLightCurve):
         tab_lc.add_column(
             np.select(
                 [
-                    tab_lc["filter"] == "ZTF_g",
-                    tab_lc["filter"] == "ZTF_r",
-                    tab_lc["filter"] == "ZTF_i",
+                    tab_lc["filter"] == "ztfg",
+                    tab_lc["filter"] == "ztfr",
+                    tab_lc["filter"] == "ztfi",
                 ],
                 [1, 2, 3],
                 default=0,  # Or some other default value if needed
