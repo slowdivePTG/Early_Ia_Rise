@@ -165,3 +165,5 @@ Figures/
 requirements.txt
 requirements.lock
 uv.lock
+
+submit.sh
