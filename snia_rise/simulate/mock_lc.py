@@ -2,8 +2,8 @@ import numpy as np
 import jax.numpy as jnp
 import corner
 
-from fit_early_lc import f_t, SNLightCurveLib
-from _utils import plt
+from ..model.fit_early_lc import f_t, SNLightCurveLib
+from .._utils import plt
 
 
 def generate_flux_err(flux, zp=0, method="broken_power_law"):

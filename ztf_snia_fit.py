@@ -7,7 +7,7 @@ numpyro.set_host_device_count(4)
 numpyro.enable_x64()
 
 from astropy.table import Table
-from ztf_lc import ZTFLib
+from snia_rise.ztf_lc import ZTFLib
 from numpyro import infer
 
 if __name__ == "__main__":

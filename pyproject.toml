@@ -18,6 +18,7 @@ dependencies = [
   "xarray",
   "scikit-learn",
   "astropy>=7.1.0",
+  "redback>=1.12.1",
 ]
 
 [dependency-groups]
@@ -26,3 +27,6 @@ dev = [
     "ipywidgets>=8.1.7",
     "jupyter>=1.1.1",
 ]
+
+[tool.setuptools]
+packages = ["snia_rise"]

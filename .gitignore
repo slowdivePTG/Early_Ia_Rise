@@ -156,10 +156,15 @@ orcid-ID.png
 *.ipynb
 
 # datasets (temporarily)
-Data/
+data/
+simulated/
+playground/
 
 # Figures (temporarily)
-Figures/
+figures/
+
+# Papaer drafts (temporarily)
+paper/
 
 # uv lock and compiled files
 requirements.txt

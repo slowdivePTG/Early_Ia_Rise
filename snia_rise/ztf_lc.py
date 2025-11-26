@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 
 from astropy.table import Table
-from fit_early_lc import SNLightCurve, SNLightCurveLib
-from _utils import data_binning
+from .model.fit_early_lc import SNLightCurve, SNLightCurveLib
+from ._utils import data_binning
 
 
 class ZTFDataProcessor:

@@ -1,0 +1,123 @@
+import numpy as np
+
+from jax._src.typing import ArrayLike, Array
+
+
+def f_t(
+    t: float | ArrayLike,
+    t_fl: float | ArrayLike,
+    alpha_0: float | ArrayLike,
+    alpha_1: float | ArrayLike = 0.0,
+    eps: float = 1e-10,
+):
+    """
+    Calculate the flux with a curved power-law rise model.
+
+    Parameters:
+    -----------
+    t : float or array-like
+        Time value.
+    t_fl : float or array-like
+        Time of the first light.
+    amp : float or array-like
+        Proportionality factor.
+    alpha_0 : float or array-like
+        Rising power-law index.
+    alpha_1 : float or array-like, optional, default = 0.0
+        Correction factor for the power-law rise (default is 0, i.e., simple power-law).
+    eps : float, optional, default = 1e-10
+        Small value to avoid numerical issues when t - t_fl is small and alpha_0 < 1
+
+    Returns:
+    --------
+    float | ArrayLike
+        The calculated value of f(t).
+    """
+    du = np.maximum(t - t_fl, eps)
+    return np.where(t < t_fl, 0, np.power(du, alpha_0 * (1 + alpha_1 * du)))
+
+
+def power_law_rise_flat_sed(
+    time: float | ArrayLike,
+    peak_luminosity: float,
+    alpha_0: float,
+    alpha_1: float,
+    dist_lum: float,
+    **kwargs,
+):
+    """
+    A transient model with a curved power-law rise, and a flat SED.
+    """
+    import pandas as pd
+    import astropy.units as u
+    from astropy.cosmology import Planck18 as cosmo
+    from astropy.cosmology import z_at_value
+    from redback.sed import RedbackTimeSeriesSource
+    from scipy.special import lambertw
+
+    # Helper to extract scalar
+    def to_scalar(val):
+        if isinstance(val, pd.Series):
+            return float(val.iloc[0])
+        elif isinstance(val, np.ndarray):
+            return float(val.flat[0])
+        else:
+            return float(val)
+
+    # Ensure time is 1D
+    time = np.atleast_1d(time)
+
+    # Convert to scalars
+    peak_luminosity = to_scalar(peak_luminosity)
+    alpha_0 = to_scalar(alpha_0)
+    alpha_1 = to_scalar(alpha_1)
+    dist_lum = to_scalar(dist_lum)
+    t_fl = -np.exp(lambertw(-np.exp(1) / alpha_1).real - 1) + 200
+
+    # Calculate distance and redshift
+    mpc_to_cm = 3.086e24
+    dist_lum_cm = dist_lum * mpc_to_cm
+    redshift = z_at_value(
+        cosmo.luminosity_distance, dist_lum * u.Mpc, zmin=1e-7, zmax=1.0
+    ).value
+
+    # Calculate flux
+    flux_density_cgs = peak_luminosity / (4 * np.pi * dist_lum_cm**2)
+    flux_density_jy = flux_density_cgs / 1e-23
+
+    flux_max = f_t(
+        t=200,
+        t_fl=t_fl,
+        alpha_0=alpha_0,
+        alpha_1=alpha_1,
+    )
+
+    flux = (
+        f_t(
+            t=time / (1 + redshift),
+            t_fl=t_fl,
+            alpha_0=alpha_0,
+            alpha_1=alpha_1,
+        )
+        / flux_max
+        * flux_density_jy
+    )
+
+    # Redshift dimming
+    flux = flux / (1 + redshift)
+
+    # Wavelength array
+    lambda_array = np.linspace(3000, 10000, 100)
+
+    # Flat SED
+    flux_2d = np.tile(flux[:, np.newaxis], (1, len(lambda_array)))
+
+    # Convert to erg/cm^2/s/A
+    c = 2.99792458e18
+    flux_density_cgs = flux_2d * 1e-23 * c / lambda_array[np.newaxis, :] ** 2
+
+    # Always return sncosmo source (simpler for redback to handle)
+    source = RedbackTimeSeriesSource(
+        phase=time, wave=lambda_array, flux=flux_density_cgs
+    )
+    return source

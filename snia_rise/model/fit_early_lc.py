@@ -1,4 +1,3 @@
-from math import e
 import numpy as np
 import warnings
 
@@ -11,8 +10,13 @@ import xarray as xr
 from numpyro import distributions as dist, infer
 from sklearn.preprocessing import LabelEncoder
 
-from _utils import plt
+from .._utils import plt
 from numpy.typing import ArrayLike
+
+
+####################################################################################################
+##                      Power-law rise function for SNe Ia light curves                           ##
+####################################################################################################
 
 
 def f_t(
@@ -20,7 +24,8 @@ def f_t(
     t_fl: float | ArrayLike,
     base: float | ArrayLike,
     amp: float | ArrayLike,
-    alpha: float | ArrayLike,
+    alpha_0: float | ArrayLike,
+    alpha_1: float | ArrayLike,
     eps: float = 1e-10,
 ):
     """
@@ -36,25 +41,25 @@ def f_t(
         Baseline flux.
     amp : float or array-like
         Proportionality factor.
-    alpha : float or array-like
+    alpha_0 : float or array-like
         Rising power-law index.
+    alpha_1 : float or array-like
+        Correction factor for the power-law rise.
     eps : float, optional, default = 1e-10
-        Small value to avoid numerical issues when t - t_fl is small and alpha < 1
+        Small value to avoid numerical issues when t - t_fl is small and alpha_0 < 1
 
     Returns:
     --------
-    float
+    float | ArrayLike
         The calculated value of f(t).
     """
-    f = (
-        jnp.where(t < t_fl, 0, amp * jnp.power(jnp.maximum(t - t_fl, eps), alpha))
-        + base
-    )
+    du = jnp.maximum(t - t_fl, eps)
+    f = jnp.where(t < t_fl, 0, amp * jnp.power(du, alpha_0 * (1 + alpha_1 * du))) + base
     return f
 
 
 ####################################################################################################
-####################### Probabilistic models for SNe Ia light curve modeling #######################
+##                   Probabilistic models for SNe Ia light curve modeling                         ##
 ####################################################################################################
 
 
