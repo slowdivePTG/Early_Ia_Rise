@@ -49,9 +49,6 @@ def power_law_rise_flat_sed(
     A transient model with a curved power-law rise, and a flat SED.
     """
     import pandas as pd
-    import astropy.units as u
-    from astropy.cosmology import Planck18 as cosmo
-    from astropy.cosmology import z_at_value
     from redback.sed import RedbackTimeSeriesSource
     from scipy.special import lambertw
 
@@ -72,39 +69,33 @@ def power_law_rise_flat_sed(
     alpha_0 = to_scalar(alpha_0)
     alpha_1 = to_scalar(alpha_1)
     dist_lum = to_scalar(dist_lum)
-    t_fl = -np.exp(lambertw(-np.exp(1) / alpha_1).real - 1) + 200
+    t_peak = np.exp(lambertw(-np.exp(1) / alpha_1).real - 1)
 
     # Calculate distance and redshift
     mpc_to_cm = 3.086e24
     dist_lum_cm = dist_lum * mpc_to_cm
-    redshift = z_at_value(
-        cosmo.luminosity_distance, dist_lum * u.Mpc, zmin=1e-7, zmax=1.0
-    ).value
 
     # Calculate flux
     flux_density_cgs = peak_luminosity / (4 * np.pi * dist_lum_cm**2)
     flux_density_jy = flux_density_cgs / 1e-23
 
     flux_max = f_t(
-        t=200,
-        t_fl=t_fl,
+        t=t_peak,
+        t_fl=0,
         alpha_0=alpha_0,
         alpha_1=alpha_1,
     )
 
     flux = (
         f_t(
-            t=time / (1 + redshift),
-            t_fl=t_fl,
+            t=time,
+            t_fl=0,
             alpha_0=alpha_0,
             alpha_1=alpha_1,
         )
         / flux_max
         * flux_density_jy
     )
-
-    # Redshift dimming
-    flux = flux / (1 + redshift)
 
     # Wavelength array
     lambda_array = np.linspace(3000, 10000, 100)

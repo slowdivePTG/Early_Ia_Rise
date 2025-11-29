@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 
 from astropy.table import Table
-from .model.fit_early_lc import SNLightCurve, SNLightCurveLib
+from .model.fit_rise import SNLightCurve, SNLightCurveLib
 from ._utils import data_binning
 
 

@@ -1,25 +1,31 @@
-# hostsub_gp/_plt.py
+# snia_rise/_utils/_plt.py
 import matplotlib.pyplot as plt
 
 from typing import Callable, Optional
 from numpy.typing import ArrayLike
 
-plt.rcParams.update(
-    {
-        "text.usetex": True,
-        "font.family": "sans-serif",
-        "font.sans-serif": "Ariel",
-        "font.size": 20,
-        "xtick.labelsize": 20,
-        "ytick.labelsize": 20,
-        "xtick.major.size": 6,
-        "ytick.major.size": 6,
-        "xtick.major.width": 1.6,
-        "ytick.major.width": 1.6,
-        "xtick.minor.size": 3,
-        "ytick.minor.size": 3,
-    }
-)
+
+def set_plot_style():
+    """
+    Set a consistent plot style for matplotlib plots.
+    """
+    plt.rcdefaults()
+    plt.rcParams.update(
+        {
+            "text.usetex": True,
+            "font.family": "sans-serif",
+            "font.sans-serif": "Ariel",
+            "font.size": 20,
+            "xtick.labelsize": 20,
+            "ytick.labelsize": 20,
+            "xtick.major.size": 6,
+            "ytick.major.size": 6,
+            "xtick.major.width": 1.6,
+            "ytick.major.width": 1.6,
+            "xtick.minor.size": 3,
+            "ytick.minor.size": 3,
+        }
+    )
 
 
 def show_and_save(f: Callable) -> Callable:
@@ -91,3 +97,6 @@ def plot_box_spec(
     ax.plot(wave_plot, flux_plot, **kwargs)
 
     return ax
+
+
+set_plot_style()

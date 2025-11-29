@@ -19,7 +19,7 @@ if __name__ == "__main__":
         nargs="+",
         type=str,
         default=["dr2"],
-        help="Data release to use (default: dr2; options: dr2, edr, early_late)",
+        help="data release to use (default: dr2; options: dr2, edr, early_late)",
     )
     parser.add_argument(
         "--num_warmup",
@@ -52,14 +52,14 @@ if __name__ == "__main__":
         if dr == "dr2":
             dr_dir = "ztf_snia_dr2"
             tab_early_info = Table.read(
-                "./Data/ztf_snia_dr2/tables/snia_early_data.csv", format="ascii.csv"
+                "./data/ztf_snia_dr2/tables/snia_early_data.csv", format="ascii.csv"
             )
             normal = tab_early_info["sn_type"] != "snia-pec"
             ztflib.append(ZTFLib(ztfid_lib=tab_early_info["ztfname"][normal], source="DR2"))
 
         elif dr == "edr":
             dr_dir = "ztf_snia_edr"
-            tab_salt = Table.read("./Data/ztf_snia_edr/Nobs_cut_salt2_spec_subtype_pec.csv")
+            tab_salt = Table.read("./data/ztf_snia_edr/Nobs_cut_salt2_spec_subtype_pec.csv")
             normal = ~pd.array(tab_salt["Ia subtype"]).isin(
                 ["Ia-CSM", "SC", "SC*", "86G-like", "02cx-like"]
             )
@@ -67,7 +67,7 @@ if __name__ == "__main__":
 
         elif dr == "early_late":
             dr_dir = "ztf_early_late"
-            tab_early_info = Table.read("./Data/ztf_early_late/ztf_early_Ia.csv")
+            tab_early_info = Table.read("./data/ztf_early_late/ztf_early_Ia.csv")
             ztflib.append(
                 ZTFLib(tab_early_info[tab_early_info["not_obs"].mask]["ztfid"], source="early_late")
             )
@@ -80,13 +80,13 @@ if __name__ == "__main__":
         random_seed=114514,
     )
 
-    if os.path.exists(f"./Data/{dr_dir}/results/"):
+    if os.path.exists(f"./data/{dr_dir}/results/"):
         # Remove existing results to avoid conflicts
-        os.system(f"rm -rf ./Data/{dr_dir}/results/*nc")
-    os.makedirs(f"./Data/{dr_dir}/results/", exist_ok=True)
+        os.system(f"rm -rf ./data/{dr_dir}/results/*nc")
+    os.makedirs(f"./data/{dr_dir}/results/", exist_ok=True)
 
     # Save the posterior for the hierarchical model
-    ztflib.post_sample.to_netcdf(f"./Data/{dr_dir}/results/posterior_hierarchical.nc")
+    ztflib.post_sample.to_netcdf(f"./data/{dr_dir}/results/posterior_hierarchical.nc")
 
     # Save the posterior samples for each light curve
     for k in range(len(ztflib.lc_library)):
@@ -94,5 +94,5 @@ if __name__ == "__main__":
         posterior = lc.post_sample
         # save the posterior
         posterior.to_netcdf(
-            f"./Data/{dr_dir}/results/posterior_{ztflib.ztfid_lib[k]}.nc"
+            f"./data/{dr_dir}/results/posterior_{ztflib.ztfid_lib[k]}.nc"
         )

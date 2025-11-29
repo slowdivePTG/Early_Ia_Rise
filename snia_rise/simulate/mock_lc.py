@@ -1,44 +1,231 @@
 import numpy as np
 import jax.numpy as jnp
-import corner
 
-from ..model.fit_early_lc import f_t, SNLightCurveLib
+from ..model.fit_rise import f_t, SNLightCurveLib
 from .._utils import plt
 
 
-def generate_flux_err(flux, zp=0, method="broken_power_law"):
+class RedbackLightCurveLib(SNLightCurveLib):
     """
-    Estimate the flux error based on the broken power law relation between magnitude and S/N
+    A mock light curve library using Redback to simulate ZTF light curves.
     """
-    mag = -2.5 * jnp.log10(flux) + zp
-    if method == "broken_power_law":
 
-        def log_broken_powerlaw(x, x0=18.2123, y0=-8.9946, k1=-0.3044, k2=0):
-            """
-            Broken power law function - mag v.s. S/N (default values adopted from the fit to the r-band data in Yao et al. 2019)
-            """
-            log_err = 0.5 * jnp.log10(
-                (
-                    jnp.power(10, (y0 + k1 * (x - x0)) * 2)
-                    + jnp.power(10, (y0 + k2 * (x - x0)) * 2)
-                )
+    import pandas as pd
+
+    def __init__(
+        self,
+        n_lc: int = 10,
+        params_mean: dict = None,
+        params_std: dict = None,
+        early_threshold: float = 0.4,
+    ) -> list[pd.DataFrame]:
+        """
+        Simulate light curves using Redback.
+        """
+        import pandas as pd
+        from redback.simulate_transients import SimulateOpticalTransient
+        from .._utils._plt import set_plot_style
+
+        from .sed import power_law_rise_flat_sed
+
+        T0_MJD_TRANSIENT = 59050.0
+        PEAK_LUMINOSITY = 2e28  # erg/s/Hz
+
+        # Sample the population parameters using numpy.random
+        num_tot = n_lc * 10  # oversample to account for non-detections
+
+        np.random.seed(n_lc * 114514)
+
+        if params_mean is None:
+            params_mean = {}
+        if params_std is None:
+            params_std = {}
+
+        # True hyper-parameters for the power-law rise model
+        self.params_true = dict(
+            mean_alpha=params_mean.get("alpha", 2.0),
+            std_alpha=params_std.get("alpha", 0.2),
+            mean_t_fl=params_mean.get("t_fl", -18.0),
+            std_t_fl=params_std.get("t_fl", 2.0),
+        )
+
+        # Parameters for simulating the population
+        params_sim = dict(
+            base=np.random.normal(
+                params_mean.get("base", 0.0), params_std.get("base", 0.1), num_tot
+            ),
+            t_peak=np.random.normal(
+                -self.params_true["mean_t_fl"], self.params_true["std_t_fl"], num_tot
+            ),
+            alpha_0=np.random.normal(
+                self.params_true["mean_alpha"], self.params_true["std_alpha"], num_tot
+            ),
+        )
+
+        # Compute alpha_1 based on other parameters
+        params_sim["alpha_1"] = -1 / (
+            params_sim["t_peak"] * (1 + np.log(params_sim["t_peak"]))
+        )
+
+        # Prior on intrinsic peak luminosity (erg/s/Hz) - fixed value
+        params_sim["peak_luminosity"] = np.full(num_tot, PEAK_LUMINOSITY)
+
+        # dist_lum ~ PowerLaw(alpha=2, min=10, max=250)
+        # For power law: f(x) ∝ x^(alpha), we use inverse transform sampling
+        # CDF^(-1)(u) = (min^(1+alpha) + u*(max^(1+alpha) - min^(1+alpha)))^(1/(1+alpha))
+        alpha = 2
+        min_dist, max_dist = 10, 250
+        u = np.random.uniform(0, 1, num_tot)
+        params_sim["dist_lum"] = (
+            min_dist ** (1 + alpha)
+            + u * (max_dist ** (1 + alpha) - min_dist ** (1 + alpha))
+        ) ** (1 / (1 + alpha))
+
+        # Add the required t0_mjd_transient parameter
+        # This sets when each transient begins (in MJD)
+        params_sim["t0_mjd_transient"] = np.full(num_tot, T0_MJD_TRANSIENT)
+        params_sim["ra"] = np.random.uniform(240, 360, num_tot)
+        params_sim["dec"] = np.random.uniform(-30, 90, num_tot)
+
+        # Simulate each transient individually
+        lc_early_lib = np.empty(shape=n_lc, dtype=object)
+        lc_peak_lib = np.empty(shape=n_lc, dtype=object)
+        params_valid_det = []
+
+        for i in range(num_tot):
+            # Extract parameters for this single transient
+            single_params = {key: val[i] for key, val in params_sim.items()}
+
+            if len(params_valid_det) >= n_lc:
+                break
+
+            # Simulate single transient
+            sim = SimulateOpticalTransient.simulate_transient_in_ztf(
+                model=power_law_rise_flat_sed,
+                survey="ztf",
+                parameters=single_params,
+                end_transient_time=100,
+                snr_threshold=3.0,
+                add_source_noise=True,
+                source_noise=0.02,
+                redback_compatible_model=True,
+                model_kwargs={},
+                obs_buffer=100,
+                seed=42,
             )
-            log_sky_noise = y0
-            return np.where(np.isfinite(x) & ~np.isnan(x), log_err, log_sky_noise)
 
-        return 10 ** (log_broken_powerlaw(mag) + 0.4 * zp)
-    else:
-        raise ValueError("Method not recognized")
+            obs = sim.observations
+            # only need g and r bands
+            obs = obs[(obs["band"] == "ztfg") | (obs["band"] == "ztfr")].reset_index(
+                drop=True
+            )
+            idx_snr = (obs["flux(erg/cm2/s)"] / obs["flux_error"]) > 10
+            obs["phase"] = (
+                obs["time"]
+                - single_params["t0_mjd_transient"]
+                - single_params["t_peak"]
+            )
+            idx_rise = (obs["phase"] < 0) & (obs["phase"] > -10)
+            idx_fall = (obs["phase"] >= 0) & (obs["phase"] < 10)
+            idx_baseline = obs["phase"] < -20
+
+            if (
+                np.sum(idx_snr & idx_rise) < 2
+                or np.sum(idx_snr & idx_fall) < 2
+                or np.sum(idx_baseline) < 10
+            ):
+                continue
+
+            # Normalize fluxes
+            obs["flux_norm"] = np.full_like(obs["flux(erg/cm2/s)"], np.nan)
+            obs["flux_norm_error"] = np.full_like(obs["flux_error"], np.nan)
+
+            for band in ["ztfg", "ztfr"]:
+                idx_band = obs["band"] == band
+                flux_norm_factor = (
+                    obs.loc[idx_snr & idx_band, "flux(erg/cm2/s)"].max() / 100
+                )
+                obs["flux_norm"][idx_band] = (
+                    obs["flux(erg/cm2/s)"][idx_band] / flux_norm_factor
+                )
+                obs["flux_norm_error"][idx_band] = (
+                    obs["flux_error"][idx_band] / flux_norm_factor
+                )
+
+            # Remove the filter with no detections
+            obs = obs[np.isfinite(obs["flux_norm"])].reset_index(drop=True)
+
+            print(
+                f"Simulating transient {len(params_valid_det) + 1}/{n_lc} ({i + 1}/{num_tot} attempts)..."
+            )
+            print(f"  → {len(sim.inference_observations)} detections")
+
+            # Generate early light curve up to early_threshold of peak flux
+            phase = obs["phase"].values
+            flux_mock = obs["flux_norm"].values + single_params["base"]
+            flux_err_mock = obs["flux_norm_error"].values
+
+            filt = np.where(obs["band"] == "ztfg", 1, 2).astype(np.int32)
+            fcqfid = filt.astype(np.int32)
+
+            idx_early = (phase < 0) & (obs["flux_norm"] <= early_threshold * 100)
+            idx_peak = phase < 0
+
+            lc_early_lib[len(params_valid_det)] = dict(
+                phase=phase[idx_early],
+                flux=flux_mock[idx_early],
+                flux_err=flux_err_mock[idx_early],
+                fcqfid=fcqfid[idx_early],
+                filt=filt[idx_early],
+            )
+            lc_peak_lib[len(params_valid_det)] = dict(
+                phase=phase[idx_peak],
+                flux=flux_mock[idx_peak],
+                flux_err=flux_err_mock[idx_peak],
+                fcqfid=fcqfid[idx_peak],
+                filt=filt[idx_peak],
+            )
+
+            params_valid_det.append(single_params)
+
+        params_valid_det = pd.DataFrame(params_valid_det).reset_index(drop=True)
+
+        self.params_true["alpha_0"] = params_valid_det["alpha_0"].values
+        self.params_true["alpha_1"] = params_valid_det["alpha_1"].values
+        self.params_true["t_fl"] = -params_valid_det["t_peak"].values
+
+        super().__init__(lc_early_lib=lc_early_lib, lc_peak_lib=lc_peak_lib)
+        self.n_lc = n_lc
+        self.params_names = dict(
+            t_fl=r"$t_\mathrm{fl}$",
+            base=r"$C$",
+            amp=r"$A$",
+            alpha=r"$\alpha$",
+            mean_alpha=r"$\mu_\alpha$",
+            std_alpha=r"$\sigma_\alpha$",
+            mean_t_fl=r"$\mu_{t_\mathrm{fl}}$",
+            std_t_fl=r"$\sigma_{t_\mathrm{fl}}$",
+        )
+
+        self.inf_data = None
+
+        # Reset the plot style after Redback's modification
+        set_plot_style()
 
 
 class MockLightCurveLib(SNLightCurveLib):
+    """
+    A mock light curve library for testing the inference pipeline.
+    The light curves are generated using the curved power-law rise model with added noise.
+    """
+
     def __init__(
         self,
         cadence: float = 1,
         n_lc: int = 10,
-        var_true: dict = dict(t_fl=-20.0, C=0.0, amp_prime=50, alpha=2.0),
-        var_mean: dict = dict(t_fl=-20.0, C=0.0, amp_prime=50, alpha=2.0),
-        var_std: dict = dict(t_fl=1.0, C=0.1, amp_prime=5, alpha=0.1),
+        params_true: dict = dict(t_fl=-20.0, base=0.0, amp_prime=50, alpha=2.0),
+        params_mean: dict = dict(t_fl=-20.0, base=0.0, amp_prime=50, alpha=2.0),
+        params_std: dict = dict(t_fl=1.0, base=0.1, amp_prime=5, alpha=0.1),
         fix_values: bool = True,
         mag_peak: float = 18,
         realistic_mag: bool = False,
@@ -51,29 +238,31 @@ class MockLightCurveLib(SNLightCurveLib):
         np.random.seed(n_lc * int(cadence) + 114514)
 
         if fix_values:
-            t_fl = var_true.get("t_fl", -20.0) * jnp.ones(n_lc)
-            base = var_true.get("C", 0.0) * jnp.ones(n_lc)
-            amp_prime = var_true.get("Aprime", 50) * jnp.ones(n_lc)
-            alpha = var_true.get("alpha", 2.0) * jnp.ones(n_lc)
-            self.var_true = var_true
+            t_fl = params_true.get("t_fl", -20.0) * jnp.ones(n_lc)
+            base = params_true.get("C", 0.0) * jnp.ones(n_lc)
+            amp_prime = params_true.get("Aprime", 50) * jnp.ones(n_lc)
+            alpha = params_true.get("alpha", 2.0) * jnp.ones(n_lc)
+            self.params_true = params_true
         else:
-            t_fl = np.random.randn(n_lc) * (var_std.get("t_fl", 1.0)) + var_mean.get(
-                "t_fl", -20.0
-            )
-            base = np.random.randn(n_lc) * (var_std.get("C", 0.1)) + var_mean.get(
+            t_fl = np.random.randn(n_lc) * (
+                params_std.get("t_fl", 1.0)
+            ) + params_mean.get("t_fl", -20.0)
+            base = np.random.randn(n_lc) * (params_std.get("C", 0.1)) + params_mean.get(
                 "C", 0.0
             )
             amp_prime = np.random.randn(n_lc) * (
-                var_std.get("Aprime", 0.1)
-            ) + var_mean.get("Aprime", 50)
-            alpha = np.random.randn(n_lc) * (var_std.get("alpha", 0.1)) + var_mean.get(
-                "alpha", 2.0
+                params_std.get("Aprime", 0.1)
+            ) + params_mean.get("Aprime", 50)
+            alpha = np.random.randn(n_lc) * (
+                params_std.get("alpha", 0.1)
+            ) + params_mean.get("alpha", 2.0)
+            self.params_true = dict(
+                t_fl=t_fl, base=base, amp_prime=amp_prime, alpha=alpha
             )
-            self.var_true = dict(t_fl=t_fl, C=C, amp_prime=amp_prime, alpha=alpha)
-            self.var_true["mean_alpha"] = var_mean.get("alpha", 2.0)
-            self.var_true["std_alpha"] = var_std.get("alpha", 0.1)
-            self.var_true["mean_t_fl"] = var_mean.get("t_fl", -20.0)
-            self.var_true["std_t_fl"] = var_std.get("t_fl", 1.0)
+            self.params_true["mean_alpha"] = params_mean.get("alpha", 2.0)
+            self.params_true["std_alpha"] = params_std.get("alpha", 0.1)
+            self.params_true["mean_t_fl"] = params_mean.get("t_fl", -20.0)
+            self.params_true["std_t_fl"] = params_std.get("t_fl", 1.0)
 
         amp = amp_prime / jnp.power(10, alpha)
 
@@ -108,7 +297,7 @@ class MockLightCurveLib(SNLightCurveLib):
 
             t_mock_early = t_mock[idx_early]
             flux_true_early = flux_true[idx_early]
-            flux_err_mock_early = generate_flux_err(
+            flux_err_mock_early = self._generate_flux_err(
                 flux_true_early, zp=zp_mock, method="broken_power_law"
             )
             flux_mock_early = (
@@ -121,7 +310,7 @@ class MockLightCurveLib(SNLightCurveLib):
 
         super().__init__(lc_early_lib=lc_early_lib)
         self.n_lc = n_lc
-        self.var_name = dict(
+        self.params_names = dict(
             t_fl=r"$t_\mathrm{fl}$",
             base=r"$C$",
             amp=r"$A$",
@@ -134,22 +323,47 @@ class MockLightCurveLib(SNLightCurveLib):
 
         self.inf_data = None
 
+    @staticmethod
+    def _generate_flux_err(flux, zp=0, method="broken_power_law"):
+        """
+        Estimate the flux error based on the broken power law relation between magnitude and S/N
+        """
+        mag = -2.5 * jnp.log10(flux) + zp
+        if method == "broken_power_law":
+
+            def log_broken_powerlaw(x, x0=18.2123, y0=-8.9946, k1=-0.3044, k2=0):
+                """
+                Broken power law function - mag v.s. S/N (default values adopted from the fit to the r-band data in Yao et al. 2019)
+                """
+                log_err = 0.5 * jnp.log10(
+                    (
+                        jnp.power(10, (y0 + k1 * (x - x0)) * 2)
+                        + jnp.power(10, (y0 + k2 * (x - x0)) * 2)
+                    )
+                )
+                log_sky_noise = y0
+                return np.where(np.isfinite(x) & ~np.isnan(x), log_err, log_sky_noise)
+
+            return 10 ** (log_broken_powerlaw(mag) + 0.4 * zp)
+        else:
+            raise ValueError("Method not recognized")
+
     def plot_prior_posterior(
-        self, var_name: list = ["alpha", "t_fl"], var_range: dict = None
+        self, params_names: list = ["alpha", "t_fl"], params_range: dict = None
     ):
-        if var_range is None:
-            var_range = dict(alpha=(0, 4), t_fl=(-30, -10), base=(-1, 1), amp=(0, 10))
+        if params_range is None:
+            params_range = dict(alpha=(0, 4), t_fl=(-30, -10), base=(-1, 1), amp=(0, 10))
         _, ax = plt.subplots(
             2,
-            len(var_name),
+            len(params_names),
             sharex="col",
             sharey="row",
             constrained_layout=True,
-            figsize=(3 * len(var_name), 6),
+            figsize=(3 * len(params_names), 6),
         )
         cmap = plt.get_cmap("coolwarm")  # Choose a colormap
 
-        for i, var in enumerate(var_name):
+        for i, var in enumerate(params_names):
             # overall
             if self.inf_data is None:
                 prior, posterior = [], []
@@ -168,7 +382,7 @@ class MockLightCurveLib(SNLightCurveLib):
                 color="k",
                 lw=3,
                 weights=np.ones_like(np.array(prior).ravel()) / len(prior),
-                range=var_range[var],
+                range=params_range[var],
             )
             ax[1, i].hist(
                 posterior,
@@ -176,7 +390,7 @@ class MockLightCurveLib(SNLightCurveLib):
                 bins=25 * self.n_lc,
                 color="k",
                 lw=2,
-                range=var_range[var],
+                range=params_range[var],
             )
 
             # posterior for each light curve
@@ -192,17 +406,19 @@ class MockLightCurveLib(SNLightCurveLib):
                     histtype="step",
                     bins=50,
                     color=cmap(k / self.n_lc),
-                    range=var_range[var],
+                    range=params_range[var],
                     zorder=-1,
                 )
             try:
-                ax[1, i].axvline(self.var_true[var], color="crimson", ls="--")
+                ax[1, i].axvline(self.params_true[var], color="crimson", ls="--")
             except ValueError:
-                ax[1, i].axvline(self.var_true["mean_" + var], color="crimson", ls="--")
+                ax[1, i].axvline(
+                    self.params_true["mean_" + var], color="crimson", ls="--"
+                )
             ax[1, i].axvline(np.median(np.array(posterior).ravel()), color="k", ls="--")
-            ax[0, i].set_title(f"Prior: {self.var_name[var]}")
-            ax[1, i].set_title(f"Posterior: {self.var_name[var]}")
-            ax[1, i].set_xlabel(self.var_name[var])
+            ax[0, i].set_title(f"Prior: {self.params_names[var]}")
+            ax[1, i].set_title(f"Posterior: {self.params_names[var]}")
+            ax[1, i].set_xlabel(self.params_names[var])
         ax[0, 0].set_yticks([])
         ax[1, 0].set_yticks([])
         ax[0, 0].set_ylabel("Normalized count")
@@ -225,8 +441,9 @@ class MockLightCurveLib(SNLightCurveLib):
         -------
         None
         """
+        import corner
 
-        var_name = kwargs.pop("var_name", ["alpha", "t_fl"])
+        params_names = kwargs.pop("params_names", ["alpha", "t_fl"])
 
         corner.corner(
             self.post_sample,
@@ -234,8 +451,8 @@ class MockLightCurveLib(SNLightCurveLib):
             title_kwargs={"fontsize": 12},
             quantiles=[0.05, 0.5, 0.95],
             title_quantiles=[0.05, 0.5, 0.95],
-            var_names=var_name,
-            # truths=[self.var_true[var] for var in var_name],
+            var_names=params_names,
+            # truths=[self.params_true[var] for var in params_names],
             **kwargs,
         )
 
