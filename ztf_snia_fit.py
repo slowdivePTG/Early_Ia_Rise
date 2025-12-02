@@ -105,7 +105,7 @@ if __name__ == "__main__":
 
         if os.path.exists(file_dir):
             # Remove existing results to avoid conflicts
-            os.remove(file_dir)
+            os.removedirs(file_dir)
         os.makedirs(file_dir, exist_ok=True)
 
         ztflib.sampling(
