@@ -7,7 +7,6 @@ numpyro.enable_x64()
 
 from pathlib import Path
 
-from snia_rise._utils import plt
 from snia_rise.simulate.mock_lc import RedbackLightCurveLib
 
 if __name__ == "__main__":

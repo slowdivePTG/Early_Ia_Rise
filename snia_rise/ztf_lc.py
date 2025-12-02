@@ -26,8 +26,8 @@ class ZTFDataProcessor:
         return flux, flux_err
 
     @staticmethod
-    def calculate_40_percent_times(
-        phase, flux, flux_err, filt, flux_max=None, filtid=1
+    def calculate_early_times(
+        phase, flux, flux_err, filt, early_threshold=0.4, flux_max=None, filtid=1
     ):
         """Calculate 40% flux times in a filter."""
         try:
@@ -41,25 +41,27 @@ class ZTFDataProcessor:
         if flux_max is None:
             flux_max = np.max(f[np.abs(t) < 5])
 
-        below_40 = (f <= 0.4 * flux_max) & (t < -5)
-        if np.sum(below_40) == 0:
-            print(f"No data below 40% of max flux, skip filter {filtid}.")
-            return -np.inf, flux_max
+        below_threshold = (f <= early_threshold * flux_max) & (t < -5)
+        # if np.sum(below_threshold) == 0:
+        #     print(
+        #         f"No data below {early_threshold * 100}% of max flux, skip filter {filtid}."
+        #     )
+        #     return -np.inf, flux_max
 
-        t_40 = t[below_40][-1] + 0.25
+        t_early = t[below_threshold][-1] + 0.25
 
-        return t_40, flux_max
+        return t_early, flux_max
 
     @staticmethod
     def create_light_curve_data(
-        phase, flux, flux_err, fcqfid, filt, t_g_40, t_r_40, filtids=[1, 2]
+        phase, flux, flux_err, fcqfid, filt, t_g_early, t_r_early, filtids=[1, 2]
     ):
         """Create early and peak light curve dictionaries."""
         # Filter out observations < 40% of max flux
         idx_i = filt == 3
         idx_rise = (phase < 0) & (phase > -100) & ~idx_i
-        idx_g = (filt == filtids[0]) & (phase < t_g_40)
-        idx_r = (filt == filtids[1]) & (phase < t_r_40)
+        idx_g = (filt == filtids[0]) & (phase < t_g_early)
+        idx_r = (filt == filtids[1]) & (phase < t_r_early)
         idx = idx_rise & (idx_g | idx_r)
 
         lc_early = {
@@ -93,7 +95,7 @@ class ZTFIaEarlyLate(SNLightCurve):
     lc_path: str = "light_curve_fps_ztf/*fnu.csv"
     atlas_lc_path: str = "light_curve_fps_atlas/"
 
-    def __init__(self, ztfid: str) -> None:
+    def __init__(self, ztfid: str, early_threshold: float = 0.4) -> None:
         meta_data = Table.read(self.late_dir + self.meta_data_path)
         salt_data = Table.read(self.late_dir + self.salt_path)
         lc_list = sorted(glob.glob(self.late_dir + self.lc_path))
@@ -155,19 +157,21 @@ class ZTFIaEarlyLate(SNLightCurve):
         filt = data["filter_id"]
 
         # Calculate 40% times and max flux from data
-        t_g_40, _ = ZTFDataProcessor.calculate_40_percent_times(
+        t_g_early, _ = ZTFDataProcessor.calculate_early_times(
             phase,
             flux,
             flux_err,
             filt,
+            early_threshold=early_threshold,
             flux_max=flux_g_max,
             filtid=1,  # g filter
         )
-        t_r_40, _ = ZTFDataProcessor.calculate_40_percent_times(
+        t_r_early, _ = ZTFDataProcessor.calculate_early_times(
             phase,
             flux,
             flux_err,
             filt,
+            early_threshold=early_threshold,
             flux_max=flux_r_max,
             filtid=2,  # r filter
         )
@@ -179,7 +183,7 @@ class ZTFIaEarlyLate(SNLightCurve):
 
         # Create light curve data
         lc_early, lc_peak = ZTFDataProcessor.create_light_curve_data(
-            phase, flux, flux_err, fcqfid, filt, t_g_40, t_r_40
+            phase, flux, flux_err, fcqfid, filt, t_g_early, t_r_early
         )
 
         # Handle ATLAS light curves
@@ -217,15 +221,15 @@ class ZTFIaEarlyLate(SNLightCurve):
             filt_atlas = tab_atlas_lc["filter_id"]
 
             # Calculate 40% times and max flux from data
-            if ((phase_atlas < max(t_g_40, t_r_40)) & (filt_atlas == 4)).sum() > 5:
-                t_c_40 = max(t_g_40, t_r_40)
+            if ((phase_atlas < max(t_g_early, t_r_early)) & (filt_atlas == 4)).sum() > 5:
+                t_c_early = max(t_g_early, t_r_early)
             else:
-                t_c_40 = -np.inf
+                t_c_early = -np.inf
 
-            if ((phase_atlas < max(t_g_40, t_r_40)) & (filt_atlas == 5)).sum() > 5:
-                t_o_40 = max(t_g_40, t_r_40)
+            if ((phase_atlas < max(t_g_early, t_r_early)) & (filt_atlas == 5)).sum() > 5:
+                t_o_early = max(t_g_early, t_r_early)
             else:
-                t_o_40 = -np.inf
+                t_o_early = -np.inf
 
             # Normalize flux
             flux_atlas, flux_err_atlas = ZTFDataProcessor.process_flux_normalization(
@@ -244,8 +248,8 @@ class ZTFIaEarlyLate(SNLightCurve):
                 flux_err_atlas,
                 fcqfid_atlas,
                 filt_atlas,
-                t_c_40,
-                t_o_40,
+                t_c_early,
+                t_o_early,
                 filtids=[4, 5],
             )
 
@@ -285,7 +289,7 @@ class ZTFIaDR2(SNLightCurve):
     tab_info_path: str = "tables/snia_data.csv"
     tab_lc_path: str = "lightcurves/*lc.csv"
 
-    def __init__(self, ztfid: str) -> None:
+    def __init__(self, ztfid: str, early_threshold: float = 0.4) -> None:
         """
         Initialize the class instance.
         """
@@ -338,18 +342,20 @@ class ZTFIaDR2(SNLightCurve):
         filt = data["filter_id"].data
 
         # Calculate 40% times and max flux from data
-        t_g_40, flux_g_max = ZTFDataProcessor.calculate_40_percent_times(
+        t_g_early, flux_g_max = ZTFDataProcessor.calculate_early_times(
             phase,
             flux,
             flux_err,
             filt,
+            early_threshold=early_threshold,
             filtid=1,  # g filter
         )
-        t_r_40, flux_r_max = ZTFDataProcessor.calculate_40_percent_times(
+        t_r_early, flux_r_max = ZTFDataProcessor.calculate_early_times(
             phase,
             flux,
             flux_err,
             filt,
+            early_threshold=early_threshold,
             filtid=2,  # r filter
         )
 
@@ -360,7 +366,7 @@ class ZTFIaDR2(SNLightCurve):
 
         # Create light curve data
         lc_early, lc_peak = ZTFDataProcessor.create_light_curve_data(
-            phase, flux, flux_err, fcqfid, filt, t_g_40, t_r_40
+            phase, flux, flux_err, fcqfid, filt, t_g_early, t_r_early
         )
 
         super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid)
@@ -376,7 +382,7 @@ class ZTFIaEDR(SNLightCurve):
     tab_info_path: str = "Nobs_cut_salt2_spec_subtype_pec.csv"
     tab_lc_path: str = "ztf_early_Ia_lc_Yao2019.fit"
 
-    def __init__(self, ztfid: str) -> None:
+    def __init__(self, ztfid: str, early_threshold: float = 0.4) -> None:
         """
         Parameters
         ----------
@@ -423,19 +429,21 @@ class ZTFIaEDR(SNLightCurve):
         flux_r_max = info["fratio_rmax_2adam"].value[0]
 
         # Calculate 40% times and max flux from data
-        t_g_40, flux_g_max = ZTFDataProcessor.calculate_40_percent_times(
+        t_g_early, flux_g_max = ZTFDataProcessor.calculate_early_times(
             phase,
             flux,
             flux_err,
             filt,
+            early_threshold=early_threshold,
             flux_max=flux_g_max,
             filtid=1,  # g filter
         )
-        t_r_40, flux_r_max = ZTFDataProcessor.calculate_40_percent_times(
+        t_r_early, flux_r_max = ZTFDataProcessor.calculate_early_times(
             phase,
             flux,
             flux_err,
             filt,
+            early_threshold=early_threshold,
             flux_max=flux_r_max,
             filtid=2,  # r filter
         )
@@ -447,21 +455,23 @@ class ZTFIaEDR(SNLightCurve):
 
         # Create light curve data
         lc_early, lc_peak = ZTFDataProcessor.create_light_curve_data(
-            phase, flux, flux_err, fcqfid, filt, t_g_40, t_r_40
+            phase, flux, flux_err, fcqfid, filt, t_g_early, t_r_early
         )
 
         super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid)
 
 
 class ZTFLib(SNLightCurveLib):
-    def __init__(self, ztfid_lib: list = None, source: str = None) -> None:
+    def __init__(self, ztfid_lib: list = None, source: str = None, early_threshold: float = 0.4) -> None:
         """
         Parameters
         ----------
         ztfid_list : list
             List of ZTF IDs of the objects.
         source : str
-            Source of the data, either "EDR" or "DR2".
+            Source of the data: "EDR", "DR2", or "Early_Late".
+        early_threshold : float
+            Fraction of maximum luminosity to truncate light curves.
 
         Returns
         -------
@@ -480,18 +490,18 @@ class ZTFLib(SNLightCurveLib):
         for ztfid in ztfid_lib:
             try:
                 if source.lower() == "edr":
-                    ztf_sn = ZTFIaEDR(ztfid=ztfid)
+                    ztf_sn = ZTFIaEDR(ztfid=ztfid, early_threshold=early_threshold)
                 elif source.lower() == "dr2":
-                    ztf_sn = ZTFIaDR2(ztfid=ztfid)
+                    ztf_sn = ZTFIaDR2(ztfid=ztfid, early_threshold=early_threshold)
                 elif source.lower() == "early_late":
-                    ztf_sn = ZTFIaEarlyLate(ztfid=ztfid)
+                    ztf_sn = ZTFIaEarlyLate(ztfid=ztfid, early_threshold=early_threshold)
                 else:
                     raise ValueError("Source must be 'EDR', 'DR2', or 'Early_Late'.")
                 ztfid_lib_processed.append(ztfid)
             except ValueError as e:
                 print(f"Skipping {ztfid} due to error: {e}")
                 raise e
-                continue
+                # continue
 
             lc_early_lib.append(ztf_sn.lc_early)
             lc_peak_lib.append(ztf_sn.lc_peak)
