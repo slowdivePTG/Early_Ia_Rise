@@ -17,7 +17,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "model",
         choices=["power_law", "curved_power_law"],
-        help="Select model: 'power_law' or 'curved_power_law'",
+        help="Select model to fit the data: 'power_law' or 'curved_power_law'",
+    )
+    parser.add_argument(
+        "--true_model",
+        choices=["power_law", "curved_power_law", None],
+        default=None,
+        help="Select the underlying true model: 'power_law' or 'curved_power_law'. Default is the same as the fitting model.",
     )
     parser.add_argument(
         "--num_lc",
@@ -54,7 +60,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     for early_threshold in args.early_threshold:
-        file_dir = Path(f"./data/mock/{args.model}_frac{int(early_threshold * 100)}")
+        file_dir = Path(f"./data/mock/{args.true_model}_frac{int(early_threshold * 100)}")
 
         if not os.path.exists(file_dir):
             raise FileNotFoundError(
@@ -84,6 +90,10 @@ if __name__ == "__main__":
             params_file=file_dir / "simulated_lc_params.csv",
         )
 
+        result_dir = file_dir / f"{args.model}_results"
+
+        os.makedirs(result_dir, exist_ok=True)
+
         # Sampling
         lib.sampling(
             prior_params={"curved_power_law": args.model == "curved_power_law"},
@@ -93,10 +103,10 @@ if __name__ == "__main__":
         )
 
         # Save the posterior for the hierarchical model
-        lib.post_sample.to_netcdf(file_dir / "posterior_hierarchical.nc")
+        lib.post_sample.to_netcdf(result_dir / "posterior_hierarchical.nc")
         # Save the posterior samples for each light curve
         for k in range(len(lib.lc_library)):
             lc = lib.lc_library[k]
             posterior = lc.post_sample
             # save the posterior
-            posterior.to_netcdf(file_dir / f"posterior_{k}.nc")
+            posterior.to_netcdf(result_dir / f"posterior_{k}.nc")
