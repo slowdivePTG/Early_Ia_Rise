@@ -89,7 +89,7 @@ class ZTFIaEarlyLate(SNLightCurve):
     ZTF SNe Ia with early light curves and nebular spectra
     """
 
-    late_dir: str = "./Data/ztf_early_late/"
+    late_dir: str = "./data/ztf_early_late/"
     meta_data_path: str = "ztf_early_Ia_meta.csv"
     salt_path: str = "ztf_early_Ia_salt.csv"
     lc_path: str = "light_curve_fps_ztf/*fnu.csv"
@@ -285,7 +285,7 @@ class ZTFIaDR2(SNLightCurve):
     ZTF SN Ia DR2
     """
 
-    dr2_dir: str = "./Data/ztf_snia_dr2/"
+    dr2_dir: str = "./data/ztf_snia_dr2/"
     tab_info_path: str = "tables/snia_data.csv"
     tab_lc_path: str = "lightcurves/*lc.csv"
 
@@ -378,7 +378,7 @@ class ZTFIaEDR(SNLightCurve):
     127 ZTF SNe Ia with early light curves
     """
 
-    edr_dir: str = "./Data/ztf_snia_edr/"
+    edr_dir: str = "./data/ztf_snia_edr/"
     tab_info_path: str = "Nobs_cut_salt2_spec_subtype_pec.csv"
     tab_lc_path: str = "ztf_early_Ia_lc_Yao2019.fit"
 
