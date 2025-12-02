@@ -14,15 +14,41 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
     def __init__(
         self,
+        params_true: dict,
+        lc_early_lib: list[pd.DataFrame],
+        lc_peak_lib: list[pd.DataFrame],
+    ):
+        super().__init__(lc_early_lib=lc_early_lib, lc_peak_lib=lc_peak_lib)
+
+        self.params_true = params_true
+        self.params_names = dict(
+            t_fl=r"$t_\mathrm{fl}$",
+            base=r"$C$",
+            amp=r"$A$",
+            alpha=r"$\alpha$",
+            mean_alpha=r"$\mu_\alpha$",
+            std_alpha=r"$\sigma_\alpha$",
+            mean_t_fl=r"$\mu_{t_\mathrm{fl}}$",
+            std_t_fl=r"$\sigma_{t_\mathrm{fl}}$",
+        )
+
+        self.inf_data = None
+
+    @classmethod
+    def simulate_mock_light_curve(
+        cls,
         n_lc: int = 10,
         params_mean: dict = None,
         params_std: dict = None,
         early_threshold: float = 0.4,
+        model: str = "curved_power_law",
     ) -> list[pd.DataFrame]:
         """
         Simulate light curves using Redback.
         """
+        import os
         import pandas as pd
+        from pathlib import Path
         from redback.simulate_transients import SimulateOpticalTransient
         from .._utils._plt import set_plot_style
 
@@ -42,7 +68,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
             params_std = {}
 
         # True hyper-parameters for the power-law rise model
-        self.params_true = dict(
+        params_true = dict(
             mean_alpha=params_mean.get("alpha", 2.0),
             std_alpha=params_std.get("alpha", 0.2),
             mean_t_fl=params_mean.get("t_fl", -18.0),
@@ -55,10 +81,10 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 params_mean.get("base", 0.0), params_std.get("base", 0.1), num_tot
             ),
             t_peak=np.random.normal(
-                -self.params_true["mean_t_fl"], self.params_true["std_t_fl"], num_tot
+                -params_true["mean_t_fl"], params_true["std_t_fl"], num_tot
             ),
             alpha_0=np.random.normal(
-                self.params_true["mean_alpha"], self.params_true["std_alpha"], num_tot
+                params_true["mean_alpha"], params_true["std_alpha"], num_tot
             ),
         )
 
@@ -71,15 +97,15 @@ class RedbackLightCurveLib(SNLightCurveLib):
         params_sim["peak_luminosity"] = np.full(num_tot, PEAK_LUMINOSITY)
 
         # dist_lum ~ PowerLaw(alpha=2, min=10, max=250)
-        # For power law: f(x) ∝ x^(alpha), we use inverse transform sampling
-        # CDF^(-1)(u) = (min^(1+alpha) + u*(max^(1+alpha) - min^(1+alpha)))^(1/(1+alpha))
-        alpha = 2
+        # For power law: f(x) ∝ x^(alpha_lum), we use inverse transform sampling
+        # CDF^(-1)(u) = (min^(1+alpha_lum) + u*(max^(1+alpha_lum) - min^(1+alpha_lum)))^(1/(1+alpha_lum))
+        alpha_lum = 2
         min_dist, max_dist = 10, 250
         u = np.random.uniform(0, 1, num_tot)
         params_sim["dist_lum"] = (
-            min_dist ** (1 + alpha)
-            + u * (max_dist ** (1 + alpha) - min_dist ** (1 + alpha))
-        ) ** (1 / (1 + alpha))
+            min_dist ** (1 + alpha_lum)
+            + u * (max_dist ** (1 + alpha_lum) - min_dist ** (1 + alpha_lum))
+        ) ** (1 / (1 + alpha_lum))
 
         # Add the required t0_mjd_transient parameter
         # This sets when each transient begins (in MJD)
@@ -92,9 +118,14 @@ class RedbackLightCurveLib(SNLightCurveLib):
         lc_peak_lib = np.empty(shape=n_lc, dtype=object)
         params_valid_det = []
 
+        data_dir = Path(f"./data/mock/{model}_frac{int(early_threshold * 100)}")
+        os.makedirs(data_dir, exist_ok=True)
+
         for i in range(num_tot):
             # Extract parameters for this single transient
             single_params = {key: val[i] for key, val in params_sim.items()}
+
+            single_params["force_power_law"] = model == "power_law"
 
             if len(params_valid_det) >= n_lc:
                 break
@@ -155,8 +186,9 @@ class RedbackLightCurveLib(SNLightCurveLib):
             # Remove the filter with no detections
             obs = obs[np.isfinite(obs["flux_norm"])].reset_index(drop=True)
 
+            idx_obs = len(params_valid_det)
             print(
-                f"Simulating transient {len(params_valid_det) + 1}/{n_lc} ({i + 1}/{num_tot} attempts)..."
+                f"Simulating transient {idx_obs + 1}/{n_lc} ({i + 1}/{num_tot} attempts)..."
             )
             print(f"  → {len(sim.inference_observations)} detections")
 
@@ -171,46 +203,114 @@ class RedbackLightCurveLib(SNLightCurveLib):
             idx_early = (phase < 0) & (obs["flux_norm"] <= early_threshold * 100)
             idx_peak = phase < 0
 
-            lc_early_lib[len(params_valid_det)] = dict(
-                phase=phase[idx_early],
-                flux=flux_mock[idx_early],
-                flux_err=flux_err_mock[idx_early],
-                fcqfid=fcqfid[idx_early],
-                filt=filt[idx_early],
+            lc_early = pd.DataFrame(
+                dict(
+                    phase=phase[idx_early],
+                    flux=flux_mock[idx_early],
+                    flux_err=flux_err_mock[idx_early],
+                    fcqfid=fcqfid[idx_early],
+                    filt=filt[idx_early],
+                )
             )
-            lc_peak_lib[len(params_valid_det)] = dict(
-                phase=phase[idx_peak],
-                flux=flux_mock[idx_peak],
-                flux_err=flux_err_mock[idx_peak],
-                fcqfid=fcqfid[idx_peak],
-                filt=filt[idx_peak],
+            lc_peak = pd.DataFrame(
+                dict(
+                    phase=phase[idx_peak],
+                    flux=flux_mock[idx_peak],
+                    flux_err=flux_err_mock[idx_peak],
+                    fcqfid=fcqfid[idx_peak],
+                    filt=filt[idx_peak],
+                )
             )
+
+            lc_early.reset_index(drop=True, inplace=True)
+            lc_peak.reset_index(drop=True, inplace=True)
+
+            lc_early.to_csv(
+                data_dir / f"lc_early_{idx_obs}.csv",
+                index=False,
+            )
+            lc_peak.to_csv(
+                data_dir / f"lc_peak_{idx_obs}.csv",
+                index=False,
+            )
+
+            lc_early_lib[idx_obs] = lc_early
+            lc_peak_lib[idx_obs] = lc_peak
 
             params_valid_det.append(single_params)
 
         params_valid_det = pd.DataFrame(params_valid_det).reset_index(drop=True)
 
-        self.params_true["alpha_0"] = params_valid_det["alpha_0"].values
-        self.params_true["alpha_1"] = params_valid_det["alpha_1"].values
-        self.params_true["t_fl"] = -params_valid_det["t_peak"].values
+        params_true["alpha_0"] = params_valid_det["alpha_0"].values
+        params_true["alpha_1"] = params_valid_det["alpha_1"].values
+        params_true["t_fl"] = -params_valid_det["t_peak"].values
 
-        super().__init__(lc_early_lib=lc_early_lib, lc_peak_lib=lc_peak_lib)
-        self.n_lc = n_lc
-        self.params_names = dict(
-            t_fl=r"$t_\mathrm{fl}$",
-            base=r"$C$",
-            amp=r"$A$",
-            alpha=r"$\alpha$",
-            mean_alpha=r"$\mu_\alpha$",
-            std_alpha=r"$\sigma_\alpha$",
-            mean_t_fl=r"$\mu_{t_\mathrm{fl}}$",
-            std_t_fl=r"$\sigma_{t_\mathrm{fl}}$",
+        params_valid_det.to_csv(
+            data_dir / f"simulated_lc_params.csv",
+            index=False,
         )
-
-        self.inf_data = None
 
         # Reset the plot style after Redback's modification
         set_plot_style()
+
+        return cls(params_true, lc_early_lib=lc_early_lib, lc_peak_lib=lc_peak_lib)
+
+    @classmethod
+    def from_files(
+        cls,
+        early_files: list[str],
+        peak_files: list[str],
+        params_file: str,
+    ) -> "RedbackLightCurveLib":
+        """
+        Load light curves from files.
+
+        Parameters
+        ----------
+        early_files : list of str
+            List of file paths for early light curves.
+        peak_files : list of str
+            List of file paths for peak light curves.
+        params_true : dict
+            True parameters for the simulated light curves.
+
+        Returns
+        -------
+        RedbackLightCurveLib
+            An instance of RedbackLightCurveLib with loaded light curves.
+        """
+        import pandas as pd
+
+        lc_early_lib = []
+        lc_peak_lib = []
+
+        for ef, pf in zip(early_files, peak_files):
+            lc_early = pd.read_csv(ef)
+            lc_peak = pd.read_csv(pf)
+            lc_early_lib.append(
+                dict(
+                    phase=lc_early["phase"].values,
+                    flux=lc_early["flux"].values,
+                    flux_err=lc_early["flux_err"].values,
+                    fcqfid=lc_early["fcqfid"].values.astype(np.int32),
+                    filt=lc_early["filt"].values.astype(np.int32),
+                )
+            )
+            lc_peak_lib.append(
+                dict(
+                    phase=lc_peak["phase"].values,
+                    flux=lc_peak["flux"].values,
+                    flux_err=lc_peak["flux_err"].values,
+                    fcqfid=lc_peak["fcqfid"].values.astype(np.int32),
+                    filt=lc_peak["filt"].values.astype(np.int32),
+                )
+            )
+
+        return cls(
+            lc_early_lib=lc_early_lib,
+            lc_peak_lib=lc_peak_lib,
+            params_true=pd.read_csv(params_file).to_dict(orient="list"),
+        )
 
 
 class MockLightCurveLib(SNLightCurveLib):
@@ -352,7 +452,9 @@ class MockLightCurveLib(SNLightCurveLib):
         self, params_names: list = ["alpha", "t_fl"], params_range: dict = None
     ):
         if params_range is None:
-            params_range = dict(alpha=(0, 4), t_fl=(-30, -10), base=(-1, 1), amp=(0, 10))
+            params_range = dict(
+                alpha=(0, 4), t_fl=(-30, -10), base=(-1, 1), amp=(0, 10)
+            )
         _, ax = plt.subplots(
             2,
             len(params_names),

@@ -43,10 +43,27 @@ def power_law_rise_flat_sed(
     alpha_0: float,
     alpha_1: float,
     dist_lum: float,
+    force_power_law: bool = False,
     **kwargs,
 ):
     """
     A transient model with a curved power-law rise, and a flat SED.
+
+    Parameters:
+    -----------
+    time : float or array-like
+        Time array (days since explosion).
+    peak_luminosity : float
+        Peak luminosity (erg/s).
+    alpha_0 : float
+        Rising power-law index.
+    alpha_1 : float
+        Correction factor for the power-law rise.
+    dist_lum : float
+        Luminosity distance (Mpc).
+    force_power_law : bool, optional, default = False
+        If True, use a simple power-law rise (alpha_1 = 0), but keep other parameters unchanged.
+        Determine the flux normalization at peak time based on the curved power-law model.
     """
     import pandas as pd
     from redback.sed import RedbackTimeSeriesSource
@@ -86,16 +103,17 @@ def power_law_rise_flat_sed(
         alpha_1=alpha_1,
     )
 
-    flux = (
+    flux_norm = (
         f_t(
             t=time,
             t_fl=0,
             alpha_0=alpha_0,
-            alpha_1=alpha_1,
+            alpha_1=0.0 if force_power_law else alpha_1,
         )
         / flux_max
-        * flux_density_jy
     )
+
+    flux = np.where(flux_norm > 1, 1, flux_norm) * flux_density_jy
 
     # Wavelength array
     lambda_array = np.linspace(3000, 10000, 100)

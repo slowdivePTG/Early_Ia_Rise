@@ -1,13 +1,11 @@
 import os
-import pandas as pd
-import jax.numpy as jnp
 import numpyro
+import glob
 
 numpyro.set_host_device_count(4)
 numpyro.enable_x64()
 
-from astropy.table import Table
-from numpyro import infer
+from pathlib import Path
 
 from snia_rise._utils import plt
 from snia_rise.simulate.mock_lc import RedbackLightCurveLib
@@ -56,30 +54,35 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     for early_threshold in args.early_threshold:
+        file_dir = Path(f"./data/mock/{args.model}_frac{int(early_threshold * 100)}")
 
-        save_dir = f"./data/mock/{args.model}_frac{int(early_threshold * 100)}"
-        os.makedirs(save_dir, exist_ok=True)
-
-        lib = RedbackLightCurveLib(
-            n_lc=args.num_lc,
-            early_threshold=early_threshold,
-        )
-
-        # Save the simulated light curves and parameters
-        pd.DataFrame(lib.params_true).to_csv(
-            f"./data/mock/{args.model}_frac{int(early_threshold * 100)}/simulated_lc_params.csv",
-            index=False,
-        )
-
-        for k, lc_library in enumerate(lib.lc_library):
-            pd.DataFrame(lc_library.lc_early).to_csv(
-                f"./data/mock/{args.model}_frac{int(early_threshold * 100)}/lc_early_{k}.csv",
-                index=False,
+        if not os.path.exists(file_dir):
+            raise FileNotFoundError(
+                f"{file_dir} does not exist. Please run the simulation first."
             )
-            pd.DataFrame(lc_library.lc_peak).to_csv(
-                f"./data/mock/{args.model}_frac{int(early_threshold * 100)}/lc_peak_{k}.csv",
-                index=False,
+
+        early_files = sorted(glob.glob(str(file_dir / "lc_early*.csv")))
+        peak_files = sorted(glob.glob(str(file_dir / "lc_peak*.csv")))
+
+        if len(early_files) == 0 or len(peak_files) == 0:
+            raise FileNotFoundError(
+                f"No light curve files found in {file_dir}. Please run the simulation first."
             )
+
+        if not (len(early_files) == len(peak_files) >= args.num_lc):
+            raise ValueError(
+                f"Insufficient light curve files in {file_dir}: found {len(early_files)} simulated light curves, but {args.num_lc} are required."
+            )
+
+        if os.path.exists(file_dir / "posterior_hierarchical.nc"):
+            print("Removing existing .nc files...")
+            os.system(f"rm -rf {str(file_dir / '*.nc')}")
+
+        lib = RedbackLightCurveLib.from_files(
+            early_files=early_files[: args.num_lc],
+            peak_files=peak_files[: args.num_lc],
+            params_file=file_dir / "simulated_lc_params.csv",
+        )
 
         # Sampling
         lib.sampling(
@@ -90,14 +93,10 @@ if __name__ == "__main__":
         )
 
         # Save the posterior for the hierarchical model
-        lib.post_sample.to_netcdf(
-            f"./data/mock/{args.model}_frac{int(early_threshold * 100)}/posterior_hierarchical.nc"
-        )
+        lib.post_sample.to_netcdf(file_dir / "posterior_hierarchical.nc")
         # Save the posterior samples for each light curve
         for k in range(len(lib.lc_library)):
             lc = lib.lc_library[k]
             posterior = lc.post_sample
             # save the posterior
-            posterior.to_netcdf(
-                f"./data/mock/{args.model}_frac{int(early_threshold * 100)}/posterior_{k}.nc"
-            )
+            posterior.to_netcdf(file_dir / f"posterior_{k}.nc")
