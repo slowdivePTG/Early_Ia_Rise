@@ -101,7 +101,9 @@ if __name__ == "__main__":
                     )
                 )
 
-        file_dir = Path(f"./data/{dr_dir}/results/frac{int(early_threshold * 100)}_{args.model}")
+        file_dir = Path(
+            f"./data/{dr_dir}/results/frac{int(early_threshold * 100)}_{args.model}"
+        )
 
         if os.path.exists(file_dir):
             # Remove existing results to avoid conflicts
@@ -118,11 +120,11 @@ if __name__ == "__main__":
         )
 
         # Save the posterior for the hierarchical model
-        ztflib.post_sample.to_netcdf(file_dir / "posterior_hierarchical.nc")
+        ztflib.inf_data.to_netcdf(file_dir / "inf_hierarchical.nc")
 
-        # Save the posterior samples for each light curve
-        for k in range(len(ztflib.lc_library)):
-            lc = ztflib.lc_library[k]
-            posterior = lc.post_sample
-            # save the posterior
-            posterior.to_netcdf(file_dir / f"posterior_{ztflib.ztfid_lib[k]}.nc")
+        # # Save the posterior samples for each light curve
+        # for k in range(len(ztflib.lc_library)):
+        #     # save the posterior
+        #     ztflib.lc_library[k].inf_data.to_netcdf(
+        #         file_dir / f"inf_{ztflib.ztfid_lib[k]}.nc"
+        #     )

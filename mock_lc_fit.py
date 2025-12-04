@@ -59,7 +59,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     for early_threshold in args.early_threshold:
-        file_dir = Path(f"./data/mock/{args.true_model}_frac{int(early_threshold * 100)}")
+        file_dir = Path(
+            f"./data/mock/{args.true_model}_frac{int(early_threshold * 100)}"
+        )
 
         if not os.path.exists(file_dir):
             raise FileNotFoundError(
@@ -79,14 +81,14 @@ if __name__ == "__main__":
                 f"Insufficient light curve files in {file_dir}: found {len(early_files)} simulated light curves, but {args.num_lc} are required."
             )
 
-        if os.path.exists(file_dir / "posterior_hierarchical.nc"):
+        if os.path.exists(file_dir / "inf_hierarchical.nc"):
             print("Removing existing .nc files...")
             os.system(f"rm -rf {str(file_dir / '*.nc')}")
 
         lib = RedbackLightCurveLib.from_files(
-            early_files=early_files[: args.num_lc],
-            peak_files=peak_files[: args.num_lc],
-            params_file=file_dir / "simulated_lc_params.csv",
+            file_dir=file_dir,
+            rise_model=args.model,
+            n_lc=args.num_lc,
         )
 
         result_dir = file_dir / f"{args.model}_results"
@@ -102,10 +104,10 @@ if __name__ == "__main__":
         )
 
         # Save the posterior for the hierarchical model
-        lib.post_sample.to_netcdf(result_dir / "posterior_hierarchical.nc")
-        # Save the posterior samples for each light curve
-        for k in range(len(lib.lc_library)):
-            lc = lib.lc_library[k]
-            posterior = lc.post_sample
-            # save the posterior
-            posterior.to_netcdf(result_dir / f"posterior_{k}.nc")
+        lib.inf_data.to_netcdf(result_dir / "inf_hierarchical.nc")
+        # # Save the posterior samples for each light curve
+        # for k in range(len(lib.lc_library)):
+        #     # save the posterior
+        #     lib.lc_library[k].post_sample.to_netcdf(
+        #         result_dir / f"inf_{k}.nc", engine="h5netcdf"
+        #     )

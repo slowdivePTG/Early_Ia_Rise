@@ -4,6 +4,8 @@ import jax.numpy as jnp
 from ..model.fit_rise import f_t, SNLightCurveLib
 from .._utils import plt
 
+from arviz import InferenceData
+
 
 class RedbackLightCurveLib(SNLightCurveLib):
     """
@@ -17,8 +19,15 @@ class RedbackLightCurveLib(SNLightCurveLib):
         params_true: dict,
         lc_early_lib: list[pd.DataFrame],
         lc_peak_lib: list[pd.DataFrame],
-    ):
-        super().__init__(lc_early_lib=lc_early_lib, lc_peak_lib=lc_peak_lib)
+        inf_data: InferenceData = None,
+        sampling_model: str = "hierarchical",
+    ) -> None:
+        super().__init__(
+            lc_early_lib=lc_early_lib,
+            lc_peak_lib=lc_peak_lib,
+            inf_data=inf_data,
+            sampling_model=sampling_model,
+        )
 
         self.params_true = params_true
         self.params_names = dict(
@@ -31,8 +40,6 @@ class RedbackLightCurveLib(SNLightCurveLib):
             mean_t_fl=r"$\mu_{t_\mathrm{fl}}$",
             std_t_fl=r"$\sigma_{t_\mathrm{fl}}$",
         )
-
-        self.inf_data = None
 
     @classmethod
     def simulate_mock_light_curve(
@@ -255,63 +262,6 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
         return cls(params_true, lc_early_lib=lc_early_lib, lc_peak_lib=lc_peak_lib)
 
-    @classmethod
-    def from_files(
-        cls,
-        early_files: list[str],
-        peak_files: list[str],
-        params_file: str,
-    ) -> "RedbackLightCurveLib":
-        """
-        Load light curves from files.
-
-        Parameters
-        ----------
-        early_files : list of str
-            List of file paths for early light curves.
-        peak_files : list of str
-            List of file paths for peak light curves.
-        params_true : dict
-            True parameters for the simulated light curves.
-
-        Returns
-        -------
-        RedbackLightCurveLib
-            An instance of RedbackLightCurveLib with loaded light curves.
-        """
-        import pandas as pd
-
-        lc_early_lib = []
-        lc_peak_lib = []
-
-        for ef, pf in zip(early_files, peak_files):
-            lc_early = pd.read_csv(ef)
-            lc_peak = pd.read_csv(pf)
-            lc_early_lib.append(
-                dict(
-                    phase=lc_early["phase"].values,
-                    flux=lc_early["flux"].values,
-                    flux_err=lc_early["flux_err"].values,
-                    fcqfid=lc_early["fcqfid"].values.astype(np.int32),
-                    filt=lc_early["filt"].values.astype(np.int32),
-                )
-            )
-            lc_peak_lib.append(
-                dict(
-                    phase=lc_peak["phase"].values,
-                    flux=lc_peak["flux"].values,
-                    flux_err=lc_peak["flux_err"].values,
-                    fcqfid=lc_peak["fcqfid"].values.astype(np.int32),
-                    filt=lc_peak["filt"].values.astype(np.int32),
-                )
-            )
-
-        return cls(
-            lc_early_lib=lc_early_lib,
-            lc_peak_lib=lc_peak_lib,
-            params_true=pd.read_csv(params_file).to_dict(orient="list"),
-        )
-
 
 class MockLightCurveLib(SNLightCurveLib):
     """
@@ -421,7 +371,7 @@ class MockLightCurveLib(SNLightCurveLib):
             std_t_fl=r"$\sigma_{t_\mathrm{fl}}$",
         )
 
-        self.inf_data = None
+        self.inf_data: InferenceData = None
 
     @staticmethod
     def _generate_flux_err(flux, zp=0, method="broken_power_law"):

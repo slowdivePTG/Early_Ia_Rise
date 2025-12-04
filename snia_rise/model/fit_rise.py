@@ -12,6 +12,7 @@ from sklearn.preprocessing import LabelEncoder
 
 from .._utils import plt
 from numpy.typing import ArrayLike
+from arviz import InferenceData
 
 
 ####################################################################################################
@@ -872,6 +873,8 @@ class SNLightCurveLib(object):
         lc_early_lib: list = None,
         lc_peak_lib: list = None,
         ztfid_lib: list = None,
+        inf_data: InferenceData = None,
+        sampling_model: str = "hierarchical",
     ) -> None:
         self.lc_library: list[SNLightCurve] = []
         self.ztfid_lib: list = ztfid_lib if ztfid_lib is not None else []
@@ -938,6 +941,133 @@ class SNLightCurveLib(object):
         print("Number of unique filters:", n_filt)
         print("Number of gr filters:", n_filt_gr)
         print("Light curves compiled...")
+
+        self.inf_data = inf_data
+        self.decode_inf_data(model_structure=sampling_model)
+
+    @classmethod
+    def from_files(
+        cls,
+        file_dir: str,
+        rise_model: str,
+        n_lc: int = None,
+        sampling_model: str = "hierarchical",
+    ) -> "SNLightCurveLib":
+        """
+        Load light curves from files.
+
+        Parameters
+        ----------
+        file_dir : str
+            Directory containing the light curve files.
+        rise_model : str
+            The rise model used in the light curve fitting ("power_law" or "curved_power_law").
+        sampling_model : str
+            The sampling model used in the light curve fitting ("unpooled", "pooled", or "hierarchical").
+        n_lc : int, optional
+            Number of light curves to load. If None, load all light curves.
+
+        Returns
+        -------
+        SNLightCurveLib
+            An instance of SNLightCurveLib with loaded light curves.
+        """
+        import os
+        import glob
+        import pandas as pd
+
+        from pathlib import Path
+
+        early_files = sorted(glob.glob(str(Path(file_dir) / "lc_early*.csv")))
+        peak_files = sorted(glob.glob(str(Path(file_dir) / "lc_peak*.csv")))
+        params_file = Path(file_dir) / "simulated_lc_params.csv"
+
+        if n_lc is not None:
+            early_files = early_files[:n_lc]
+            peak_files = peak_files[:n_lc]
+        else:
+            n_lc = len(early_files)
+
+        inf_data_hierarchical_file = (
+            Path(file_dir) / f"{rise_model}_results/inf_hierarchical.nc"
+        )
+
+        lc_early_lib = []
+        lc_peak_lib = []
+
+        for ef, pf in zip(early_files, peak_files):
+            lc_early = pd.read_csv(ef)
+            lc_peak = pd.read_csv(pf)
+            lc_early_lib.append(
+                dict(
+                    phase=lc_early["phase"].values,
+                    flux=lc_early["flux"].values,
+                    flux_err=lc_early["flux_err"].values,
+                    fcqfid=lc_early["fcqfid"].values.astype(np.int32),
+                    filt=lc_early["filt"].values.astype(np.int32),
+                )
+            )
+            lc_peak_lib.append(
+                dict(
+                    phase=lc_peak["phase"].values,
+                    flux=lc_peak["flux"].values,
+                    flux_err=lc_peak["flux_err"].values,
+                    fcqfid=lc_peak["fcqfid"].values.astype(np.int32),
+                    filt=lc_peak["filt"].values.astype(np.int32),
+                )
+            )
+
+        if not os.path.exists(inf_data_hierarchical_file):
+            print("No hierarchical inference data found.")
+            inf_data = None
+        else:
+            inf_data = az.from_netcdf(inf_data_hierarchical_file)
+
+        return cls(
+            lc_early_lib=lc_early_lib,
+            lc_peak_lib=lc_peak_lib,
+            params_true=pd.read_csv(params_file)[:n_lc].to_dict(orient="list"),
+            inf_data=inf_data,
+            sampling_model=sampling_model,
+        )
+
+    def decode_inf_data(self, model_structure: str = "hierarchical"):
+        """
+        Decode the inference data stored in self.inf_data
+        and assign the posterior samples to each SNLightCurve object.
+
+        Parameters
+        ----------
+        model_structure : str, optional
+            Type of model used for the MCMC sampling (default: "hierarchical").
+            Options: "pooled", "unpooled", "hierarchical"
+
+        Returns
+        -------
+        None
+        """
+        if self.inf_data is None:
+            print("Inference data not yet available.")
+            return
+
+        self.post_sample = self.inf_data.posterior
+        for k, lc in enumerate(self.lc_library):
+            fcqfid_in_obj = np.unique(self.idx_fcqfid[self.idx_obj == k])
+            filt_in_obj = np.unique(self.idx_filt[self.idx_obj == k])
+
+            lc.post_sample = {}  # self.post_sample[["C", "beta", "A", "alpha_0", "t_fl"]]
+            lc.post_sample["C"] = self.post_sample["C"][:, :, fcqfid_in_obj]
+            lc.post_sample["beta"] = self.post_sample["beta"][:, :, fcqfid_in_obj]
+            lc.post_sample["A"] = self.post_sample["A"][:, :, filt_in_obj]
+            if model_structure != "pooled":
+                lc.post_sample["alpha_0"] = self.post_sample["alpha_0"][
+                    :, :, filt_in_obj
+                ]
+                lc.post_sample["t_fl"] = self.post_sample["t_fl"][:, :, k]
+            else:
+                lc.post_sample["alpha_0"] = self.post_sample["alpha_0"]
+                lc.post_sample["t_fl"] = self.post_sample["t_fl"]
+            lc.post_sample = xr.Dataset(lc.post_sample)
 
     def append(self, lc_lib: "SNLightCurveLib"):
         """
@@ -1089,23 +1219,6 @@ class SNLightCurveLib(object):
         # store the posterior samples
         self.post_sample = self.inf_data.posterior
 
-        for k, lc in enumerate(self.lc_library):
-            fcqfid_in_obj = np.unique(self.idx_fcqfid[self.idx_obj == k])
-            filt_in_obj = np.unique(self.idx_filt[self.idx_obj == k])
-
-            lc.post_sample = {}  # self.post_sample[["C", "beta", "A", "alpha_0", "t_fl"]]
-            lc.post_sample["C"] = self.post_sample["C"][:, :, fcqfid_in_obj]
-            lc.post_sample["beta"] = self.post_sample["beta"][:, :, fcqfid_in_obj]
-            lc.post_sample["A"] = self.post_sample["A"][:, :, filt_in_obj]
-            if model_structure != "pooled":
-                lc.post_sample["alpha_0"] = self.post_sample["alpha_0"][
-                    :, :, filt_in_obj
-                ]
-                lc.post_sample["t_fl"] = self.post_sample["t_fl"][:, :, k]
-            else:
-                lc.post_sample["alpha_0"] = self.post_sample["alpha_0"]
-                lc.post_sample["t_fl"] = self.post_sample["t_fl"]
-            lc.post_sample = xr.Dataset(lc.post_sample)
 
     def plot_corner(
         self,
@@ -1115,7 +1228,7 @@ class SNLightCurveLib(object):
         **kwargs,
     ):
         corner.corner(
-            self.inf_data.posterior[var_name],
+            self.post_sample[var_name],
             show_titles=True,
             title_kwargs={"fontsize": 12},
             quantiles=[0.05, 0.5, 0.95],
