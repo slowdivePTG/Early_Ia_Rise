@@ -1,10 +1,10 @@
+import shutil
 import numpy as np
 import jax.numpy as jnp
+import xarray as xr
 
 from ..model.fit_rise import f_t, SNLightCurveLib
 from .._utils import plt
-
-from arviz import InferenceData
 
 
 class RedbackLightCurveLib(SNLightCurveLib):
@@ -19,13 +19,13 @@ class RedbackLightCurveLib(SNLightCurveLib):
         params_true: dict,
         lc_early_lib: list[pd.DataFrame],
         lc_peak_lib: list[pd.DataFrame],
-        inf_data: InferenceData = None,
+        post_sample: xr.Dataset = None,
         sampling_model: str = "hierarchical",
     ) -> None:
         super().__init__(
             lc_early_lib=lc_early_lib,
             lc_peak_lib=lc_peak_lib,
-            inf_data=inf_data,
+            post_sample=post_sample,
             sampling_model=sampling_model,
         )
 
@@ -77,9 +77,9 @@ class RedbackLightCurveLib(SNLightCurveLib):
         # True hyper-parameters for the power-law rise model
         params_true = dict(
             mean_alpha=params_mean.get("alpha", 2.0),
-            std_alpha=params_std.get("alpha", 0.2),
+            std_alpha=params_std.get("alpha", 0.3),
             mean_t_fl=params_mean.get("t_fl", -18.0),
-            std_t_fl=params_std.get("t_fl", 2.0),
+            std_t_fl=params_std.get("t_fl", 1.5),
         )
 
         # Parameters for simulating the population
@@ -126,6 +126,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
         params_valid_det = []
 
         data_dir = Path(f"./data/mock/{model}_frac{int(early_threshold * 100)}")
+        if os.path.exists(data_dir):
+            shutil.rmtree(data_dir)
         os.makedirs(data_dir, exist_ok=True)
 
         for i in range(num_tot):
@@ -163,13 +165,13 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 - single_params["t0_mjd_transient"]
                 - single_params["t_peak"]
             )
-            idx_rise = (obs["phase"] < 0) & (obs["phase"] > -10)
-            idx_fall = (obs["phase"] >= 0) & (obs["phase"] < 10)
+            idx_rise = (obs["phase"] < -10) & (obs["phase"] > -20)
+            idx_peak = (obs["phase"] >= -10) & (obs["phase"] < 10)
             idx_baseline = obs["phase"] < -20
 
             if (
                 np.sum(idx_snr & idx_rise) < 2
-                or np.sum(idx_snr & idx_fall) < 2
+                or np.sum(idx_snr & idx_peak) < 2
                 or np.sum(idx_baseline) < 10
             ):
                 continue
@@ -233,11 +235,11 @@ class RedbackLightCurveLib(SNLightCurveLib):
             lc_peak.reset_index(drop=True, inplace=True)
 
             lc_early.to_csv(
-                data_dir / f"lc_early_{idx_obs}.csv",
+                data_dir / f"lc_early_{str(idx_obs).zfill(4)}.csv",
                 index=False,
             )
             lc_peak.to_csv(
-                data_dir / f"lc_peak_{idx_obs}.csv",
+                data_dir / f"lc_peak_{str(idx_obs).zfill(4)}.csv",
                 index=False,
             )
 
@@ -280,6 +282,13 @@ class MockLightCurveLib(SNLightCurveLib):
         mag_peak: float = 18,
         realistic_mag: bool = False,
     ) -> None:
+        import warnings
+
+        warnings.warn(
+            "MockLightCurveLib is deprecated and may be removed in future versions.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         t_sample = jnp.arange(-100, 0, step=cadence)
         n_sample = len(t_sample)
 
@@ -371,7 +380,7 @@ class MockLightCurveLib(SNLightCurveLib):
             std_t_fl=r"$\sigma_{t_\mathrm{fl}}$",
         )
 
-        self.inf_data: InferenceData = None
+        self.inf_data = None
 
     @staticmethod
     def _generate_flux_err(flux, zp=0, method="broken_power_law"):

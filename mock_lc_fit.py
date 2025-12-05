@@ -1,6 +1,8 @@
 import os
+import shutil
 import numpyro
 import glob
+import xarray as xr
 
 numpyro.set_host_device_count(4)
 numpyro.enable_x64()
@@ -23,6 +25,12 @@ if __name__ == "__main__":
         choices=["power_law", "curved_power_law", None],
         default=None,
         help="Select the underlying true model: 'power_law' or 'curved_power_law'. Default is the same as the fitting model.",
+    )
+    parser.add_argument(
+        "--sampling_model",
+        choices=["pooled", "unpooled", "hierarchical"],
+        default="hierarchical",
+        help="Select sampling model: 'pooled', 'unpooled', or 'hierarchical' (default: 'hierarchical')",
     )
     parser.add_argument(
         "--num_lc",
@@ -81,9 +89,11 @@ if __name__ == "__main__":
                 f"Insufficient light curve files in {file_dir}: found {len(early_files)} simulated light curves, but {args.num_lc} are required."
             )
 
-        if os.path.exists(file_dir / "inf_hierarchical.nc"):
+        result_dir = file_dir / f"{args.model}_results"
+        result_file = result_dir / f"post_sample_{args.sampling_model}_{args.num_lc}.nc"
+        if os.path.exists(result_file):
             print("Removing existing .nc files...")
-            os.system(f"rm -rf {str(file_dir / '*.nc')}")
+            os.remove(result_file)
 
         lib = RedbackLightCurveLib.from_files(
             file_dir=file_dir,
@@ -91,23 +101,22 @@ if __name__ == "__main__":
             n_lc=args.num_lc,
         )
 
-        result_dir = file_dir / f"{args.model}_results"
-
         os.makedirs(result_dir, exist_ok=True)
 
         # Sampling
         lib.sampling(
-            prior_params={"curved_power_law": args.model == "curved_power_law"},
+            prior_params={
+                "curved_power_law": args.model == "curved_power_law",
+                "prior_type": "Maximum_Entropy",
+            },
             num_warmup=args.num_warmup,
             num_samples=args.num_samples,
             num_chains=args.num_chains,
+            model_structure=args.sampling_model,
         )
 
         # Save the posterior for the hierarchical model
-        lib.inf_data.to_netcdf(result_dir / "inf_hierarchical.nc")
-        # # Save the posterior samples for each light curve
-        # for k in range(len(lib.lc_library)):
-        #     # save the posterior
-        #     lib.lc_library[k].post_sample.to_netcdf(
-        #         result_dir / f"inf_{k}.nc", engine="h5netcdf"
-        #     )
+        post_sample = xr.Dataset(lib.inf_data.posterior)
+        post_sample.to_netcdf(
+            result_dir / f"post_sample_{args.sampling_model}_{args.num_lc}.nc"
+        )

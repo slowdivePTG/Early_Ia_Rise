@@ -1,6 +1,7 @@
 import glob
 import numpy as np
 import pandas as pd
+import xarray as xr
 
 from astropy.table import Table
 from .model.fit_rise import SNLightCurve, SNLightCurveLib
@@ -221,12 +222,16 @@ class ZTFIaEarlyLate(SNLightCurve):
             filt_atlas = tab_atlas_lc["filter_id"]
 
             # Calculate 40% times and max flux from data
-            if ((phase_atlas < max(t_g_early, t_r_early)) & (filt_atlas == 4)).sum() > 5:
+            if (
+                (phase_atlas < max(t_g_early, t_r_early)) & (filt_atlas == 4)
+            ).sum() > 5:
                 t_c_early = max(t_g_early, t_r_early)
             else:
                 t_c_early = -np.inf
 
-            if ((phase_atlas < max(t_g_early, t_r_early)) & (filt_atlas == 5)).sum() > 5:
+            if (
+                (phase_atlas < max(t_g_early, t_r_early)) & (filt_atlas == 5)
+            ).sum() > 5:
                 t_o_early = max(t_g_early, t_r_early)
             else:
                 t_o_early = -np.inf
@@ -462,7 +467,14 @@ class ZTFIaEDR(SNLightCurve):
 
 
 class ZTFLib(SNLightCurveLib):
-    def __init__(self, ztfid_lib: list = None, source: str = None, early_threshold: float = 0.4) -> None:
+    def __init__(
+        self,
+        ztfid_lib: list = None,
+        source: str = None,
+        early_threshold: float = 0.4,
+        post_sample: xr.Dataset = None,
+        **kwargs,
+    ) -> None:
         """
         Parameters
         ----------
@@ -494,7 +506,9 @@ class ZTFLib(SNLightCurveLib):
                 elif source.lower() == "dr2":
                     ztf_sn = ZTFIaDR2(ztfid=ztfid, early_threshold=early_threshold)
                 elif source.lower() == "early_late":
-                    ztf_sn = ZTFIaEarlyLate(ztfid=ztfid, early_threshold=early_threshold)
+                    ztf_sn = ZTFIaEarlyLate(
+                        ztfid=ztfid, early_threshold=early_threshold
+                    )
                 else:
                     raise ValueError("Source must be 'EDR', 'DR2', or 'Early_Late'.")
                 ztfid_lib_processed.append(ztfid)
@@ -510,4 +524,6 @@ class ZTFLib(SNLightCurveLib):
             lc_early_lib=lc_early_lib,
             lc_peak_lib=lc_peak_lib,
             ztfid_lib=ztfid_lib_processed,
+            post_sample=post_sample,
+            **kwargs,
         )

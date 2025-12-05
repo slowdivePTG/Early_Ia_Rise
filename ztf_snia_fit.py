@@ -1,6 +1,8 @@
 import os
+import shutil
 import pandas as pd
 import numpyro
+import xarray as xr
 
 numpyro.set_host_device_count(4)
 numpyro.enable_x64()
@@ -107,8 +109,8 @@ if __name__ == "__main__":
 
         if os.path.exists(file_dir):
             # Remove existing results to avoid conflicts
-            os.removedirs(file_dir)
-        os.makedirs(file_dir, exist_ok=True)
+            shutil.rmtree(file_dir)
+        os.makedirs(file_dir)
 
         ztflib.sampling(
             num_warmup=args.num_warmup,
@@ -120,7 +122,8 @@ if __name__ == "__main__":
         )
 
         # Save the posterior for the hierarchical model
-        ztflib.inf_data.to_netcdf(file_dir / "inf_hierarchical.nc")
+        post_sample = xr.Dataset(ztflib.inf_data.posterior)
+        post_sample.to_netcdf(file_dir / "post_sample_hierarchical.nc")
 
         # # Save the posterior samples for each light curve
         # for k in range(len(ztflib.lc_library)):

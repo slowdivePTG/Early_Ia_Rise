@@ -146,7 +146,7 @@ def unpooled_model(
         # Parameters specific to each filter for g, r, i bands (n_filt_gr)
         # alpha : Rising power-law index
         # A : Proportionality factor
-        min_alpha_0 = prior_params.get("min_alpha_0", 0)
+        min_alpha_0 = prior_params.get("min_alpha_0", 1)
         max_alpha_0 = prior_params.get("max_alpha_0", 10)
         assert min_alpha_0 >= 0, "Minimum value of alpha must be non-negative"
         if prior_type == "Miller":  # priors adopted in Miller+2020
@@ -460,11 +460,12 @@ def hierarchical_model(
         mean_alpha_0 = numpyro.sample(
             "mean_alpha_0", dist.Uniform(min_alpha_0, max_alpha_0)
         )
-        std_alpha_0 = numpyro.sample("std_alpha_0", dist.HalfNormal(0.1))
+        # std_alpha_0 = numpyro.sample("std_alpha_0", dist.HalfCauchy(0.5))
+        std_alpha_0 = numpyro.sample("std_alpha_0", dist.LogUniform(1e-2, 1.0))
 
     # t_fl : Time of the first light
     mean_t_fl = numpyro.sample("mean_t_fl", dist.Uniform(-30, -10))
-    std_t_fl = numpyro.sample("std_t_fl", dist.HalfNormal(1))
+    std_t_fl = numpyro.sample("std_t_fl", dist.LogUniform(1e-2, 5.0))
 
     with numpyro.plate("fcqfid", n_fcqfid):
         # Parameters specific to each fcqf ID for each object (n_fcqfid)
@@ -673,7 +674,12 @@ class SNLightCurve(object):
         kernel = unpooled_model
         init_strategy = nuts_params.pop("init_strategy", infer.init_to_median())
         self.sampler = infer.MCMC(
-            infer.NUTS(kernel, init_strategy=init_strategy, **nuts_params),
+            infer.NUTS(
+                kernel,
+                init_strategy=init_strategy,
+                target_accept_prob=0.95,
+                **nuts_params,
+            ),
             num_warmup=num_warmup,
             num_samples=num_samples,
             num_chains=num_chains,
@@ -740,7 +746,10 @@ class SNLightCurve(object):
         n_color = len(np.unique(self.idx_filt))
 
         _, ax = plt.subplots(
-            figsize=(8, 2 * n_color), sharex=True, sharey=True, constrained_layout=True
+            figsize=(8, 2 * max(n_color, 2)),
+            sharex=True,
+            sharey=True,
+            constrained_layout=True,
         )
 
         post_sample = self.post_sample
@@ -794,7 +803,7 @@ class SNLightCurve(object):
                     )
 
             ax.set_xlim(-31, -4)
-            ax.set_ylim(-offset * (n_color - 1), 75)
+            ax.set_ylim(-offset * (max(n_color, 2) - 1), 75)
 
             if post_sample is not None:
                 amp_ = np.ravel(post_sample["A"][:, :, flt])
@@ -873,7 +882,7 @@ class SNLightCurveLib(object):
         lc_early_lib: list = None,
         lc_peak_lib: list = None,
         ztfid_lib: list = None,
-        inf_data: InferenceData = None,
+        post_sample: xr.Dataset = None,
         sampling_model: str = "hierarchical",
     ) -> None:
         self.lc_library: list[SNLightCurve] = []
@@ -942,8 +951,9 @@ class SNLightCurveLib(object):
         print("Number of gr filters:", n_filt_gr)
         print("Light curves compiled...")
 
-        self.inf_data = inf_data
-        self.decode_inf_data(model_structure=sampling_model)
+        self.inf_data = None
+        self.post_sample = post_sample
+        self.decode_post_sample(model_structure=sampling_model)
 
     @classmethod
     def from_files(
@@ -988,8 +998,9 @@ class SNLightCurveLib(object):
         else:
             n_lc = len(early_files)
 
-        inf_data_hierarchical_file = (
-            Path(file_dir) / f"{rise_model}_results/inf_hierarchical.nc"
+        post_sample_full_file = (
+            Path(file_dir)
+            / f"{rise_model}_results/post_sample_{sampling_model}_{n_lc}.nc"
         )
 
         lc_early_lib = []
@@ -1017,24 +1028,23 @@ class SNLightCurveLib(object):
                 )
             )
 
-        if not os.path.exists(inf_data_hierarchical_file):
-            print("No hierarchical inference data found.")
-            inf_data = None
+        if not os.path.exists(post_sample_full_file):
+            print("No posterior sample found.")
+            post_sample = None
         else:
-            inf_data = az.from_netcdf(inf_data_hierarchical_file)
+            post_sample = xr.load_dataset(post_sample_full_file)
 
         return cls(
             lc_early_lib=lc_early_lib,
             lc_peak_lib=lc_peak_lib,
             params_true=pd.read_csv(params_file)[:n_lc].to_dict(orient="list"),
-            inf_data=inf_data,
+            post_sample=post_sample,
             sampling_model=sampling_model,
         )
 
-    def decode_inf_data(self, model_structure: str = "hierarchical"):
+    def decode_post_sample(self, model_structure: str = "hierarchical"):
         """
-        Decode the inference data stored in self.inf_data
-        and assign the posterior samples to each SNLightCurve object.
+        Decode the posterior samples of each light curve from the packed hierarchical model.
 
         Parameters
         ----------
@@ -1046,11 +1056,10 @@ class SNLightCurveLib(object):
         -------
         None
         """
-        if self.inf_data is None:
+        if self.post_sample is None:
             print("Inference data not yet available.")
             return
 
-        self.post_sample = self.inf_data.posterior
         for k, lc in enumerate(self.lc_library):
             fcqfid_in_obj = np.unique(self.idx_fcqfid[self.idx_obj == k])
             filt_in_obj = np.unique(self.idx_filt[self.idx_obj == k])
@@ -1161,10 +1170,13 @@ class SNLightCurveLib(object):
         """
 
         if model_structure == "pooled":
+            print("Using pooled model for sampling...")
             kernel = pooled_model
         elif model_structure == "unpooled":
+            print("Using unpooled model for sampling...")
             kernel = unpooled_model
         elif model_structure == "hierarchical":
+            print("Using hierarchical model for sampling...")
             kernel = hierarchical_model
         else:
             raise ValueError(
@@ -1218,7 +1230,6 @@ class SNLightCurveLib(object):
 
         # store the posterior samples
         self.post_sample = self.inf_data.posterior
-
 
     def plot_corner(
         self,
