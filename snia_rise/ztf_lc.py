@@ -43,14 +43,18 @@ class ZTFDataProcessor:
         if flux_max is None:
             flux_max = np.max(f[np.abs(t) < 5])
 
-        below_threshold = (f <= early_threshold * flux_max) & (t < -5)
+        below_threshold = (
+            (f <= early_threshold * flux_max)
+            if early_threshold < 1
+            else np.ones_like(f, dtype=bool) # For early_threshold >= 1, consider all points
+        )
         # if np.sum(below_threshold) == 0:
         #     print(
         #         f"No data below {early_threshold * 100}% of max flux, skip filter {filtid}."
         #     )
         #     return -np.inf, flux_max
 
-        t_early = t[below_threshold][-1] + 0.25
+        t_early = t[below_threshold & (t < 0)][-1] + 0.25
 
         return t_early, flux_max
 
@@ -61,7 +65,7 @@ class ZTFDataProcessor:
         """Create early and peak light curve dictionaries."""
         # Filter out observations < 40% of max flux
         idx_i = filt == 3
-        idx_rise = (phase < 0) & (phase > -100) & ~idx_i
+        idx_rise = (phase < 5) & (phase > -100) & ~idx_i
         idx_g = (filt == filtids[0]) & (phase < t_g_early)
         idx_r = (filt == filtids[1]) & (phase < t_r_early)
         idx = idx_rise & (idx_g | idx_r)

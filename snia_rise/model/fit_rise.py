@@ -745,7 +745,7 @@ class SNLightCurve(object):
         n_color = len(np.unique(self.idx_filt))
 
         _, ax = plt.subplots(
-            figsize=(8, 2 * max(n_color, 2)),
+            figsize=(8, 2.25 * max(n_color, 2)),
             sharex=True,
             sharey=True,
             constrained_layout=True,
@@ -801,8 +801,8 @@ class SNLightCurve(object):
                         zorder=10,
                     )
 
-            ax.set_xlim(-31, -4)
-            ax.set_ylim(-offset * (max(n_color, 2) - 1), 75)
+            ax.set_xlim(-31, +1)
+            ax.set_ylim(-offset * (max(n_color, 2) - 1), 100 + offset)
 
             if post_sample is not None:
                 amp_ = np.ravel(post_sample["A"][:, :, flt])
@@ -860,7 +860,7 @@ class SNLightCurve(object):
             show_titles=True,
             title_kwargs={"fontsize": 12},
             quantiles=[0.05, 0.5, 0.95],
-            title_quantiles=[0.05, 0.5, 0.95],
+            title_quantiles=[0.16, 0.5, 0.84],
             **kwargs,
             var_names=params_names,
         )
@@ -988,6 +988,10 @@ class SNLightCurveLib(object):
             else:
                 lc.post_sample["alpha_0"] = self.post_sample["alpha_0"]
                 lc.post_sample["t_fl"] = self.post_sample["t_fl"]
+            if "alpha_1" in self.post_sample.keys():
+                lc.post_sample["alpha_1"] = self.post_sample["alpha_1"][
+                    :, :, filt_in_obj
+                ]
             lc.post_sample = xr.Dataset(lc.post_sample)
 
     def append(self, lc_lib: "SNLightCurveLib"):
@@ -1155,7 +1159,7 @@ class SNLightCurveLib(object):
             show_titles=True,
             title_kwargs={"fontsize": 12},
             quantiles=[0.05, 0.5, 0.95],
-            title_quantiles=[0.05, 0.5, 0.95],
+            title_quantiles=[0.16, 0.5, 0.84],
             **kwargs,
         )
 
