@@ -1,4 +1,5 @@
 import glob
+from turtle import pos
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -472,7 +473,7 @@ class ZTFLib(SNLightCurveLib):
         ztfid_lib: list = None,
         source: str = None,
         early_threshold: float = 0.4,
-        post_sample: xr.Dataset = None,
+        rise_model: str = "power_law",
         **kwargs,
     ) -> None:
         """
@@ -489,6 +490,9 @@ class ZTFLib(SNLightCurveLib):
         -------
         None
         """
+
+        import os
+        from pathlib import Path
 
         if ztfid_lib is None or source is None:
             super().__init__()
@@ -519,6 +523,17 @@ class ZTFLib(SNLightCurveLib):
 
             lc_early_lib.append(ztf_sn.lc_early)
             lc_peak_lib.append(ztf_sn.lc_peak)
+
+        post_sample_dir = Path(
+            f"./data/ztf_snia_{source.lower()}/results/frac{int(early_threshold * 100)}_{rise_model}"
+        )
+        post_sample_file = post_sample_dir / f"post_sample_hierarchical.nc"
+
+        if os.path.exists(post_sample_dir):
+            print("Loading existing .nc files...")
+            post_sample = xr.load_dataset(post_sample_file)
+        else:
+            post_sample = None
 
         super().__init__(
             lc_early_lib=lc_early_lib,

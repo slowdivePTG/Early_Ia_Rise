@@ -125,9 +125,8 @@ if __name__ == "__main__":
         post_sample = xr.Dataset(ztflib.inf_data.posterior)
         post_sample.to_netcdf(file_dir / "post_sample_hierarchical.nc")
 
-        # # Save the posterior samples for each light curve
+        # Save the posterior samples for each light curve
         # for k in range(len(ztflib.lc_library)):
         #     # save the posterior
-        #     ztflib.lc_library[k].inf_data.to_netcdf(
-        #         file_dir / f"inf_{ztflib.ztfid_lib[k]}.nc"
-        #     )
+        #     post_sample_lc = xr.Dataset(ztflib.lc_library[k].inf_data.posterior)
+        #     post_sample_lc.to_netcdf(file_dir / f"post_sample_{ztflib.ztfid_lib[k]}.nc")

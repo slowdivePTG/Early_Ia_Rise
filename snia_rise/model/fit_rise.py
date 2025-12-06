@@ -12,7 +12,6 @@ from sklearn.preprocessing import LabelEncoder
 
 from .._utils import plt
 from numpy.typing import ArrayLike
-from arviz import InferenceData
 
 
 ####################################################################################################
@@ -427,7 +426,7 @@ def hierarchical_model(
                 Options: "Maximum_Entropy", "Gaussian"/"Gauss"/"Normal"
             - min_alpha_0 : float, optional, default = 0
                 Minimum value of the prior distribution for alpha.
-            - max_alpha_0 : float, optional, default = 10
+            - max_alpha_0 : float, optional, default = 5
                 Maximum value of the prior distribution for alpha.
 
     Returns
@@ -452,7 +451,7 @@ def hierarchical_model(
 
     # hyperpriors
     # alpha : Rising power-law index
-    min_alpha_0 = prior_params.get("min_alpha_0", 0)
+    min_alpha_0 = prior_params.get("min_alpha_0", 1)
     max_alpha_0 = prior_params.get("max_alpha_0", 5)
     assert min_alpha_0 >= 0, "Minimum value of alpha must be non-negative"
     with numpyro.plate("n_filt_gr", n_filt_gr):
@@ -486,7 +485,7 @@ def hierarchical_model(
                     mean_alpha_0[idx_filt_loc],
                     std_alpha_0[idx_filt_loc],
                     low=min_alpha_0,
-                    high=10,
+                    high=max_alpha_0,
                 ),
             )
         elif prior_type == "Maximum_Entropy":  # Maximum entropy (Gamma) hyperpriors
@@ -506,7 +505,7 @@ def hierarchical_model(
             )
 
         if curved_power_law:
-            mean_neg_alpha_1 = 1 / (20 * (1 + np.log(20)))
+            mean_neg_alpha_1 = 1 / (18 * (1 + np.log(18)))
             neg_alpha_1 = numpyro.sample(
                 "-alpha_1", dist.Exponential(1 / mean_neg_alpha_1)
             )
@@ -954,93 +953,6 @@ class SNLightCurveLib(object):
         self.inf_data = None
         self.post_sample = post_sample
         self.decode_post_sample(model_structure=sampling_model)
-
-    @classmethod
-    def from_files(
-        cls,
-        file_dir: str,
-        rise_model: str,
-        n_lc: int = None,
-        sampling_model: str = "hierarchical",
-    ) -> "SNLightCurveLib":
-        """
-        Load light curves from files.
-
-        Parameters
-        ----------
-        file_dir : str
-            Directory containing the light curve files.
-        rise_model : str
-            The rise model used in the light curve fitting ("power_law" or "curved_power_law").
-        sampling_model : str
-            The sampling model used in the light curve fitting ("unpooled", "pooled", or "hierarchical").
-        n_lc : int, optional
-            Number of light curves to load. If None, load all light curves.
-
-        Returns
-        -------
-        SNLightCurveLib
-            An instance of SNLightCurveLib with loaded light curves.
-        """
-        import os
-        import glob
-        import pandas as pd
-
-        from pathlib import Path
-
-        early_files = sorted(glob.glob(str(Path(file_dir) / "lc_early*.csv")))
-        peak_files = sorted(glob.glob(str(Path(file_dir) / "lc_peak*.csv")))
-        params_file = Path(file_dir) / "simulated_lc_params.csv"
-
-        if n_lc is not None:
-            early_files = early_files[:n_lc]
-            peak_files = peak_files[:n_lc]
-        else:
-            n_lc = len(early_files)
-
-        post_sample_full_file = (
-            Path(file_dir)
-            / f"{rise_model}_results/post_sample_{sampling_model}_{n_lc}.nc"
-        )
-
-        lc_early_lib = []
-        lc_peak_lib = []
-
-        for ef, pf in zip(early_files, peak_files):
-            lc_early = pd.read_csv(ef)
-            lc_peak = pd.read_csv(pf)
-            lc_early_lib.append(
-                dict(
-                    phase=lc_early["phase"].values,
-                    flux=lc_early["flux"].values,
-                    flux_err=lc_early["flux_err"].values,
-                    fcqfid=lc_early["fcqfid"].values.astype(np.int32),
-                    filt=lc_early["filt"].values.astype(np.int32),
-                )
-            )
-            lc_peak_lib.append(
-                dict(
-                    phase=lc_peak["phase"].values,
-                    flux=lc_peak["flux"].values,
-                    flux_err=lc_peak["flux_err"].values,
-                    fcqfid=lc_peak["fcqfid"].values.astype(np.int32),
-                    filt=lc_peak["filt"].values.astype(np.int32),
-                )
-            )
-
-        if not os.path.exists(post_sample_full_file):
-            print("No posterior sample found.")
-            post_sample = None
-        else:
-            post_sample = xr.load_dataset(post_sample_full_file)
-
-        return cls(
-            lc_early_lib=lc_early_lib,
-            lc_peak_lib=lc_peak_lib,
-            params_true=pd.read_csv(params_file)[:n_lc].to_dict(orient="list"),
-            post_sample=post_sample,
-            sampling_model=sampling_model,
-        )
 
     def decode_post_sample(self, model_structure: str = "hierarchical"):
         """

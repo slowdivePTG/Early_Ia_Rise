@@ -67,40 +67,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     for early_threshold in args.early_threshold:
-        file_dir = Path(
-            f"./data/mock/{args.true_model}_frac{int(early_threshold * 100)}"
-        )
+        model = args.model
+        true_model = model if args.true_model is None else args.true_model
 
-        if not os.path.exists(file_dir):
-            raise FileNotFoundError(
-                f"{file_dir} does not exist. Please run the simulation first."
-            )
-
-        early_files = sorted(glob.glob(str(file_dir / "lc_early*.csv")))
-        peak_files = sorted(glob.glob(str(file_dir / "lc_peak*.csv")))
-
-        if len(early_files) == 0 or len(peak_files) == 0:
-            raise FileNotFoundError(
-                f"No light curve files found in {file_dir}. Please run the simulation first."
-            )
-
-        if not (len(early_files) == len(peak_files) >= args.num_lc):
-            raise ValueError(
-                f"Insufficient light curve files in {file_dir}: found {len(early_files)} simulated light curves, but {args.num_lc} are required."
-            )
-
-        result_dir = file_dir / f"{args.model}_results"
-        result_file = result_dir / f"post_sample_{args.sampling_model}_{args.num_lc}.nc"
-        if os.path.exists(result_file):
-            print("Removing existing .nc files...")
-            os.remove(result_file)
-
-        lib = RedbackLightCurveLib.from_files(
-            file_dir=file_dir,
-            rise_model=args.model,
+        lib = RedbackLightCurveLib(
             n_lc=args.num_lc,
+            early_threshold=early_threshold,
+            model=model,
+            true_model=true_model,
         )
 
+        result_dir = Path(
+            f"./data/mock/{true_model}/{model}_frac{int(early_threshold * 100)}"
+        )
         os.makedirs(result_dir, exist_ok=True)
 
         # Sampling

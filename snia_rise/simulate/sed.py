@@ -69,6 +69,9 @@ def power_law_rise_flat_sed(
     from redback.sed import RedbackTimeSeriesSource
     from scipy.special import lambertw
 
+    MPC_TO_CM = 3.086e24
+    SPEED_OF_LIGHT = 2.99792458e10
+
     # Helper to extract scalar
     def to_scalar(val):
         if isinstance(val, pd.Series):
@@ -89,8 +92,7 @@ def power_law_rise_flat_sed(
     t_peak = np.exp(lambertw(-np.exp(1) / alpha_1).real - 1)
 
     # Calculate distance and redshift
-    mpc_to_cm = 3.086e24
-    dist_lum_cm = dist_lum * mpc_to_cm
+    dist_lum_cm = dist_lum * MPC_TO_CM
 
     # Calculate flux
     flux_density_cgs = peak_luminosity / (4 * np.pi * dist_lum_cm**2)
@@ -122,8 +124,9 @@ def power_law_rise_flat_sed(
     flux_2d = np.tile(flux[:, np.newaxis], (1, len(lambda_array)))
 
     # Convert to erg/cm^2/s/A
-    c = 2.99792458e18
-    flux_density_cgs = flux_2d * 1e-23 * c / lambda_array[np.newaxis, :] ** 2
+    flux_density_cgs = (
+        flux_2d * 1e-23 * SPEED_OF_LIGHT * 1e8 / lambda_array[np.newaxis, :] ** 2
+    )
 
     # Always return sncosmo source (simpler for redback to handle)
     source = RedbackTimeSeriesSource(

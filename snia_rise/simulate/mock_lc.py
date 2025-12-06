@@ -16,12 +16,71 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
     def __init__(
         self,
-        params_true: dict,
-        lc_early_lib: list[pd.DataFrame],
-        lc_peak_lib: list[pd.DataFrame],
-        post_sample: xr.Dataset = None,
+        n_lc: int = None,
+        early_threshold: float = 0.4,
+        model: str = None,
+        true_model: str = "power_law",
         sampling_model: str = "hierarchical",
     ) -> None:
+        import os
+        import glob
+        import pandas as pd
+
+        from pathlib import Path
+
+        file_dir = Path(f"./data/mock/{true_model}")
+
+        peak_files = sorted(glob.glob(str(Path(file_dir) / "lc_peak*.csv")))
+        params_file = file_dir / f"simulated_lc_params.csv"
+
+        post_sample_dir = Path(file_dir) / f"{model}_frac{int(early_threshold * 100)}"
+        post_sample_full_file = (
+            post_sample_dir / f"post_sample_{sampling_model}_{n_lc}.nc"
+        )
+
+        if n_lc is None:
+            n_lc = len(peak_files)
+        else:
+            if len(peak_files) < n_lc:
+                raise ValueError(
+                    f"Insufficient light curve files in {file_dir}: found {len(peak_files)} simulated light curves, but {n_lc} are required."
+                )
+            peak_files = peak_files[:n_lc]
+
+        lc_early_lib = []
+        lc_peak_lib = []
+
+        for pf in peak_files:
+            lc_peak = pd.read_csv(pf)
+            lc_peak_lib.append(
+                dict(
+                    phase=lc_peak["phase"].values,
+                    flux=lc_peak["flux"].values,
+                    flux_err=lc_peak["flux_err"].values,
+                    fcqfid=lc_peak["fcqfid"].values.astype(np.int32),
+                    filt=lc_peak["filt"].values.astype(np.int32),
+                )
+            )
+            idx_early = (
+                lc_peak["phase"]
+                <= lc_peak["phase"].values[
+                    lc_peak["flux"].values < early_threshold * 100
+                ][-1]
+            )
+            lc_early_lib.append({key: item[idx_early] for key, item in lc_peak.items()})
+
+        if not os.path.exists(post_sample_full_file):
+            post_sample = None
+        else:
+            print("Loading existing .nc files...")
+            post_sample = xr.load_dataset(post_sample_full_file)
+
+        if not os.path.exists(params_file):
+            print("No true parameters file found.")
+            params_true = None
+        else:
+            params_true = pd.read_csv(params_file)[:n_lc].to_dict(orient="list")
+
         super().__init__(
             lc_early_lib=lc_early_lib,
             lc_peak_lib=lc_peak_lib,
@@ -34,9 +93,9 @@ class RedbackLightCurveLib(SNLightCurveLib):
             t_fl=r"$t_\mathrm{fl}$",
             base=r"$C$",
             amp=r"$A$",
-            alpha=r"$\alpha$",
-            mean_alpha=r"$\mu_\alpha$",
-            std_alpha=r"$\sigma_\alpha$",
+            alpha_0=r"$\alpha$",
+            mean_alpha_0=r"$\mu_\alpha$",
+            std_alpha_0=r"$\sigma_\alpha$",
             mean_t_fl=r"$\mu_{t_\mathrm{fl}}$",
             std_t_fl=r"$\sigma_{t_\mathrm{fl}}$",
         )
@@ -47,7 +106,6 @@ class RedbackLightCurveLib(SNLightCurveLib):
         n_lc: int = 10,
         params_mean: dict = None,
         params_std: dict = None,
-        early_threshold: float = 0.4,
         model: str = "curved_power_law",
     ) -> list[pd.DataFrame]:
         """
@@ -60,6 +118,10 @@ class RedbackLightCurveLib(SNLightCurveLib):
         from .._utils._plt import set_plot_style
 
         from .sed import power_law_rise_flat_sed
+
+        import logging
+
+        logging.getLogger("redback").setLevel(logging.WARNING)
 
         T0_MJD_TRANSIENT = 59050.0
         PEAK_LUMINOSITY = 2e28  # erg/s/Hz
@@ -121,11 +183,10 @@ class RedbackLightCurveLib(SNLightCurveLib):
         params_sim["dec"] = np.random.uniform(-30, 90, num_tot)
 
         # Simulate each transient individually
-        lc_early_lib = np.empty(shape=n_lc, dtype=object)
         lc_peak_lib = np.empty(shape=n_lc, dtype=object)
         params_valid_det = []
 
-        data_dir = Path(f"./data/mock/{model}_frac{int(early_threshold * 100)}")
+        data_dir = Path(f"./data/mock/{model}")
         if os.path.exists(data_dir):
             shutil.rmtree(data_dir)
         os.makedirs(data_dir, exist_ok=True)
@@ -156,44 +217,43 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             obs = sim.observations
             # only need g and r bands
-            obs = obs[(obs["band"] == "ztfg") | (obs["band"] == "ztfr")].reset_index(
-                drop=True
-            )
-            idx_snr = (obs["flux(erg/cm2/s)"] / obs["flux_error"]) > 10
+            idx_g = obs["band"] == "ztfg"
+            idx_r = obs["band"] == "ztfr"
+            obs = obs[idx_r].reset_index(drop=True)
+            idx_snr = obs["flux(erg/cm2/s)"] / obs["flux_error"] > 5
             obs["phase"] = (
                 obs["time"]
                 - single_params["t0_mjd_transient"]
                 - single_params["t_peak"]
             )
-            idx_rise = (obs["phase"] < -10) & (obs["phase"] > -20)
-            idx_peak = (obs["phase"] >= -10) & (obs["phase"] < 10)
-            idx_baseline = obs["phase"] < -20
+            idx_early = (obs["phase"] < -10) & (obs["phase"] > -18)
+            idx_rise = (obs["phase"] >= -10) & (obs["phase"] < 0)
+            idx_fall = (obs["phase"] >= 0) & (obs["phase"] < 10)
+            idx_baseline = (obs["phase"] < -18) & (
+                obs["flux(erg/cm2/s)"] / obs["flux_error"] < 3
+            )
 
+            # require at least 2 high-SNR points in either g or r band during rise and peak, and at least 10 baseline points
             if (
-                np.sum(idx_snr & idx_rise) < 2
-                or np.sum(idx_snr & idx_peak) < 2
-                or np.sum(idx_baseline) < 10
+                # (np.sum(idx_snr & idx_early & idx_g) < 2)
+                # and
+                (np.sum(idx_snr & idx_early & idx_r) < 2)
+                or
+                # (
+                #     np.sum(idx_snr & idx_rise & idx_g) < 2
+                #     or np.sum(idx_snr & idx_fall & idx_g) < 2
+                # )
+                # and
+                (
+                    np.sum(idx_snr & idx_rise & idx_r) < 2
+                    or np.sum(idx_snr & idx_fall & idx_r) < 2
+                )
+                or
+                # (np.sum(idx_baseline & idx_g) < 5)
+                # or
+                (np.sum(idx_baseline & idx_r) < 5)
             ):
                 continue
-
-            # Normalize fluxes
-            obs["flux_norm"] = np.full_like(obs["flux(erg/cm2/s)"], np.nan)
-            obs["flux_norm_error"] = np.full_like(obs["flux_error"], np.nan)
-
-            for band in ["ztfg", "ztfr"]:
-                idx_band = obs["band"] == band
-                flux_norm_factor = (
-                    obs.loc[idx_snr & idx_band, "flux(erg/cm2/s)"].max() / 100
-                )
-                obs["flux_norm"][idx_band] = (
-                    obs["flux(erg/cm2/s)"][idx_band] / flux_norm_factor
-                )
-                obs["flux_norm_error"][idx_band] = (
-                    obs["flux_error"][idx_band] / flux_norm_factor
-                )
-
-            # Remove the filter with no detections
-            obs = obs[np.isfinite(obs["flux_norm"])].reset_index(drop=True)
 
             idx_obs = len(params_valid_det)
             print(
@@ -203,24 +263,27 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             # Generate early light curve up to early_threshold of peak flux
             phase = obs["phase"].values
-            flux_mock = obs["flux_norm"].values + single_params["base"]
-            flux_err_mock = obs["flux_norm_error"].values
+            flux_mock = obs["flux(erg/cm2/s)"].values
+            flux_err_mock = obs["flux_error"].values
+
+            # Normalize flux to 100 at peak for both g and r bands
+            for band in ["ztfg", "ztfr"]:
+                idx_band = obs["band"] == band
+                peak_flux_band = cls.get_peak_flux(
+                    flt=band, dist_lum=single_params["dist_lum"]
+                )
+                flux_mock[idx_band] = flux_mock[idx_band] / peak_flux_band * 100
+                flux_err_mock[idx_band] = flux_err_mock[idx_band] / peak_flux_band * 100
+
+            flux_mock += single_params["base"]
 
             filt = np.where(obs["band"] == "ztfg", 1, 2).astype(np.int32)
-            fcqfid = filt.astype(np.int32)
+            fcqfid = (
+                filt.astype(np.int32) + i * 10
+            )  # unique fcqfid for each object and filter
 
-            idx_early = (phase < 0) & (obs["flux_norm"] <= early_threshold * 100)
             idx_peak = phase < 0
 
-            lc_early = pd.DataFrame(
-                dict(
-                    phase=phase[idx_early],
-                    flux=flux_mock[idx_early],
-                    flux_err=flux_err_mock[idx_early],
-                    fcqfid=fcqfid[idx_early],
-                    filt=filt[idx_early],
-                )
-            )
             lc_peak = pd.DataFrame(
                 dict(
                     phase=phase[idx_peak],
@@ -231,19 +294,13 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 )
             )
 
-            lc_early.reset_index(drop=True, inplace=True)
             lc_peak.reset_index(drop=True, inplace=True)
 
-            lc_early.to_csv(
-                data_dir / f"lc_early_{str(idx_obs).zfill(4)}.csv",
-                index=False,
-            )
             lc_peak.to_csv(
                 data_dir / f"lc_peak_{str(idx_obs).zfill(4)}.csv",
                 index=False,
             )
 
-            lc_early_lib[idx_obs] = lc_early
             lc_peak_lib[idx_obs] = lc_peak
 
             params_valid_det.append(single_params)
@@ -262,7 +319,34 @@ class RedbackLightCurveLib(SNLightCurveLib):
         # Reset the plot style after Redback's modification
         set_plot_style()
 
-        return cls(params_true, lc_early_lib=lc_early_lib, lc_peak_lib=lc_peak_lib)
+    @staticmethod
+    def get_peak_flux(flt: str, dist_lum: float, peak_luminosity: float = 2e28):
+        """
+        Calculate the peak flux (in erg/cm^2/s) given the distance luminosity (in Mpc) within ZTF filters.
+        """
+        # Definition in redback/tables/filters.csv
+        # bands, wavelength [Hz], wavelength [Angstrom], color, reference_flux, sncosmo_name, label, effective_width [Hz]
+        # ztfg,  6.27200e+14,     4783.50000,            black, 5.78500e-06,    ztfg,         ZTF/g, 1.65636e+14
+        # ztfr,  4.67500e+14,     6417.10000,            black, 3.79600e-06,    ztfr,         ZTF/r, 1.08076e+14
+        # ztfi,  3.81300e+14,     7867.41000,            black, 2.34000e-06,    ztfi,         ZTF/i, 5.86690e+13
+
+        MPC_TO_CM = 3.086e24
+
+        dist_lum_cm = dist_lum * MPC_TO_CM
+
+        peak_flux_cgs = peak_luminosity / (4 * np.pi * dist_lum_cm**2)  # erg/cm^2/s/Hz
+
+        if flt == "ztfg":
+            eff_width = 1.65636e14  # Hz
+        elif flt == "ztfr":
+            eff_width = 1.08076e14  # Hz
+        elif flt == "ztfi":
+            eff_width = 5.86690e13  # Hz
+        else:
+            raise ValueError(f"Filter {flt} not recognized.")
+
+        peak_flux = peak_flux_cgs * eff_width  # erg/cm^2/s
+        return peak_flux
 
 
 class MockLightCurveLib(SNLightCurveLib):
