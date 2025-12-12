@@ -1,3 +1,4 @@
+from ast import arg
 import os
 import numpyro
 import xarray as xr
@@ -35,6 +36,17 @@ if __name__ == "__main__":
         ],
         default="hierarchical_mvn",
         help="Select sampling model: 'pooled', 'unpooled', or 'hierarchical (including _tfl and _mvn)' (default: 'hierarchical_mvn')",
+    )
+    parser.add_argument(
+        "--prior_type",
+        choices=[
+            "miller",
+            "uniform",
+            "maximum_entropy",
+            "normal",
+        ],
+        default="flat",
+        help="Select prior type for alpha_0 in 'independent' correlation structure or non-hierarchical models (default: 'flat')",
     )
     parser.add_argument(
         "--num_lc",
@@ -90,7 +102,7 @@ if __name__ == "__main__":
         lib.sampling(
             prior_config={
                 "curved_power_law": args.model == "curved_power_law",
-                "prior_type": "Maximum_Entropy",
+                "prior_type": args.prior_type.lower(),
             },
             num_warmup=args.num_warmup,
             num_samples=args.num_samples,
@@ -100,6 +112,10 @@ if __name__ == "__main__":
 
         # Save the posterior for the hierarchical model
         post_sample = xr.Dataset(lib.inf_data.posterior)
+        if args.sampling_model in ["hierarchical_tfl", "unpooled", "pooled"]:
+            sampling_model_str = f"{args.sampling_model}_{args.prior_type.lower()}"
+        else:
+            sampling_model_str = args.sampling_model
         post_sample.to_netcdf(
-            result_dir / f"post_sample_{args.sampling_model}_{args.num_lc}.nc"
+            result_dir / f"post_sample_{sampling_model_str}_{args.num_lc}.nc"
         )

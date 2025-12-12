@@ -21,6 +21,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         model: str = None,
         true_model: str = "power_law",
         sampling_model: str = "hierarchical",
+        prior_type: str = "uniform",
     ) -> None:
         import os
         import glob
@@ -34,8 +35,12 @@ class RedbackLightCurveLib(SNLightCurveLib):
         params_file = file_dir / f"simulated_lc_params.csv"
 
         post_sample_dir = Path(file_dir) / f"{model}_frac{int(early_threshold * 100)}"
+        if sampling_model in ["hierarchical_tfl", "unpooled", "pooled"]:
+            sampling_model_str = f"{sampling_model}_{prior_type.lower()}"
+        else:
+            sampling_model_str = sampling_model
         post_sample_full_file = (
-            post_sample_dir / f"post_sample_{sampling_model}_{n_lc}.nc"
+            post_sample_dir / f"post_sample_{sampling_model_str}_{n_lc}.nc"
         )
 
         if n_lc is None:
@@ -72,7 +77,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         if not os.path.exists(post_sample_full_file):
             post_sample = None
         else:
-            print("Loading existing .nc files...")
+            print("Loading existing .nc file...")
             post_sample = xr.load_dataset(post_sample_full_file)
 
         if not os.path.exists(params_file):

@@ -6,9 +6,9 @@ import numpyro
 import numpyro.distributions as dist
 
 
-def sample_observation_params(n_fcqfid, prior_type="default"):
+def sample_fcqf_params(n_fcqfid, prior_config: dict = {}):
     """
-    Sample per-observation parameters:  baseline and uncertainty scale.
+    Sample Field/CCD/Quadrant/Filter-level parameters:  baseline and uncertainty scale.
 
     Parameters
     ----------
@@ -21,10 +21,12 @@ def sample_observation_params(n_fcqfid, prior_type="default"):
     -------
     base, beta
     """
+    prior_type = prior_config.get("prior_type", "uniform").lower()
+
     with numpyro.plate("fcqfid", n_fcqfid):
         base = numpyro.sample("C", dist.Uniform(-50, 50))
 
-        if prior_type == "Miller":
+        if prior_type == "miller":
             beta = numpyro.sample("beta", dist.LogUniform(0.7, 1.3))
         else:
             beta = numpyro.sample("beta", dist.LogNormal(0, 0.1))
@@ -32,7 +34,13 @@ def sample_observation_params(n_fcqfid, prior_type="default"):
     return base, beta
 
 
-def sample_alpha_prior(prior_type, min_val, max_val, mean_val=2.0, std_val=None):
+def sample_alpha_0(
+    mean_alpha_0: float = None,
+    sigma_alpha_0: float = None,
+    min_alpha_0: float = None,
+    max_alpha_0: float = None,
+    prior_config: dict = {},
+):
     """
     Sample a single alpha value with specified prior (used inside plates).
 
@@ -40,152 +48,138 @@ def sample_alpha_prior(prior_type, min_val, max_val, mean_val=2.0, std_val=None)
 
     Parameters
     ----------
-    prior_type : str
-        "Miller", "Jeffreys", "Flat"/"Uniform", "Maximum_Entropy", "Gaussian"
-    min_val : float
-        Minimum value
-    max_val : float
-        Maximum value
-    mean_val :  float, default=2.0
-        Mean for Maximum_Entropy or Gaussian
-    std_val : float, optional
-        Std for Maximum_Entropy or Gaussian
+    prior_config : dict
+        - prior_type : str
+            "miller", "uniform", "maximum_entropy", "normal"
+        - mean_alpha_0 : float, default=2
+            Mean alpha value (for maximum_entropy and normal)
+        - sigma_alpha_0 : float, optional
+            Std alpha value (for maximum_entropy and normal)
+        - min_alpha_0 : float, default=1
+            Minimum alpha value
+        - max_alpha_0 : float, default=5
+            Maximum alpha value
 
     Returns
     -------
-    alpha_0 : array
+    alpha_0 : array, shape ()
         Sampled alpha values
     """
-    if prior_type == "Miller":
+
+    prior_type = prior_config.get("prior_type", "maximum_entropy").lower()
+
+    if mean_alpha_0 is None:
+        mean_alpha_0 = prior_config.get("mean_alpha_0", 2)
+    if sigma_alpha_0 is None:
+        sigma_alpha_0 = prior_config.get("sigma_alpha_0", None)
+    if min_alpha_0 is None:
+        min_alpha_0 = prior_config.get("min_alpha_0", 0)
+    if max_alpha_0 is None:
+        max_alpha_0 = prior_config.get("max_alpha_0", 5)
+    assert min_alpha_0 >= 0, "min_alpha_0 must be non-negative"
+
+    if prior_type == "miller":
+        # Miller et al. (2020) prior
         alpha_0 = numpyro.sample("alpha_0", dist.Exponential(jnp.log(10)))
 
-    elif prior_type == "Jeffreys":
-        alpha_0 = numpyro.sample(
-            "alpha_0", dist.LogUniform(max(min_val, 1e-2), max_val)
-        )
+    elif prior_type == "uniform":
+        # Uniform prior
+        alpha_0 = numpyro.sample("alpha_0", dist.Uniform(min_alpha_0, max_alpha_0))
 
-    elif prior_type in ["Flat", "Uniform"]:
-        alpha_0 = numpyro.sample("alpha_0", dist.Uniform(min_val, max_val))
-
-    elif prior_type == "Maximum_Entropy":
-        if std_val is None:
-            rate = 1 / (mean_val - min_val)
+    elif prior_type == "maximum_entropy":
+        # Maximum Entropy prior
+        if sigma_alpha_0 is None:
+            # alpha > min_alpha_0, E(alpha) = mean_alpha_0 -> Exponential
+            rate = 1 / (mean_alpha_0 - min_alpha_0)
             alpha_ = numpyro.sample("alpha-", dist.Exponential(rate))
         else:
-            concentration = (mean_val - min_val) ** 2 / std_val**2
-            rate = (mean_val - min_val) / std_val**2
+            # alpha > min_alpha_0, E(alpha) = mean_alpha_0, Var(alpha) = sigma_alpha_0^2 -> Gamma
+            concentration = (mean_alpha_0 - min_alpha_0) ** 2 / sigma_alpha_0**2
+            rate = (mean_alpha_0 - min_alpha_0) / sigma_alpha_0**2
             alpha_ = numpyro.sample("alpha-", dist.Gamma(concentration, rate))
-        alpha_0 = numpyro.deterministic("alpha_0", alpha_ + min_val)
+        alpha_0 = numpyro.deterministic("alpha_0", alpha_ + min_alpha_0)
 
-    elif prior_type in ["Gaussian", "Gauss", "Normal"]:
+    elif prior_type == "normal":
         alpha_0 = numpyro.sample(
             "alpha_0",
-            dist.TruncatedNormal(mean_val, std_val, low=min_val, high=max_val),
+            dist.TruncatedNormal(
+                mean_alpha_0, sigma_alpha_0, low=min_alpha_0, high=max_alpha_0
+            ),
         )
 
     else:
         raise ValueError(
-            f"Invalid prior_type '{prior_type}'.Options:  'Miller', 'Jeffreys', "
-            "'Flat', 'Uniform', 'Maximum_Entropy', 'Gaussian', 'Gauss', 'Normal'"
+            f"Invalid prior_type '{prior_type}'.Options: 'miller', 'maximum_entropy', 'normal'"
         )
 
     return alpha_0
 
 
-def sample_filter_level_params(n_filt, alpha_0, curved_power_law):
+def sample_alpha_1():
     """
-    Sample filter-level parameters:  alpha_1 (curvature) and amplitude.
+    Sample a single alpha value with specified prior (used inside plates).
+
+    Must be called within a numpyro.plate context.
 
     Parameters
     ----------
-    n_filt : int
-        Number of filters
-    alpha_0 : array, shape (n_obj, n_filt) or (n_filt,)
-        Rising power-law index
     curved_power_law : bool
         Whether to include curvature term
 
     Returns
     -------
-    alpha_1 : array, shape (n_filt,)
+    alpha_1 : array, shape ()
         Curvature parameter
-    amp_prime : array, shape (n_filt,)
-        Amplitude normalization (before alpha_0 correction)
-    amp : array, shape (n_obj, n_filt) or (n_filt,)
-        Final amplitude (amp_prime / 10^alpha_0)
     """
-    with numpyro.plate("filt", n_filt):
-        if curved_power_law:
-            mean_neg = 1 / (18 * (1 + np.log(18)))
-            neg_alpha_1 = numpyro.sample("-alpha_1", dist.Exponential(1 / mean_neg))
-            alpha_1 = numpyro.deterministic("alpha_1", -neg_alpha_1)
-        else:
-            alpha_1 = jnp.zeros(n_filt)
+    mean_neg = 1 / (18 * (1 + np.log(18)))
+    neg_alpha_1 = numpyro.sample("-alpha_1", dist.Exponential(1 / mean_neg))
+    alpha_1 = numpyro.deterministic("alpha_1", -neg_alpha_1)
 
-        # amp_prime:  shape (n_filt,) - shared across objects
-        amp_prime = numpyro.sample("Aprime", dist.LogUniform(1e-5, 1e5))
-
-    # Compute amplitude based on alpha_0 shape
-    if alpha_0.ndim == 2:
-        # Hierarchical models:  alpha_0 has shape (n_obj, n_filt)
-        # amp[j, i] = amp_prime[i] / 10^alpha_0[j, i]
-        amp = numpyro.deterministic("A", amp_prime[None, :] / jnp.power(10, alpha_0))
-    else:
-        # Unpooled/pooled models: alpha_0 has shape (n_filt,) or scalar
-        # amp[i] = amp_prime[i] / 10^alpha_0[i]
-        amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
-
-    return alpha_1, amp
+    return alpha_1
 
 
-def sample_tfl_params(n_obj, prior_config, hierarchical=False):
+def sample_amp_prime():
     """
-    Sample t_fl parameters (per-object or hierarchical).
-
-    Parameters
-    ----------
-    n_obj :  int
-        Number of objects
-    prior_config : dict
-        Configuration dict
-    hierarchical : bool
-        If True, sample hyperpriors first
+    Sample Object/Filter-level parameters:  alpha_1 (curvature) and amplitude.
 
     Returns
     -------
-    t_fl :  array, shape (n_obj,)
-        Or (mean_t_fl, std_t_fl) if hierarchical and returning hyperpriors
+    amp_prime : array
+        Amplitude normalization (before alpha_0 correction)
     """
-    if hierarchical:
-        # Sample hyperpriors
-        mean_t_fl = numpyro.sample("mean_t_fl", dist.Uniform(-30, -10))
-        std_t_fl = numpyro.sample("std_t_fl", dist.LogUniform(1e-2, 5.0))
+    amp_prime = numpyro.sample("Aprime", dist.LogUniform(1e-5, 1e5))
 
-        # Sample per-object t_fl
-        with numpyro.plate("obj", n_obj):
-            t_fl = numpyro.sample("t_fl", dist.Normal(mean_t_fl, std_t_fl))
+    return amp_prime
 
-        return t_fl
+
+def sample_tfl(prior_config):
+    """
+    Sample t_fl parameters.
+
+    Parameters
+    ----------
+    prior_config : dict
+        Configuration dict
+
+    Returns
+    -------
+    t_fl :  array, shape ()
+    """
+    prior_type = prior_config.get("prior_type", "uniform").lower()
+
+    if prior_type in ["gaussian", "normal"]:
+        mean_t_fl = prior_config.get("mean_t_fl", -18)
+        sigma_t_fl = prior_config.get("sigma_t_fl", 1.5)
+        t_fl = numpyro.sample("t_fl", dist.Normal(mean_t_fl, sigma_t_fl))
     else:
-        # Non-hierarchical (unpooled)
-        prior_type = prior_config.get("prior_type", "Uniform")
+        t_fl = numpyro.sample("t_fl", dist.Uniform(-40, -10))
 
-        with numpyro.plate("obj", n_obj):
-            if prior_type in ["Gaussian", "Gauss", "Normal"]:
-                mean_t_fl = prior_config.get("mean_t_fl", -18)
-                std_t_fl = prior_config.get("std_t_fl", 1.5)
-                t_fl = numpyro.sample("t_fl", dist.Normal(mean_t_fl, std_t_fl))
-            else:
-                t_fl = numpyro.sample("t_fl", dist.Uniform(-40, 0))
-
-        return t_fl
+    return t_fl
 
 
 def _sample_mvn_hierarchical_params(
     n_obj,
-    n_filt_gr,
     n_filt,
-    idx_filt_loc,
     mean_t_fl,
     sigma_t_fl,
     mean_alpha_0,
@@ -201,12 +195,8 @@ def _sample_mvn_hierarchical_params(
     ----------
     n_obj : int
         Number of objects
-    n_filt_gr : int
-        Number of filter groups
     n_filt : int
         Number of filters
-    idx_filt_loc : array
-        Mapping from filter to filter group
     mean_t_fl : float
         Population mean for t_fl
     sigma_t_fl : float
@@ -226,10 +216,8 @@ def _sample_mvn_hierarchical_params(
     -------
     t_fl :  array, shape (n_obj,)
     alpha_0 : array, shape (n_obj, n_filt)
-    hyperparams : dict
     """
-    d = 1 + n_filt_gr
-    hyperparams = {}
+    d = 1 + n_filt
 
     # Mean and scale vectors
     mu = jnp.concatenate([jnp.array([mean_t_fl]), mean_alpha_0])
@@ -244,13 +232,10 @@ def _sample_mvn_hierarchical_params(
 
     L_Cholesky = jnp.matmul(jnp.diag(sigma), chol_corr)
 
-    # Store covariance and correlation
-    hyperparams["Sigma"] = numpyro.deterministic(
-        "Sigma", jnp.matmul(L_Cholesky, L_Cholesky.T)
-    )
-    hyperparams["Corr"] = numpyro.deterministic(
-        "Corr", jnp.matmul(chol_corr, chol_corr.T)
-    )
+    if sample_correlations:
+        # Store covariance and correlation
+        _ = numpyro.deterministic("Sigma", jnp.matmul(L_Cholesky, L_Cholesky.T))
+        _ = numpyro.deterministic("Corr", jnp.matmul(chol_corr, chol_corr.T))
 
     # Sample from MVN
     with numpyro.plate("obj", n_obj):
@@ -258,68 +243,89 @@ def _sample_mvn_hierarchical_params(
             "theta", dist.MultivariateNormal(loc=mu, scale_tril=L_Cholesky)
         )
         t_fl = numpyro.deterministic("t_fl", theta[..., 0])
-        alpha_0_groups = jnp.clip(theta[..., 1:], min_alpha_0, max_alpha_0)
+        alpha_0 = numpyro.deterministic(
+            "alpha_0", jnp.clip(theta[..., 1:], min_alpha_0, max_alpha_0)
+        )
 
-    # Expand to all filters
-    alpha_0_expanded = alpha_0_groups[:, idx_filt_loc]
-    alpha_0 = numpyro.deterministic("alpha_0", alpha_0_expanded)
-
-    return t_fl, alpha_0, hyperparams
+    return t_fl, alpha_0
 
 
 def _sample_tfl_only_hierarchical_params(
     n_obj,
     n_filt,
-    idx_filt_loc,
     mean_t_fl,
     sigma_t_fl,
+    mean_alpha_0,
+    sigma_alpha_0,
     min_alpha_0,
     max_alpha_0,
-    prior_type,
-    prior_config,
 ):
-    """Only t_fl hierarchical, alpha_0 sampled per-filter (like unpooled)."""
-    hyperparams = {}
-    # No Sigma or Corr - this is not a multivariate model
+    """Only t_fl hierarchical, alpha_0 sampled independently (like unpooled).
+
+    Parameters
+    ----------
+    n_obj : int
+        Number of objects
+    n_filt : int
+        Number of filters
+    mean_t_fl : float
+        Population mean for t_fl
+    sigma_t_fl : float
+        Population std for t_fl
+    min_alpha_0 : float
+        Minimum alpha value
+    max_alpha_0 : float
+        Maximum alpha value
+
+    Returns
+    -------
+    t_fl : array, shape (n_obj,)
+    alpha_0 : array, shape (n_obj, n_filt)
+    """
 
     # Sample t_fl hierarchically
     with numpyro.plate("obj", n_obj):
         t_fl = numpyro.sample("t_fl", dist.Normal(mean_t_fl, sigma_t_fl))
 
-    # Sample alpha_0 per filter with non-hierarchical priors (like unpooled)
-    mean_val = prior_config.get("mean_alpha_0", 2)
-    std_val = prior_config.get("std_alpha_0", None)
-
     with numpyro.plate("filt", n_filt):
-        alpha_0_per_filt = sample_alpha_prior(
-            prior_type, min_alpha_0, max_alpha_0, mean_val, std_val
-        )
+        with numpyro.plate("obj", n_obj):
+            alpha_0 = sample_alpha_0(
+                mean_alpha_0, sigma_alpha_0, min_alpha_0, max_alpha_0
+            )
 
-    # Broadcast to (n_obj, n_filt) for consistent structure
-    alpha_0 = jnp.tile(alpha_0_per_filt[None, :], (n_obj, 1))
-
-    # No theta reconstruction - this model doesn't have a multivariate structure
-
-    return t_fl, alpha_0, hyperparams
+    return t_fl, alpha_0
 
 
 def sample_hierarchical_params(
     n_obj,
-    n_filt_gr,
     n_filt,
-    idx_filt_loc,
-    min_alpha_0,
-    max_alpha_0,
     correlation_structure="mvn",
-    prior_type="Maximum_Entropy",
     prior_config={},
 ):
     """
     Sample hierarchical parameters with different correlation structures.
 
     This is a dispatcher that calls the appropriate sampling strategy.
+
+    Parameters
+    ----------
+    n_obj : int
+        Number of objects
+    n_filt : int
+        Number of filters
+    correlation_structure : str
+        "mvn", "independent", or "tfl_only"
+    prior_config : dict
+        Configuration dict
+
+    Returns
+    -------
+    t_fl : array, shape (n_obj,)
+    alpha_0 : array, shape (n_obj, n_filt)
     """
-    d = 1 + n_filt_gr
+    min_alpha_0 = prior_config.get("min_alpha_0", 0)
+    max_alpha_0 = prior_config.get("max_alpha_0", 5)
+    assert min_alpha_0 >= 0, "min_alpha_0 must be non-negative"
 
     # Sample t_fl hyperpriors (common to all structures)
     mean_t_fl = numpyro.sample("mean_t_fl", dist.Uniform(-30, -10))
@@ -327,7 +333,7 @@ def sample_hierarchical_params(
 
     # Sample alpha_0 hyperpriors only for mvn and independent
     if correlation_structure in ["mvn", "independent"]:
-        with numpyro.plate("n_filt_gr", n_filt_gr):
+        with numpyro.plate("n_filt", n_filt):
             mean_alpha_0 = numpyro.sample(
                 "mean_alpha_0", dist.Uniform(min_alpha_0, max_alpha_0)
             )
@@ -337,9 +343,7 @@ def sample_hierarchical_params(
             # Full MVN with correlations
             return _sample_mvn_hierarchical_params(
                 n_obj,
-                n_filt_gr,
                 n_filt,
-                idx_filt_loc,
                 mean_t_fl,
                 sigma_t_fl,
                 mean_alpha_0,
@@ -352,9 +356,7 @@ def sample_hierarchical_params(
             # Independent hierarchical priors
             return _sample_mvn_hierarchical_params(
                 n_obj,
-                n_filt_gr,
                 n_filt,
-                idx_filt_loc,
                 mean_t_fl,
                 sigma_t_fl,
                 mean_alpha_0,
@@ -366,16 +368,17 @@ def sample_hierarchical_params(
 
     elif correlation_structure == "tfl_only":
         # Only t_fl hierarchical, alpha_0 non-hierarchical
+        mean_alpha_0 = prior_config.get("mean_alpha_0", 2)
+        sigma_alpha_0 = prior_config.get("sigma_alpha_0", None)
         return _sample_tfl_only_hierarchical_params(
             n_obj,
             n_filt,
-            idx_filt_loc,
             mean_t_fl,
             sigma_t_fl,
+            mean_alpha_0,
+            sigma_alpha_0,
             min_alpha_0,
             max_alpha_0,
-            prior_type,
-            prior_config,
         )
 
     else:

@@ -29,13 +29,17 @@ class SNLightCurve(object):
     """
 
     def __init__(
-        self, lc_early: dict = {}, lc_peak: dict = None, ztfid: str = None
+        self,
+        lc_early: dict = {},
+        lc_peak: dict = None,
+        ztfid: str = None,
     ) -> None:
         try:
             self.ID = ztfid
 
             # observations between 40% and 100% of max flux
             self.lc_early = self._init_lc_package(lc_early)
+            self.n_obs = len(self.lc_early["phase"])
 
             fcqfid = self.lc_early["fcqfid"]
             filt = self.lc_early["filt"]
@@ -365,10 +369,7 @@ class SNLightCurveLib(object):
         self.ztfid_lib: list = ztfid_lib if ztfid_lib is not None else []
 
         self.phase, self.flux, self.flux_err = [], [], []
-        self.idx_filt, self.idx_filt_gr = (
-            np.array([], dtype=int),
-            np.array([], dtype=int),
-        )
+        self.idx_filt = np.array([], dtype=int)
         self.idx_fcqfid = np.array([], dtype=int)
         self.idx_obj = np.array([], dtype=int)
 
@@ -396,18 +397,17 @@ class SNLightCurveLib(object):
             for k, lc_early in enumerate(lc_early_lib):
                 self.lc_library.append(SNLightCurve(lc_early=lc_early))
 
+        # Identify n_filt: number of unique filters across all objects
+        n_filt = max([len(np.unique(lc.idx_filt)) for lc in self.lc_library])
+
         for k, lc in enumerate(self.lc_library):
             # concatenate the indices
-            self.idx_filt = np.append(
-                self.idx_filt,
-                lc.idx_filt + len(np.unique(self.idx_filt)),
-            )
-            self.idx_filt_gr = np.append(self.idx_filt_gr, lc.idx_filt)
+            self.idx_filt = np.append(self.idx_filt, lc.idx_filt)
             self.idx_fcqfid = np.append(
-                self.idx_fcqfid,
-                lc.idx_fcqfid + len(np.unique(self.idx_fcqfid)),
+                self.idx_fcqfid, lc.idx_fcqfid + len(np.unique(self.idx_fcqfid))
             )
-            self.idx_obj = np.append(self.idx_obj, np.ones_like(lc.idx_filt) * k)
+            self.idx_obj = np.append(self.idx_obj, np.full(lc.n_obs, k))
+
             # concatenate the light curve data
             self.phase = np.append(self.phase, lc.lc_early["phase"])
             self.flux = np.append(self.flux, lc.lc_early["flux"])
@@ -415,16 +415,12 @@ class SNLightCurveLib(object):
 
         n_obj = len(np.unique(self.idx_obj))
         n_fcqfid = len(np.unique(self.idx_fcqfid))
-        n_filt = len(np.unique(self.idx_filt))
-        n_filt_gr = len(np.unique(self.idx_filt_gr))
         assert n_obj == self.idx_obj.max() + 1, "Indexing error: idx_obj"
         assert n_fcqfid == self.idx_fcqfid.max() + 1, "Indexing error: idx_fcqfid"
-        assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt"
-        assert n_filt_gr == self.idx_filt_gr.max() + 1, "Indexing error: idx_filt_gr"
+        assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt_gr"
         print("Number of objects:", n_obj)
         print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
-        print("Number of unique filters:", n_filt)
-        print("Number of gr filters:", n_filt_gr)
+        print("Number of filters:", n_filt)
         print("Light curves compiled...")
 
         self.inf_data = None
@@ -453,44 +449,33 @@ class SNLightCurveLib(object):
 
         # Decode the posterior samples for each light curve
         for k, lc in enumerate(self.lc_library):
-            fcqfid_in_obj = np.unique(self.idx_fcqfid[self.idx_obj == k])
-            filt_in_obj = np.unique(self.idx_filt[self.idx_obj == k])
-
             lc.post_sample = {}
-            lc.post_sample["C"] = self.post_sample["C"][:, :, fcqfid_in_obj]
-            lc.post_sample["beta"] = self.post_sample["beta"][:, :, fcqfid_in_obj]
 
-            if model_structure == "pooled":
-                # Pooled:  all objects share alpha_0 and t_fl
+            # Parameters common to all unique fcqfid in this object
+            fcqfid_in_obj = np.unique(self.idx_fcqfid[self.idx_obj == k])
+            lc.post_sample["C"] = self.post_sample["C"][..., fcqfid_in_obj]
+            lc.post_sample["beta"] = self.post_sample["beta"][..., fcqfid_in_obj]
+
+            # A: (n_chains, n_samples, n_obj, n_filt)
+            lc.post_sample["A"] = self.post_sample["A"][..., k, :]
+            lc.post_sample["Aprime"] = self.post_sample["A"][..., k, :]
+
+            # t_fl: (n_chains, n_samples, n_obj)
+            lc.post_sample["t_fl"] = self.post_sample["t_fl"][..., k]
+
+            if model_structure == "pooled":  # Pooled:  all objects share alpha_0
+                # alpha_0: (n_chains, n_samples, n_filt)
                 lc.post_sample["alpha_0"] = self.post_sample["alpha_0"]
-                lc.post_sample["A"] = self.post_sample["A"][:, :, filt_in_obj]
-                lc.post_sample["t_fl"] = self.post_sample["t_fl"]
+                # alpha_1: (n_chains, n_samples, n_filt)
+                if "alpha_1" in self.post_sample.keys():
+                    lc.post_sample["alpha_1"] = self.post_sample["alpha_1"]
 
-            elif model_structure == "unpooled":
-                # Unpooled: per-filter alpha_0, per-object t_fl
-                lc.post_sample["alpha_0"] = self.post_sample["alpha_0"][
-                    :, :, filt_in_obj
-                ]
-                lc.post_sample["A"] = self.post_sample["A"][:, :, filt_in_obj]
-                lc.post_sample["t_fl"] = self.post_sample["t_fl"][:, :, k]
-
-            else:  # Hierarchical (all variants:  mvn, independent, tfl_only)
-                if model_structure == "hierarchical_tfl":  # (n_filt,) structure
-                    lc.post_sample["alpha_0"] = self.post_sample["alpha_0"][
-                        :, :, filt_in_obj
-                    ]
-                else:  # (n_obj, n_filt) structure
-                    lc.post_sample["alpha_0"] = self.post_sample["alpha_0"][
-                        :, :, k, filt_in_obj
-                    ]
-                lc.post_sample["A"] = self.post_sample["A"][:, :, k, filt_in_obj]
-                lc.post_sample["t_fl"] = self.post_sample["t_fl"][:, :, k]
-
-            # alpha_1 is always per-filter (if present)
-            if "alpha_1" in self.post_sample.keys():
-                lc.post_sample["alpha_1"] = self.post_sample["alpha_1"][
-                    :, :, filt_in_obj
-                ]
+            else:  # Unpooled or Hierarchical (all variants:  mvn, independent, tfl_only)
+                # alpha_0: (n_chains, n_samples, n_obj, n_filt)
+                lc.post_sample["alpha_0"] = self.post_sample["alpha_0"][..., k, :]
+                # alpha_1: (n_chains, n_samples, n_obj, n_filt)
+                if "alpha_1" in self.post_sample.keys():
+                    lc.post_sample["alpha_1"] = self.post_sample["alpha_1"][..., k, :]
 
             lc.post_sample = xr.Dataset(lc.post_sample)
 
@@ -507,44 +492,61 @@ class SNLightCurveLib(object):
         -------
         None
         """
-        if not isinstance(lc_lib, SNLightCurveLib):
-            raise TypeError("lc_lib must be an instance of SNLightCurveLib")
+        raise NotImplementedError(
+            "Appending light curve libraries is not supported yet."
+        )
+        # if not isinstance(lc_lib, SNLightCurveLib):
+        #     raise TypeError("lc_lib must be an instance of SNLightCurveLib")
 
-        # concatenate the indices and light curve data
-        for k, lc in enumerate(lc_lib.lc_library):
-            self.idx_filt = np.append(
-                self.idx_filt,
-                lc.idx_filt + len(np.unique(self.idx_filt)),
-            )
-            self.idx_filt_gr = np.append(self.idx_filt_gr, lc.idx_filt)
-            self.idx_fcqfid = np.append(
-                self.idx_fcqfid,
-                lc.idx_fcqfid + len(np.unique(self.idx_fcqfid)),
-            )
-            self.idx_obj = np.append(
-                self.idx_obj, np.ones_like(lc.idx_filt) * (len(self.lc_library) + k)
-            )
-            self.phase = np.append(self.phase, lc.lc_early["phase"])
-            self.flux = np.append(self.flux, lc.lc_early["flux"])
-            self.flux_err = np.append(self.flux_err, lc.lc_early["flux_err"])
+        # # concatenate the indices and light curve data
+        # n_obj_current = len(np.unique(self.idx_obj))
+        # n_filt_gr_current = (
+        #     len(np.unique(self.idx_filt_gr)) if len(self.idx_filt_gr) > 0 else 0
+        # )
 
-        self.lc_library.extend(lc_lib.lc_library)
-        self.ztfid_lib.extend(lc_lib.ztfid_lib)
+        # for k, lc in enumerate(lc_lib.lc_library):
+        #     # NEW: idx_filt_gr stays as the filter group (0 for g, 1 for r, etc.)
+        #     self.idx_filt_gr = np.append(self.idx_filt_gr, lc.idx_filt)
 
-        n_obj = len(np.unique(self.idx_obj))
-        n_fcqfid = len(np.unique(self.idx_fcqfid))
-        n_filt = len(np.unique(self.idx_filt))
-        n_filt_gr = len(np.unique(self.idx_filt_gr))
+        #     # If this is the first object being appended, determine n_filt_gr from it
+        #     if n_filt_gr_current == 0:
+        #         n_filt_gr_current = len(np.unique(lc.idx_filt))
 
-        assert n_obj == self.idx_obj.max() + 1, "Indexing error: idx_obj"
-        assert n_fcqfid == self.idx_fcqfid.max() + 1, "Indexing error: idx_fcqfid"
-        assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt"
-        assert n_filt_gr == self.idx_filt_gr.max() + 1, "Indexing error: idx_filt_gr"
-        print("Number of objects:", n_obj)
-        print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
-        print("Number of unique filters:", n_filt)
-        print("Number of gr filters:", n_filt_gr)
-        print("Light curves appended...")
+        #     # NEW: idx_filt now maps to fixed structure: obj_idx * n_filt_gr + filt_gr_idx
+        #     obj_idx = n_obj_current + k
+        #     idx_filt_for_obj = obj_idx * n_filt_gr_current + lc.idx_filt
+        #     self.idx_filt = np.append(self.idx_filt, idx_filt_for_obj)
+
+        #     self.idx_fcqfid = np.append(
+        #         self.idx_fcqfid,
+        #         lc.idx_fcqfid + len(np.unique(self.idx_fcqfid)),
+        #     )
+        #     self.idx_obj = np.append(
+        #         self.idx_obj, np.ones_like(lc.idx_filt) * (len(self.lc_library) + k)
+        #     )
+        #     self.phase = np.append(self.phase, lc.lc_early["phase"])
+        #     self.flux = np.append(self.flux, lc.lc_early["flux"])
+        #     self.flux_err = np.append(self.flux_err, lc.lc_early["flux_err"])
+
+        # self.lc_library.extend(lc_lib.lc_library)
+        # self.ztfid_lib.extend(lc_lib.ztfid_lib)
+
+        # n_obj = len(np.unique(self.idx_obj))
+        # n_fcqfid = len(np.unique(self.idx_fcqfid))
+        # n_filt_gr = len(np.unique(self.idx_filt_gr))
+        # # NEW: n_filt is now fixed based on structure, not on observed data
+        # n_filt = n_obj * n_filt_gr
+
+        # assert n_obj == self.idx_obj.max() + 1, "Indexing error: idx_obj"
+        # assert n_fcqfid == self.idx_fcqfid.max() + 1, "Indexing error: idx_fcqfid"
+        # # NEW: idx_filt may have gaps (missing filters) so max+1 check removed
+        # # assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt"
+        # assert n_filt_gr == self.idx_filt_gr.max() + 1, "Indexing error: idx_filt_gr"
+        # print("Number of objects:", n_obj)
+        # print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
+        # print("Number of filters (n_obj * n_filt_gr):", n_filt)
+        # print("Number of gr filters:", n_filt_gr)
+        # print("Light curves appended...")
 
     def sampling(
         self,
@@ -629,8 +631,6 @@ class SNLightCurveLib(object):
             "idx_fcqfid": self.idx_fcqfid,
             "idx_filt": self.idx_filt,
         }
-        if model_structure != "unpooled":
-            running_params["idx_filt_gr"] = self.idx_filt_gr
         self.sampler.run(
             jax.random.PRNGKey(random_seed),
             **running_params,
