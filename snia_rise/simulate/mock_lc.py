@@ -3,7 +3,7 @@ import numpy as np
 import jax.numpy as jnp
 import xarray as xr
 
-from ..model.fit_rise import f_t, SNLightCurveLib
+from ..model.lightcurve import f_t, SNLightCurveLib
 from .._utils import plt
 
 
@@ -179,7 +179,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         # Add the required t0_mjd_transient parameter
         # This sets when each transient begins (in MJD)
         params_sim["t0_mjd_transient"] = np.full(num_tot, T0_MJD_TRANSIENT)
-        params_sim["ra"] = np.random.uniform(240, 360, num_tot)
+        params_sim["ra"] = np.random.uniform(0, 360, num_tot)
         params_sim["dec"] = np.random.uniform(-30, 90, num_tot)
 
         # Simulate each transient individually
@@ -219,39 +219,38 @@ class RedbackLightCurveLib(SNLightCurveLib):
             # only need g and r bands
             idx_g = obs["band"] == "ztfg"
             idx_r = obs["band"] == "ztfr"
-            obs = obs[idx_r].reset_index(drop=True)
+            obs = obs[idx_g | idx_r].reset_index(drop=True)
             idx_snr = obs["flux(erg/cm2/s)"] / obs["flux_error"] > 5
             obs["phase"] = (
                 obs["time"]
                 - single_params["t0_mjd_transient"]
                 - single_params["t_peak"]
             )
-            idx_early = (obs["phase"] < -10) & (obs["phase"] > -18)
+            idx_early = obs["phase"] < -10
             idx_rise = (obs["phase"] >= -10) & (obs["phase"] < 0)
             idx_fall = (obs["phase"] >= 0) & (obs["phase"] < 10)
-            idx_baseline = (obs["phase"] < -18) & (
-                obs["flux(erg/cm2/s)"] / obs["flux_error"] < 3
-            )
+            idx_baseline = obs["phase"] < -25
 
-            # require at least 2 high-SNR points in either g or r band during rise and peak, and at least 10 baseline points
+            # require  band during rise and peak, and
             if (
-                # (np.sum(idx_snr & idx_early & idx_g) < 2)
-                # and
-                (np.sum(idx_snr & idx_early & idx_r) < 2)
-                or
-                # (
-                #     np.sum(idx_snr & idx_rise & idx_g) < 2
-                #     or np.sum(idx_snr & idx_fall & idx_g) < 2
-                # )
-                # and
+                # >= 2 high-SNR points in either g or r band during early phase
                 (
+                    (np.sum(idx_snr & idx_early & idx_g) < 2)
+                    or (np.sum(idx_snr & idx_early & idx_r) < 2)
+                )
+                or
+                # >= 2 high-SNR points during rise and fall in at least one band
+                (
+                    np.sum(idx_snr & idx_rise & idx_g) < 2
+                    or np.sum(idx_snr & idx_fall & idx_g) < 2
+                )
+                and (
                     np.sum(idx_snr & idx_rise & idx_r) < 2
                     or np.sum(idx_snr & idx_fall & idx_r) < 2
                 )
-                or
-                # (np.sum(idx_baseline & idx_g) < 5)
-                # or
-                (np.sum(idx_baseline & idx_r) < 5)
+                # >= 5 baseline points in both bands
+                or (np.sum(idx_baseline & idx_g) < 5)
+                or (np.sum(idx_baseline & idx_r) < 5)
             ):
                 continue
 

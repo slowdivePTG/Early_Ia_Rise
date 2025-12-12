@@ -1,545 +1,22 @@
 import numpy as np
 import warnings
 
-import numpyro
 import jax
 import jax.numpy as jnp
 import arviz as az
 import corner
 import xarray as xr
-from numpyro import distributions as dist, infer
+from numpyro import infer
 from sklearn.preprocessing import LabelEncoder
 
 from .._utils import plt
-from numpy.typing import ArrayLike
 
-
-####################################################################################################
-##                      Power-law rise function for SNe Ia light curves                           ##
-####################################################################################################
-
-
-def f_t(
-    t: float | ArrayLike,
-    t_fl: float | ArrayLike,
-    base: float | ArrayLike,
-    amp: float | ArrayLike,
-    alpha_0: float | ArrayLike,
-    alpha_1: float | ArrayLike = 0.0,
-    eps: float = 1e-10,
-):
-    """
-    Calculate the flux with a power-law rise model.
-
-    Parameters:
-    -----------
-    t : float or array-like
-        Time value.
-    t_fl : float or array-like
-        Time of the first light.
-    base : float or array-like
-        Baseline flux.
-    amp : float or array-like
-        Proportionality factor.
-    alpha_0 : float or array-like
-        Rising power-law index.
-    alpha_1 : float or array-like
-        Correction factor for the power-law rise.
-    eps : float, optional, default = 1e-10
-        Small value to avoid numerical issues when t - t_fl is small and alpha_0 < 1
-
-    Returns:
-    --------
-    float | ArrayLike
-        The calculated value of f(t).
-    """
-    du = jnp.maximum(t - t_fl, eps)
-    f = jnp.where(t < t_fl, 0, amp * jnp.power(du, alpha_0 * (1 + alpha_1 * du))) + base
-    return f
-
-
-####################################################################################################
-##                   Probabilistic models for SNe Ia light curve modeling                         ##
-####################################################################################################
-
-
-def unpooled_model(
-    t: list,
-    flux: list = None,
-    flux_err: list = None,
-    idx_obj: list = None,
-    idx_fcqfid: list = None,
-    idx_filt: list = None,
-    prior_params: dict = {},
-):
-    """
-    Bayesian model of the early rise for a library of supernovae
-    in multiple fields, CCDs, quadrants, as well as filters.
-
-    In this unpooled model, different rising power-law indices are assumed
-    among different objects.
-
-    Each measurement has a unique fcqf ID defined in Yao et al. (2019)
-        (fcqf ID) = (field ID) * 10000 + (CCD ID) * 100
-                  + (quadrant ID) * 10 + (filter ID)
-
-    Parameters
-    ----------
-    t : list
-        A list of time value (phase) array of each light curve.
-        phase = (t_obs - t_max) / (1 + z)
-    flux : list
-        A list of flux array of each light curve.
-    flux_err : list
-        A list of flux error array of each light curve.
-    idx_obj : list
-        Indices used to index the objects.
-    idx_fcqfid : list
-        Indices used to index the fcqf IDs for each measurement.
-        Same icqf IDs on different objects are labeled as different.
-    idx_filt : list
-        Indices of unique filters.
-        Same filters on different objects are labeled as different.
-    prior_params : dict, optional
-        Dictionary containing the prior information for the model.
-        The dictionary should contain the following keys:
-            - prior_type : str
-                Type of prior to use for the model.
-                Options: "Miller", "Jeffreys", "Maximum_Entropy", "Flat"
-            - curved_power_law : bool, optional, default = False
-                Whether to use the alpha_1 parameter (curved power-law) in the model.
-            - mean_alpha_0 : float, optional
-                Mean value of the prior distribution for alpha_0.
-                Required if prior_type == "Maximum_Entropy".
-            - std_alpha_0 : float, optional
-                Standard deviation of the prior distribution for alpha_0.
-                Required if prior_type == "Maximum_Entropy".
-            - min_alpha_0 : float, optional, default = 0
-                Minimum value of the prior distribution for alpha_0.
-            - max_alpha_0 : float, optional, default = 10
-                Maximum value of the prior distribution for alpha_0.
-    Returns
-    -------
-    None
-    """
-
-    prior_type = prior_params.get("prior_type", "Miller")
-
-    curved_power_law = prior_params.get("curved_power_law", False)
-
-    n_fcqfid = len(np.unique(idx_fcqfid))
-    n_filt = len(np.unique(idx_filt))
-    n_obj = len(np.unique(idx_obj))
-
-    with numpyro.plate("n_fcqfid", n_fcqfid):
-        # Parameters specific to each fcqf ID (n_fcqfid)
-        # C : Baseline flux
-        # beta : Uncertainty scale factor
-        base = numpyro.sample("C", dist.Uniform(-50, 50))
-        if prior_type == "Miller":  # Jeffreys prior applied to beta in Miller+2020
-            beta = numpyro.sample("beta", dist.LogUniform(0.7, 1.3))  # ~30%
-        else:  # LogNormal prior for beta
-            beta = numpyro.sample("beta", dist.LogNormal(0, 0.1))
-
-    with numpyro.plate("n_filt", n_filt):
-        # Parameters specific to each filter for g, r, i bands (n_filt_gr)
-        # alpha : Rising power-law index
-        # A : Proportionality factor
-        min_alpha_0 = prior_params.get("min_alpha_0", 1)
-        max_alpha_0 = prior_params.get("max_alpha_0", 10)
-        assert min_alpha_0 >= 0, "Minimum value of alpha must be non-negative"
-        if prior_type == "Miller":  # priors adopted in Miller+2020
-            # amp_prime = A * 10**alpha
-            # prior_alpha_Miller = dist.TruncatedDistribution(
-            #     dist.Exponential(jnp.log(10)), low=min_alpha_0, high=max_alpha
-            # )
-            prior_alpha_Miller = dist.Exponential(jnp.log(10))
-            alpha_0 = numpyro.sample("alpha_0", prior_alpha_Miller)
-            if curved_power_law:
-                raise ValueError(
-                    "This prior does not support the curved power-law model with alpha_1"
-                )
-            else:
-                alpha_1 = jnp.zeros_like(alpha_0)
-        else:
-            if prior_type == "Jeffreys":  # Jeffreys prior
-                alpha_0 = numpyro.sample(
-                    "alpha_0",
-                    dist.LogUniform(max(min_alpha_0, 1e-2), max_alpha_0),
-                )
-
-            elif prior_type in ["Flat", "Uniform"]:
-                alpha_0 = numpyro.sample(
-                    "alpha_0", dist.Uniform(min_alpha_0, max_alpha_0)
-                )
-
-            elif prior_type == "Maximum_Entropy":  # Maximum entropy prior
-                mean_alpha_0 = prior_params.get("mean_alpha_0", 2)
-                std_alpha_0 = prior_params.get("std_alpha_0", None)
-
-                if std_alpha_0 is None:  # alpha > min_alpha_0, known E --> Exponential
-                    rate_alpha_ = 1 / (mean_alpha_0 - min_alpha_0)
-                    alpha_ = numpyro.sample("alpha-", dist.Exponential(rate_alpha_))
-                else:  # alpha > alpha_min, known E and Var --> Gamma
-                    concentration_alpha_ = (
-                        mean_alpha_0 - min_alpha_0
-                    ) ** 2 / std_alpha_0**2
-                    rate_alpha_ = (mean_alpha_0 - min_alpha_0) / std_alpha_0**2
-                    alpha_ = numpyro.sample(
-                        "alpha-", dist.Gamma(concentration_alpha_, rate_alpha_)
-                    )
-                alpha_0 = numpyro.deterministic("alpha_0", alpha_ + min_alpha_0)
-            else:
-                raise ValueError(
-                    "Invalid prior type. Options: 'Miller', 'Jeffreys', 'Maximum_Entropy', 'Flat' (or 'Uniform')"
-                )
-
-            if curved_power_law:
-                mean_neg_alpha_1 = 1 / (20 * (1 + np.log(20)))
-                neg_alpha_1 = numpyro.sample(
-                    "-alpha_1", dist.Exponential(1 / mean_neg_alpha_1)
-                )
-                alpha_1 = numpyro.deterministic("alpha_1", -neg_alpha_1)
-            else:
-                alpha_1 = jnp.zeros_like(alpha_0)
-
-        amp_prime = numpyro.sample("Aprime", dist.LogUniform(1e-5, 1e5))
-        amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
-
-    with numpyro.plate("obj", n_obj):
-        # Parameters specific to each object (n_obj)
-        # t_fl : Time of the first light
-        t_fl = numpyro.sample(f"t_fl", dist.Uniform(-40, 0))
-
-    with numpyro.plate(f"data", len(t)):
-        numpyro.sample(
-            f"flux",
-            dist.Normal(
-                f_t(
-                    t,
-                    t_fl[idx_obj],
-                    base[idx_fcqfid],
-                    amp[idx_filt],
-                    alpha_0[idx_filt],
-                    alpha_1[idx_filt],
-                ),
-                flux_err * beta[idx_fcqfid],
-            ),
-            obs=flux,
-        )
-
-
-def pooled_model(
-    t: list,
-    flux: list = None,
-    flux_err: list = None,
-    idx_obj: list = None,
-    idx_fcqfid: list = None,
-    idx_filt: list = None,
-    idx_filt_gr: list = None,
-    prior_params: dict = {},
-):
-    """
-    Bayesian model of the early rise for a library of supernovae
-    in multiple fields, CCDs, quadrants, as well as filters.
-
-    In this pooled model, it is assumed that the rising power-law index alpha is the same
-    in each filter among different objects.
-
-    Each measurement has a unique fcqf ID defined in Yao et al. (2019)
-        (fcqf ID) = (field ID) * 10000 + (CCD ID) * 100
-                  + (quadrant ID) * 10 + (filter ID)
-
-    Parameters
-    ----------
-    t : list
-        A list of time value (phase) array of each light curve.
-        phase = (t_obs - t_max) / (1 + z)
-    flux : list
-        A list of flux array of each light curve.
-    flux_err : list
-        A list of flux error array of each light curve.
-    idx_obj : list
-        Indices used to index the objects.
-    idx_fcqfid : list
-        Indices used to index the fcqf IDs for each measurement.
-        Same icqf IDs on different objects are labeled as different.
-    idx_filt : list
-        Indices of unique filters.
-        Same filters on different objects are labeled as different.
-    idx_filt_gr : list
-        Indices of unique filters for g, r, and z bands.
-    prior_params : dict, optional
-        Dictionary containing the prior information for the model.
-        The dictionary should contain the following keys:
-            - prior_type : str
-                Type of prior to use for the model.
-                Options: "Miller", "Jeffreys", "Maximum_Entropy", "Flat"
-            - mean_alpha : float, optional
-                Mean value of the prior distribution for alpha.
-                Required if prior_type == "Maximum_Entropy".
-            - std_alpha : float, optional
-                Standard deviation of the prior distribution for alpha.
-                Required if prior_type == "Maximum_Entropy".
-            - min_alpha_0 : float, optional, default = 0
-                Minimum value of the prior distribution for alpha.
-            - max_alpha_0 : float, optional, default = 10
-                Maximum value of the prior distribution for alpha.
-
-    Returns
-    -------
-    None
-    """
-    prior_type = prior_params.get("prior_type", "Maximum_Entropy")
-
-    curved_power_law = prior_params.get("curved_power_law", False)
-
-    n_fcqfid = len(np.unique(idx_fcqfid))
-    n_filt = len(np.unique(idx_filt))
-    n_filt_gr = len(np.unique(idx_filt_gr))
-
-    with numpyro.plate("fcqfid", n_fcqfid):
-        # Parameters specific to each fcqf ID for each object (n_fcqfid)
-        # C : Baseline flux
-        # beta : Uncertainty scale factor
-        base = numpyro.sample("C", dist.Uniform(-50, 50))
-        # beta = numpyro.sample("beta", dist.LogUniform(0.7, 1.3))  # ~30%
-        beta = numpyro.sample("beta", dist.LogNormal(0, 0.1))
-
-    min_alpha_0 = prior_params.get("min_alpha_0", 0)
-    max_alpha_0 = prior_params.get("max_alpha_0", 10)
-    assert min_alpha_0 >= 0, "Minimum value of alpha must be non-negative"
-    with numpyro.plate("filt_gr", n_filt_gr):
-        # Parameters specific to each filter for g, r, i bands (n_filt_gr)
-        # alpha : Rising power-law index
-        if prior_type == "Jeffreys":  # Jeffreys prior
-            alpha_0 = numpyro.sample(
-                "alpha_0",
-                dist.LogUniform(max(min_alpha_0, 1e-2), max_alpha_0),
-            )
-
-        elif prior_type in ["Flat", "Uniform"]:
-            alpha_0 = numpyro.sample("alpha_0", dist.Uniform(min_alpha_0, max_alpha_0))
-
-        elif prior_type == "Maximum_Entropy":  # Maximum entropy prior
-            mean_alpha_0 = prior_params.get("mean_alpha_0", 2)
-            std_alpha_0 = prior_params.get("std_alpha_0", None)
-
-            if std_alpha_0 is None:  # alpha > min_alpha_0, known E --> Exponential
-                rate_alpha_ = 1 / (mean_alpha_0 - min_alpha_0)
-                alpha_ = numpyro.sample("alpha-", dist.Exponential(rate_alpha_))
-            else:  # alpha > 1, known E and Var --> Gamma
-                concentration_alpha_ = (
-                    mean_alpha_0 - min_alpha_0
-                ) ** 2 / std_alpha_0**2
-                rate_alpha_ = (mean_alpha_0 - min_alpha_0) / std_alpha_0**2
-                alpha_ = numpyro.sample(
-                    "alpha-", dist.Gamma(concentration_alpha_, rate_alpha_)
-                )
-            alpha_0 = numpyro.deterministic("alpha_0", alpha_ + min_alpha_0)
-        else:
-            raise ValueError(
-                "Invalid prior type. Options: 'Jeffreys', 'Maximum_Entropy', 'Flat' (or 'Uniform')"
-            )
-
-        if curved_power_law:
-            mean_neg_alpha_1 = 1 / (20 * (1 + np.log(20)))
-            neg_alpha_1 = numpyro.sample(
-                "-alpha_1", dist.Exponential(1 / mean_neg_alpha_1)
-            )
-            alpha_1 = numpyro.deterministic("alpha_1", -neg_alpha_1)
-        else:
-            alpha_1 = jnp.zeros_like(alpha_0)
-
-    with numpyro.plate("filt", n_filt):
-        # Parameters specific to each filter (n_filt)
-        # A : Proportionality factor
-        amp_prime = numpyro.sample("Aprime", dist.LogUniform(1e-5, 1e5))
-
-    amp = numpyro.deterministic(
-        f"A", amp_prime[idx_filt] / jnp.power(10, alpha_0[idx_filt_gr])
-    )
-
-    # t_fl : Time of the first light
-    t_fl = numpyro.sample(f"t_fl", dist.Uniform(-40, 0))
-
-    with numpyro.plate(f"data", len(t)):
-        numpyro.sample(
-            f"flux",
-            dist.Normal(
-                f_t(
-                    t,
-                    t_fl,
-                    base[idx_fcqfid],
-                    amp[idx_filt],
-                    alpha_0[idx_filt_gr],
-                    alpha_1[idx_filt_gr],
-                ),
-                flux_err * beta[idx_fcqfid],
-            ),
-            obs=flux,
-        )
-
-
-def hierarchical_model(
-    t: list,
-    flux: list = None,
-    flux_err: list = None,
-    idx_obj: list = None,
-    idx_fcqfid: list = None,
-    idx_filt: list = None,
-    idx_filt_gr: list = None,
-    prior_params: dict = {},
-):
-    """
-    Hierarchical Bayesian model of the early rise for a library of supernovae
-    in multiple fields, CCDs, quadrants, as well as filters.
-
-    Each measurement has a unique fcqf ID defined in Yao et al. (2019)
-        (fcqf ID) = (field ID) * 10000 + (CCD ID) * 100
-                  + (quadrant ID) * 10 + (filter ID)
-
-    Parameters
-    ----------
-    t : list
-        A list of time value (phase) array of each light curve.
-        phase = (t_obs - t_max) / (1 + z)
-    flux : list
-        A list of flux array of each light curve.
-    flux_err : list
-        A list of flux error array of each light curve.
-    idx_obj : list
-        Indices used to index the objects.
-    idx_fcqfid : list
-        Indices used to index the fcqf IDs for each measurement.
-        Same icqf IDs on different objects are labeled as different.
-    idx_filt : list
-        Indices of unique filters.
-        Same filters on different objects are labeled as different.
-    idx_filt_gr : list
-        Indices of unique filters for g, r, and z bands.
-    prior_params : dict, optional
-        Dictionary containing the prior information for the model.
-        The dictionary should contain the following keys:
-            - prior_type : str
-                Type of prior to use for the model.
-                Options: "Maximum_Entropy", "Gaussian"/"Gauss"/"Normal"
-            - min_alpha_0 : float, optional, default = 0
-                Minimum value of the prior distribution for alpha.
-            - max_alpha_0 : float, optional, default = 5
-                Maximum value of the prior distribution for alpha.
-
-    Returns
-    -------
-    None
-    """
-    prior_type = prior_params.get("prior_type", "Maximum_Entropy")
-
-    curved_power_law = prior_params.get("curved_power_law", False)
-
-    n_fcqfid = len(np.unique(idx_fcqfid))
-    n_filt = len(np.unique(idx_filt))
-    n_filt_gr = len(np.unique(idx_filt_gr))
-    n_obj = len(np.unique(idx_obj))
-
-    # the indices of each unique filter in the filter group: n_filt_gr --> n_filt
-    idx_filt_loc = np.zeros(n_filt, dtype=int)
-    for k, filt in enumerate(np.unique(idx_filt)):
-        idx = np.unique(idx_filt_gr[idx_filt == filt])
-        assert len(idx) == 1, "Multiple filters are assigned to the same filter group"
-        idx_filt_loc[k] = idx[0]
-
-    # hyperpriors
-    # alpha : Rising power-law index
-    min_alpha_0 = prior_params.get("min_alpha_0", 1)
-    max_alpha_0 = prior_params.get("max_alpha_0", 5)
-    assert min_alpha_0 >= 0, "Minimum value of alpha must be non-negative"
-    with numpyro.plate("n_filt_gr", n_filt_gr):
-        # Parameters specific to each filter for g, r, i bands (n_filt_gr)
-        mean_alpha_0 = numpyro.sample(
-            "mean_alpha_0", dist.Uniform(min_alpha_0, max_alpha_0)
-        )
-        # std_alpha_0 = numpyro.sample("std_alpha_0", dist.HalfCauchy(0.5))
-        std_alpha_0 = numpyro.sample("std_alpha_0", dist.LogUniform(1e-2, 1.0))
-
-    # t_fl : Time of the first light
-    mean_t_fl = numpyro.sample("mean_t_fl", dist.Uniform(-30, -10))
-    std_t_fl = numpyro.sample("std_t_fl", dist.LogUniform(1e-2, 5.0))
-
-    with numpyro.plate("fcqfid", n_fcqfid):
-        # Parameters specific to each fcqf ID for each object (n_fcqfid)
-        # C : Baseline flux
-        base = numpyro.sample("C", dist.Uniform(-50, 50))
-
-        # beta : Uncertainty scale factor
-        # beta = numpyro.sample("beta", dist.LogUniform(0.8, 1.2))  # ~20%
-        beta = numpyro.sample("beta", dist.LogNormal(0, 0.1))
-
-    with numpyro.plate("filt", n_filt):
-        # Parameters specific to each filter (n_filt)
-        # alpha : Rising power-law index
-        if prior_type in ["Gaussian", "Gauss", "Normal"]:  # Gaussian hyperpriors
-            alpha_0 = numpyro.sample(
-                "alpha_0",
-                dist.TruncatedNormal(
-                    mean_alpha_0[idx_filt_loc],
-                    std_alpha_0[idx_filt_loc],
-                    low=min_alpha_0,
-                    high=max_alpha_0,
-                ),
-            )
-        elif prior_type == "Maximum_Entropy":  # Maximum entropy (Gamma) hyperpriors
-            concentration_alpha_0 = (
-                mean_alpha_0[idx_filt_loc] - min_alpha_0
-            ) ** 2 / std_alpha_0[idx_filt_loc] ** 2
-            rate_alpha_0 = (mean_alpha_0[idx_filt_loc] - min_alpha_0) / std_alpha_0[
-                idx_filt_loc
-            ] ** 2
-            alpha_ = numpyro.sample(
-                "alpha-", dist.Gamma(concentration_alpha_0, rate_alpha_0)
-            )
-            alpha_0 = numpyro.deterministic("alpha_0", alpha_ + min_alpha_0)
-        else:
-            raise ValueError(
-                "Invalid hyperprior type. Options: 'Maximum_Entropy' and 'Gaussian'/'Gauss'/'Normal'"
-            )
-
-        if curved_power_law:
-            mean_neg_alpha_1 = 1 / (18 * (1 + np.log(18)))
-            neg_alpha_1 = numpyro.sample(
-                "-alpha_1", dist.Exponential(1 / mean_neg_alpha_1)
-            )
-            alpha_1 = numpyro.deterministic("alpha_1", -neg_alpha_1)
-        else:
-            alpha_1 = jnp.zeros_like(alpha_0)
-
-        # A : Proportionality factor
-        amp_prime = numpyro.sample("Aprime", dist.LogUniform(1e-5, 1e5))
-        amp = numpyro.deterministic(f"A", amp_prime / jnp.power(10, alpha_0))
-
-    with numpyro.plate("obj", n_obj):
-        # Parameters specific to each object (n_obj)
-        # t_fl : Time of the first light
-        # t_fl = numpyro.sample(f"t_fl", dist.Uniform(-40, 0))
-        t_fl = numpyro.sample(f"t_fl", dist.Normal(mean_t_fl, std_t_fl))
-
-    with numpyro.plate(f"data", len(t)):
-        numpyro.sample(
-            f"flux",
-            dist.Normal(
-                f_t(
-                    t,
-                    t_fl[idx_obj],
-                    base[idx_fcqfid],
-                    amp[idx_filt],
-                    alpha_0[idx_filt],
-                    alpha_1[idx_filt],
-                ),
-                flux_err * beta[idx_fcqfid],
-            ),
-            obs=flux,
-        )
-
+from .model_structure import (
+    f_t,
+    hierarchical_model,
+    pooled_model,
+    unpooled_model,
+)
 
 ####################################################################################################
 ################# Class to organize the light curve data and perform MCMC sampling #################
@@ -582,7 +59,7 @@ class SNLightCurve(object):
             self.post_sample = None
         except:
             print(
-                f"Error initializing SNLightCurve for {ztfid}. Please check the input data."
+                f"Error initializing SNLightCurve for {ztfid}.Please check the input data."
             )
             raise
 
@@ -642,7 +119,7 @@ class SNLightCurve(object):
         num_chains: int = 2,
         random_seed: int = 11,
         prior_pred_samples: int = 500,
-        prior_params: dict = {},
+        prior_config: dict = {},
         nuts_params: dict = {},
     ):
         """
@@ -660,7 +137,7 @@ class SNLightCurve(object):
             Random seed for reproducibility (default: 11).
         prior_pred_samples : int, optional
             Number of samples to draw from the prior predictive distribution (default: 500).
-        prior_params : dict, optional
+        prior_config : dict, optional
             Dictionary containing the prior information for the model.
         nuts_params : dict, optional
             Dictionary containing the parameters for infer.NUTS.
@@ -695,19 +172,19 @@ class SNLightCurve(object):
         self.sampler.run(
             jax.random.PRNGKey(random_seed),
             **running_params,
-            prior_params=prior_params,
+            prior_config=prior_config,
         )
 
         # prior and posterior predictive checks
         prior_pred = infer.Predictive(kernel, num_samples=prior_pred_samples)(
             jax.random.PRNGKey(1919810 + random_seed),
             **running_params,
-            prior_params=prior_params,
+            prior_config=prior_config,
         )
         post_pred = infer.Predictive(kernel, self.sampler.get_samples())(
             jax.random.PRNGKey(114514 + random_seed),
             **running_params,
-            prior_params=prior_params,
+            prior_config=prior_config,
         )
         # convert to arviz InferenceData
         self.inf_data = az.from_numpyro(
@@ -859,7 +336,7 @@ class SNLightCurve(object):
             self.post_sample,
             show_titles=True,
             title_kwargs={"fontsize": 12},
-            quantiles=[0.05, 0.5, 0.95],
+            quantiles=[0.16, 0.5, 0.84],
             title_quantiles=[0.16, 0.5, 0.84],
             **kwargs,
             var_names=params_names,
@@ -962,7 +439,9 @@ class SNLightCurveLib(object):
         ----------
         model_structure : str, optional
             Type of model used for the MCMC sampling (default: "hierarchical").
-            Options: "pooled", "unpooled", "hierarchical"
+            Options:  "pooled", "unpooled", "hierarchical"
+            Note: All hierarchical variants ("mvn", "independent", "tfl_only")
+                use the same data structure
 
         Returns
         -------
@@ -972,26 +451,47 @@ class SNLightCurveLib(object):
             print("Inference data not yet available.")
             return
 
+        # Decode the posterior samples for each light curve
         for k, lc in enumerate(self.lc_library):
             fcqfid_in_obj = np.unique(self.idx_fcqfid[self.idx_obj == k])
             filt_in_obj = np.unique(self.idx_filt[self.idx_obj == k])
 
-            lc.post_sample = {}  # self.post_sample[["C", "beta", "A", "alpha_0", "t_fl"]]
+            lc.post_sample = {}
             lc.post_sample["C"] = self.post_sample["C"][:, :, fcqfid_in_obj]
             lc.post_sample["beta"] = self.post_sample["beta"][:, :, fcqfid_in_obj]
-            lc.post_sample["A"] = self.post_sample["A"][:, :, filt_in_obj]
-            if model_structure != "pooled":
+
+            if model_structure == "pooled":
+                # Pooled:  all objects share alpha_0 and t_fl
+                lc.post_sample["alpha_0"] = self.post_sample["alpha_0"]
+                lc.post_sample["A"] = self.post_sample["A"][:, :, filt_in_obj]
+                lc.post_sample["t_fl"] = self.post_sample["t_fl"]
+
+            elif model_structure == "unpooled":
+                # Unpooled: per-filter alpha_0, per-object t_fl
                 lc.post_sample["alpha_0"] = self.post_sample["alpha_0"][
                     :, :, filt_in_obj
                 ]
+                lc.post_sample["A"] = self.post_sample["A"][:, :, filt_in_obj]
                 lc.post_sample["t_fl"] = self.post_sample["t_fl"][:, :, k]
-            else:
-                lc.post_sample["alpha_0"] = self.post_sample["alpha_0"]
-                lc.post_sample["t_fl"] = self.post_sample["t_fl"]
+
+            else:  # Hierarchical (all variants:  mvn, independent, tfl_only)
+                if model_structure == "hierarchical_tfl":  # (n_filt,) structure
+                    lc.post_sample["alpha_0"] = self.post_sample["alpha_0"][
+                        :, :, filt_in_obj
+                    ]
+                else:  # (n_obj, n_filt) structure
+                    lc.post_sample["alpha_0"] = self.post_sample["alpha_0"][
+                        :, :, k, filt_in_obj
+                    ]
+                lc.post_sample["A"] = self.post_sample["A"][:, :, k, filt_in_obj]
+                lc.post_sample["t_fl"] = self.post_sample["t_fl"][:, :, k]
+
+            # alpha_1 is always per-filter (if present)
             if "alpha_1" in self.post_sample.keys():
                 lc.post_sample["alpha_1"] = self.post_sample["alpha_1"][
                     :, :, filt_in_obj
                 ]
+
             lc.post_sample = xr.Dataset(lc.post_sample)
 
     def append(self, lc_lib: "SNLightCurveLib"):
@@ -1053,7 +553,7 @@ class SNLightCurveLib(object):
         num_chains: int = 2,
         random_seed: int = 11,
         prior_pred_samples: int = 500,
-        prior_params: dict = {},
+        prior_config: dict = {},
         nuts_params: dict = {},
         model_structure: str = "hierarchical",
     ):
@@ -1072,7 +572,7 @@ class SNLightCurveLib(object):
             Random seed for reproducibility (default: 11).
         prior_pred_samples : int, optional
             Number of samples to draw from the prior predictive distribution (default: 500).
-        prior_params : dict, optional
+        prior_config : dict, optional
             Dictionary containing the prior information for the model.
         nuts_params : dict, optional
             Dictionary containing the parameters for infer.NUTS.
@@ -1093,10 +593,19 @@ class SNLightCurveLib(object):
             kernel = unpooled_model
         elif model_structure == "hierarchical":
             print("Using hierarchical model for sampling...")
+            prior_config["correlation_structure"] = "independent"
+            kernel = hierarchical_model
+        elif model_structure == "hierarchical_tfl":
+            print("Using hierarchical t_fl model for sampling...")
+            prior_config["correlation_structure"] = "tfl_only"
+            kernel = hierarchical_model
+        elif model_structure == "hierarchical_mvn":
+            print("Using hierarchical mvn model for sampling...")
+            prior_config["correlation_structure"] = "mvn"
             kernel = hierarchical_model
         else:
             raise ValueError(
-                "Invalid model structure. Options: 'pooled', 'unpooled', 'hierarchical'"
+                "Invalid model structure.Options: 'pooled', 'unpooled', 'hierarchical' (as well as '_mvn' and '_tfl')"
             )
         init_strategy = nuts_params.pop(
             "init_strategy",
@@ -1125,19 +634,19 @@ class SNLightCurveLib(object):
         self.sampler.run(
             jax.random.PRNGKey(random_seed),
             **running_params,
-            prior_params=prior_params,
+            prior_config=prior_config,
         )
 
         # prior and posterior predictive checks
         prior_pred = infer.Predictive(kernel, num_samples=prior_pred_samples)(
             jax.random.PRNGKey(1919810 + random_seed),
             **running_params,
-            prior_params=prior_params,
+            prior_config=prior_config,
         )
         post_pred = infer.Predictive(kernel, self.sampler.get_samples())(
             jax.random.PRNGKey(114514 + random_seed),
             **running_params,
-            prior_params=prior_params,
+            prior_config=prior_config,
         )
         # convert to arviz InferenceData
         self.inf_data = az.from_numpyro(
@@ -1146,19 +655,20 @@ class SNLightCurveLib(object):
 
         # store the posterior samples
         self.post_sample = self.inf_data.posterior
+        self.decode_post_sample(model_structure=model_structure)
 
     def plot_corner(
         self,
         save: bool = False,
         filename: str = None,
-        var_name: list = ["mean_alpha_0", "std_alpha_0"],
+        var_name: list = ["mean_alpha_0", "sigma_alpha_0"],
         **kwargs,
     ):
         corner.corner(
             self.post_sample[var_name],
             show_titles=True,
             title_kwargs={"fontsize": 12},
-            quantiles=[0.05, 0.5, 0.95],
+            quantiles=[0.16, 0.5, 0.84],
             title_quantiles=[0.16, 0.5, 0.84],
             **kwargs,
         )

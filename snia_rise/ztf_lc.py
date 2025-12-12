@@ -1,11 +1,10 @@
 import glob
-from turtle import pos
 import numpy as np
 import pandas as pd
 import xarray as xr
 
 from astropy.table import Table
-from .model.fit_rise import SNLightCurve, SNLightCurveLib
+from .model.lightcurve import SNLightCurve, SNLightCurveLib
 from ._utils import data_binning
 
 
@@ -46,7 +45,9 @@ class ZTFDataProcessor:
         below_threshold = (
             (f <= early_threshold * flux_max)
             if early_threshold < 1
-            else np.ones_like(f, dtype=bool) # For early_threshold >= 1, consider all points
+            else np.ones_like(
+                f, dtype=bool
+            )  # For early_threshold >= 1, consider all points
         )
         # if np.sum(below_threshold) == 0:
         #     print(
@@ -478,6 +479,7 @@ class ZTFLib(SNLightCurveLib):
         source: str = None,
         early_threshold: float = 0.4,
         rise_model: str = "power_law",
+        sampling_model: str = "hierarchical_mvn",
         **kwargs,
     ) -> None:
         """
@@ -489,6 +491,10 @@ class ZTFLib(SNLightCurveLib):
             Source of the data: "EDR", "DR2", or "Early_Late".
         early_threshold : float
             Fraction of maximum luminosity to truncate light curves.
+        rise_model : str
+            Rise model: "power_law" or "curved_power_law".
+        sampling_model : str
+            Sampling model: "pooled", "unpooled", "hierarchical", "hierarchical_tfl", or "hierarchical_mvn".
 
         Returns
         -------
@@ -531,7 +537,7 @@ class ZTFLib(SNLightCurveLib):
         post_sample_dir = Path(
             f"./data/ztf_snia_{source.lower()}/results/frac{int(early_threshold * 100)}_{rise_model}"
         )
-        post_sample_file = post_sample_dir / f"post_sample_hierarchical.nc"
+        post_sample_file = post_sample_dir / f"post_sample_{sampling_model}.nc"
 
         if os.path.exists(post_sample_dir):
             print("Loading existing .nc files...")

@@ -1,7 +1,5 @@
 import os
-import shutil
 import numpyro
-import glob
 import xarray as xr
 
 numpyro.set_host_device_count(4)
@@ -28,9 +26,15 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--sampling_model",
-        choices=["pooled", "unpooled", "hierarchical"],
-        default="hierarchical",
-        help="Select sampling model: 'pooled', 'unpooled', or 'hierarchical' (default: 'hierarchical')",
+        choices=[
+            "pooled",
+            "unpooled",
+            "hierarchical",
+            "hierarchical_tfl",
+            "hierarchical_mvn",
+        ],
+        default="hierarchical_mvn",
+        help="Select sampling model: 'pooled', 'unpooled', or 'hierarchical (including _tfl and _mvn)' (default: 'hierarchical_mvn')",
     )
     parser.add_argument(
         "--num_lc",
@@ -84,7 +88,7 @@ if __name__ == "__main__":
 
         # Sampling
         lib.sampling(
-            prior_params={
+            prior_config={
                 "curved_power_law": args.model == "curved_power_law",
                 "prior_type": "Maximum_Entropy",
             },

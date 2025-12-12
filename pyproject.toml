@@ -19,6 +19,7 @@ dependencies = [
   "scikit-learn",
   "astropy>=7.1.0",
   "redback>=1.12.1",
+  "statsmodels>=0.14.6",
 ]
 
 [dependency-groups]

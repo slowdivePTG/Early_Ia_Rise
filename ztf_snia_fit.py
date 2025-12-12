@@ -28,6 +28,18 @@ if __name__ == "__main__":
         help="Select model to fit the data: 'power_law' or 'curved_power_law'",
     )
     parser.add_argument(
+        "--sampling_model",
+        choices=[
+            "pooled",
+            "unpooled",
+            "hierarchical",
+            "hierarchical_tfl",
+            "hierarchical_mvn",
+        ],
+        default="hierarchical_mvn",
+        help="Select sampling model: 'pooled', 'unpooled', or 'hierarchical (including _tfl and _mvn)' (default: 'hierarchical_mvn')",
+    )
+    parser.add_argument(
         "--early_threshold",
         nargs="+",
         type=float,
@@ -119,11 +131,12 @@ if __name__ == "__main__":
             nuts_params=dict(max_tree_depth=12),
             random_seed=114514,
             prior_params={"curved_power_law": args.model == "curved_power_law"},
+            model_structure=args.sampling_model,
         )
 
         # Save the posterior for the hierarchical model
         post_sample = xr.Dataset(ztflib.inf_data.posterior)
-        post_sample.to_netcdf(file_dir / "post_sample_hierarchical.nc")
+        post_sample.to_netcdf(file_dir / f"post_sample_{args.sampling_model}.nc")
 
         # Save the posterior samples for each light curve
         # for k in range(len(ztflib.lc_library)):
