@@ -7,6 +7,7 @@ import arviz as az
 import corner
 import xarray as xr
 from numpyro import infer
+from numpyro.infer.initialization import init_to_median
 from sklearn.preprocessing import LabelEncoder
 
 from .._utils import plt
@@ -152,11 +153,10 @@ class SNLightCurve(object):
         """
 
         kernel = unpooled_model
-        init_strategy = nuts_params.pop("init_strategy", infer.init_to_median())
         self.sampler = infer.MCMC(
             infer.NUTS(
                 kernel,
-                init_strategy=init_strategy,
+                init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
                 target_accept_prob=0.95,
                 **nuts_params,
             ),
@@ -609,14 +609,11 @@ class SNLightCurveLib(object):
             raise ValueError(
                 "Invalid model structure.Options: 'pooled', 'unpooled', 'hierarchical' (as well as '_mvn' and '_tfl')"
             )
-        init_strategy = nuts_params.pop(
-            "init_strategy",
-            infer.init_to_median(),
-        )
+
         self.sampler = infer.MCMC(
             infer.NUTS(
                 kernel,
-                init_strategy=init_strategy,
+                init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
                 **nuts_params,
             ),
             num_warmup=num_warmup,
@@ -650,11 +647,18 @@ class SNLightCurveLib(object):
         )
         # convert to arviz InferenceData
         self.inf_data = az.from_numpyro(
-            self.sampler, prior=prior_pred, posterior_predictive=post_pred
+            self.sampler,
+            prior=prior_pred,
+            posterior_predictive=post_pred,
         )
 
         # store the posterior samples
-        self.post_sample = self.inf_data.posterior
+        vars_to_remove = [
+            var
+            for var in ["chol_corr", "theta", "alpha-"]
+            if var in self.inf_data.posterior
+        ]
+        self.post_sample = self.inf_data.posterior.drop_vars(vars_to_remove)
         self.decode_post_sample(model_structure=model_structure)
 
     def plot_corner(
@@ -677,3 +681,43 @@ class SNLightCurveLib(object):
             if filename is None:
                 filename = self.ID
             plt.savefig(filename + "_corner.pdf", bbox_inches="tight")
+
+
+def init_to_median_with_alpha0(site=None, alpha_0_init=2.0):
+    """
+    Custom initialization strategy that uses median for most parameters
+    but sets alpha_0 (and related alpha parameters) to a specific value.
+
+    Parameters
+    ----------
+    site : dict, optional
+        Site dictionary from NumPyro
+    alpha_0_init : float, optional
+        Initial value for alpha_0 parameter (default: 2.0)
+
+    Returns
+    -------
+    init_fn : callable or array
+        Initialization function compatible with NumPyro NUTS
+    """
+    from functools import partial
+
+    if site is None:
+        return partial(init_to_median_with_alpha0, alpha_0_init=alpha_0_init)
+
+    # Override alpha_0 related parameters
+    if (
+        site["type"] == "sample"
+        and not site["is_observed"]
+        and site["name"] in ["alpha_0", "mean_alpha_0"]
+    ):
+        # Get the shape from the site
+        sample_shape = site["kwargs"].get("sample_shape", ())
+        param_shape = site["fn"].shape()
+        full_shape = sample_shape + param_shape
+
+        # Return constant value with the correct shape
+        return jnp.full(full_shape, alpha_0_init)
+
+    # For all other parameters, use median initialization
+    return init_to_median(site)

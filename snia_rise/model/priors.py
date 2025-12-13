@@ -73,7 +73,7 @@ def sample_alpha_0(
     if sigma_alpha_0 is None:
         sigma_alpha_0 = prior_config.get("sigma_alpha_0", None)
     if min_alpha_0 is None:
-        min_alpha_0 = prior_config.get("min_alpha_0", 0)
+        min_alpha_0 = prior_config.get("min_alpha_0", 1)
     if max_alpha_0 is None:
         max_alpha_0 = prior_config.get("max_alpha_0", 5)
     assert min_alpha_0 >= 0, "min_alpha_0 must be non-negative"
@@ -217,7 +217,7 @@ def _sample_mvn_hierarchical_params(
     t_fl :  array, shape (n_obj,)
     alpha_0 : array, shape (n_obj, n_filt)
     """
-    d = 1 + n_filt
+    n_mvn_dim = 1 + n_filt
 
     # Mean and scale vectors
     mu = jnp.concatenate([jnp.array([mean_t_fl]), mean_alpha_0])
@@ -225,17 +225,21 @@ def _sample_mvn_hierarchical_params(
 
     if sample_correlations:
         # Sample correlation matrix
-        chol_corr = numpyro.sample("chol_corr", dist.LKJCholesky(d, concentration=2.0))
+        chol_corr = numpyro.sample(
+            "chol_corr", dist.LKJCholesky(n_mvn_dim, concentration=2.0)
+        )
     else:
         # Use identity (independent)
-        chol_corr = jnp.eye(d)
+        chol_corr = jnp.eye(n_mvn_dim)
 
     L_Cholesky = jnp.matmul(jnp.diag(sigma), chol_corr)
 
     if sample_correlations:
         # Store covariance and correlation
-        _ = numpyro.deterministic("Sigma", jnp.matmul(L_Cholesky, L_Cholesky.T))
-        _ = numpyro.deterministic("Corr", jnp.matmul(chol_corr, chol_corr.T))
+        with numpyro.plate("mvn_dim_0", n_mvn_dim, dim=-2):
+            with numpyro.plate("mvn_dim_1", n_mvn_dim, dim=-1):
+                _ = numpyro.deterministic("Sigma", jnp.matmul(L_Cholesky, L_Cholesky.T))
+                _ = numpyro.deterministic("Corr", jnp.matmul(chol_corr, chol_corr.T))
 
     # Sample from MVN
     with numpyro.plate("obj", n_obj):
@@ -243,9 +247,12 @@ def _sample_mvn_hierarchical_params(
             "theta", dist.MultivariateNormal(loc=mu, scale_tril=L_Cholesky)
         )
         t_fl = numpyro.deterministic("t_fl", theta[..., 0])
-        alpha_0 = numpyro.deterministic(
-            "alpha_0", jnp.clip(theta[..., 1:], min_alpha_0, max_alpha_0)
-        )
+
+    with numpyro.plate("filt", n_filt, dim=-1):
+        with numpyro.plate("obj", n_obj, dim=-2):
+            alpha_0 = numpyro.deterministic(
+                "alpha_0", jnp.clip(theta[..., 1:], min_alpha_0, max_alpha_0)
+            )
 
     return t_fl, alpha_0
 
@@ -323,7 +330,7 @@ def sample_hierarchical_params(
     t_fl : array, shape (n_obj,)
     alpha_0 : array, shape (n_obj, n_filt)
     """
-    min_alpha_0 = prior_config.get("min_alpha_0", 0)
+    min_alpha_0 = prior_config.get("min_alpha_0", 1)
     max_alpha_0 = prior_config.get("max_alpha_0", 5)
     assert min_alpha_0 >= 0, "min_alpha_0 must be non-negative"
 

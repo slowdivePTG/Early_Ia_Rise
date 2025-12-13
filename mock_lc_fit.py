@@ -111,7 +111,7 @@ if __name__ == "__main__":
         )
 
         # Save the posterior for the hierarchical model
-        post_sample = xr.Dataset(lib.inf_data.posterior)
+        post_sample = xr.Dataset(lib.post_sample)
         if args.sampling_model in ["hierarchical_tfl", "unpooled", "pooled"]:
             sampling_model_str = f"{args.sampling_model}_{args.prior_type.lower()}"
         else:
