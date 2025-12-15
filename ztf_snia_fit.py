@@ -88,18 +88,18 @@ if __name__ == "__main__":
         for dr in drs:
             if dr == "dr2":
                 dr_dir = "ztf_snia_dr2"
-                tab_early_info = Table.read(
-                    "./data/ztf_snia_dr2/tables/snia_early_data.csv", format="ascii.csv"
+                tab_info = Table.read(
+                    "./data/ztf_snia_dr2/tables/snia_data_basic_normal.csv", format="ascii.csv"
                 )
                 # normal = tab_early_info["sn_type"] != "snia-pec"
-                idx = np.ones(len(tab_early_info), dtype=bool)
+                idx = np.ones(len(tab_info), dtype=bool)
                 if args.volume_complete:
-                    idx &= tab_early_info["volume_complete"] == 1
+                    idx &= tab_info["volume_limited"] == 1
                 if args.early_coverage:
-                    idx &= tab_early_info["early_coverage"] == 1
+                    idx &= tab_info["early_coverage"] == 1
                 ztflib.append(
                     ZTFLib(
-                        ztfid_lib=tab_early_info["ztfname"][idx],
+                        ztfid_lib=tab_info["ztfname"][idx],
                         source="DR2",
                         early_threshold=early_threshold,
                     )
