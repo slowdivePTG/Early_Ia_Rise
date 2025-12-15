@@ -1,6 +1,6 @@
 import os
 import shutil
-import pandas as pd
+import numpy as np
 import numpyro
 import xarray as xr
 
@@ -21,6 +21,18 @@ if __name__ == "__main__":
         type=str,
         default=["dr2"],
         help="data release to use (default: dr2; options: dr2, edr, early_late)",
+    )
+    parser.add_argument(
+        "--volume-complete",
+        default=False,
+        action="store_true",
+        help="Use volume-complete sample from ZTF DR2 or EDR",
+    )
+    parser.add_argument(
+        "--early-coverage",
+        default=False,
+        action="store_true",
+        help="Use sample with early light curve coverage",
     )
     parser.add_argument(
         "--model",
@@ -79,10 +91,15 @@ if __name__ == "__main__":
                 tab_early_info = Table.read(
                     "./data/ztf_snia_dr2/tables/snia_early_data.csv", format="ascii.csv"
                 )
-                normal = tab_early_info["sn_type"] != "snia-pec"
+                # normal = tab_early_info["sn_type"] != "snia-pec"
+                idx = np.ones(len(tab_early_info), dtype=bool)
+                if args.volume_complete:
+                    idx &= tab_early_info["volume_complete"] == 1
+                if args.early_coverage:
+                    idx &= tab_early_info["early_coverage"] == 1
                 ztflib.append(
                     ZTFLib(
-                        ztfid_lib=tab_early_info["ztfname"][normal],
+                        ztfid_lib=tab_early_info["ztfname"][idx],
                         source="DR2",
                         early_threshold=early_threshold,
                     )
@@ -90,15 +107,21 @@ if __name__ == "__main__":
 
             elif dr == "edr":
                 dr_dir = "ztf_snia_edr"
-                tab_salt = Table.read(
-                    "./data/ztf_snia_edr/Nobs_cut_salt2_spec_subtype_pec.csv"
+                tab_info = Table.read(
+                    "./data/ztf_snia_edr/snia_data_basic_normal.csv", format="ascii.csv"
                 )
-                normal = ~pd.array(tab_salt["Ia subtype"]).isin(
-                    ["Ia-CSM", "SC", "SC*", "86G-like", "02cx-like"]
+                # normal = ~pd.array(tab_info["Ia subtype"]).isin(
+                #     ["Ia-CSM", "SC", "SC*", "86G-like", "02cx-like"]
+                # )
+                idx = np.ones(len(tab_info), dtype=bool)
+                if args.volume_complete:
+                    idx &= tab_info["volume_limited"] == 1
+                args.early_coverage = (
+                    True  # set to True for EDR since all have early data
                 )
                 ztflib.append(
                     ZTFLib(
-                        ztfid_lib=tab_salt["name"][normal],
+                        ztfid_lib=tab_info["name"][idx],
                         source="EDR",
                         early_threshold=early_threshold,
                     )
@@ -130,13 +153,19 @@ if __name__ == "__main__":
             num_chains=args.num_chains,
             nuts_params=dict(max_tree_depth=12),
             random_seed=114514,
-            prior_params={"curved_power_law": args.model == "curved_power_law"},
+            prior_config={"curved_power_law": args.model == "curved_power_law"},
             model_structure=args.sampling_model,
         )
 
         # Save the posterior for the hierarchical model
         post_sample = xr.Dataset(ztflib.inf_data.posterior)
-        post_sample.to_netcdf(file_dir / f"post_sample_{args.sampling_model}.nc")
+        outfile = f"post_sample_{args.sampling_model}"
+        if args.volume_complete:
+            outfile += "_volume_complete"
+        if args.early_coverage:
+            outfile += "_early_coverage"
+        outfile += ".nc"
+        post_sample.to_netcdf(file_dir / outfile)
 
         # Save the posterior samples for each light curve
         # for k in range(len(ztflib.lc_library)):

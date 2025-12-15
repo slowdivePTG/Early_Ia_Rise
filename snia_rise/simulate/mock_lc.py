@@ -80,11 +80,11 @@ class RedbackLightCurveLib(SNLightCurveLib):
             print("Loading existing .nc file...")
             post_sample = xr.load_dataset(post_sample_full_file)
 
-        if not os.path.exists(params_file):
+        if os.path.exists(params_file):
+            params_true = pd.read_csv(params_file)[:n_lc].to_dict(orient="list")
+        else:
             print("No true parameters file found.")
             params_true = None
-        else:
-            params_true = pd.read_csv(params_file)[:n_lc].to_dict(orient="list")
 
         super().__init__(
             lc_early_lib=lc_early_lib,

@@ -425,6 +425,7 @@ class SNLightCurveLib(object):
 
         self.inf_data = None
         self.post_sample = post_sample
+        self.model_structure = sampling_model
         self.decode_post_sample(model_structure=sampling_model)
 
     def decode_post_sample(self, model_structure: str = "hierarchical"):
@@ -492,61 +493,49 @@ class SNLightCurveLib(object):
         -------
         None
         """
-        raise NotImplementedError(
-            "Appending light curve libraries is not supported yet."
-        )
-        # if not isinstance(lc_lib, SNLightCurveLib):
-        #     raise TypeError("lc_lib must be an instance of SNLightCurveLib")
+        if not isinstance(lc_lib, SNLightCurveLib):
+            raise TypeError("lc_lib must be an instance of SNLightCurveLib")
 
-        # # concatenate the indices and light curve data
-        # n_obj_current = len(np.unique(self.idx_obj))
-        # n_filt_gr_current = (
-        #     len(np.unique(self.idx_filt_gr)) if len(self.idx_filt_gr) > 0 else 0
-        # )
+        # concatenate the indices and light curve data
+        n_obj_current = len(np.unique(self.idx_obj))
+        if n_obj_current == 0:
+            # Copy directly if the current library is empty
+            self.idx_filt = lc_lib.idx_filt
+            self.idx_fcqfid = lc_lib.idx_fcqfid
+            self.idx_obj = lc_lib.idx_obj
+            self.phase = lc_lib.phase
+            self.flux = lc_lib.flux
+            self.flux_err = lc_lib.flux_err
 
-        # for k, lc in enumerate(lc_lib.lc_library):
-        #     # NEW: idx_filt_gr stays as the filter group (0 for g, 1 for r, etc.)
-        #     self.idx_filt_gr = np.append(self.idx_filt_gr, lc.idx_filt)
+        else:
+            for k, lc in enumerate(lc_lib.lc_library):
+                self.idx_filt = np.append(self.idx_filt, lc.idx_filt)
 
-        #     # If this is the first object being appended, determine n_filt_gr from it
-        #     if n_filt_gr_current == 0:
-        #         n_filt_gr_current = len(np.unique(lc.idx_filt))
+                self.idx_fcqfid = np.append(
+                    self.idx_fcqfid,
+                    lc.idx_fcqfid + len(np.unique(self.idx_fcqfid)),
+                )
+                self.idx_obj = np.append(
+                    self.idx_obj, np.full_like(lc.idx_filt, len(self.lc_library) + k)
+                )
+                self.phase = np.append(self.phase, lc.lc_early["phase"])
+                self.flux = np.append(self.flux, lc.lc_early["flux"])
+                self.flux_err = np.append(self.flux_err, lc.lc_early["flux_err"])
 
-        #     # NEW: idx_filt now maps to fixed structure: obj_idx * n_filt_gr + filt_gr_idx
-        #     obj_idx = n_obj_current + k
-        #     idx_filt_for_obj = obj_idx * n_filt_gr_current + lc.idx_filt
-        #     self.idx_filt = np.append(self.idx_filt, idx_filt_for_obj)
+        self.lc_library.extend(lc_lib.lc_library)
+        self.ztfid_lib.extend(lc_lib.ztfid_lib)
 
-        #     self.idx_fcqfid = np.append(
-        #         self.idx_fcqfid,
-        #         lc.idx_fcqfid + len(np.unique(self.idx_fcqfid)),
-        #     )
-        #     self.idx_obj = np.append(
-        #         self.idx_obj, np.ones_like(lc.idx_filt) * (len(self.lc_library) + k)
-        #     )
-        #     self.phase = np.append(self.phase, lc.lc_early["phase"])
-        #     self.flux = np.append(self.flux, lc.lc_early["flux"])
-        #     self.flux_err = np.append(self.flux_err, lc.lc_early["flux_err"])
+        n_obj = len(np.unique(self.idx_obj))
+        n_fcqfid = len(np.unique(self.idx_fcqfid))
+        n_filt = len(np.unique(self.idx_filt))
 
-        # self.lc_library.extend(lc_lib.lc_library)
-        # self.ztfid_lib.extend(lc_lib.ztfid_lib)
-
-        # n_obj = len(np.unique(self.idx_obj))
-        # n_fcqfid = len(np.unique(self.idx_fcqfid))
-        # n_filt_gr = len(np.unique(self.idx_filt_gr))
-        # # NEW: n_filt is now fixed based on structure, not on observed data
-        # n_filt = n_obj * n_filt_gr
-
-        # assert n_obj == self.idx_obj.max() + 1, "Indexing error: idx_obj"
-        # assert n_fcqfid == self.idx_fcqfid.max() + 1, "Indexing error: idx_fcqfid"
-        # # NEW: idx_filt may have gaps (missing filters) so max+1 check removed
-        # # assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt"
-        # assert n_filt_gr == self.idx_filt_gr.max() + 1, "Indexing error: idx_filt_gr"
-        # print("Number of objects:", n_obj)
-        # print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
-        # print("Number of filters (n_obj * n_filt_gr):", n_filt)
-        # print("Number of gr filters:", n_filt_gr)
-        # print("Light curves appended...")
+        assert n_obj == self.idx_obj.max() + 1, "Indexing error: idx_obj"
+        assert n_fcqfid == self.idx_fcqfid.max() + 1, "Indexing error: idx_fcqfid"
+        assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt_gr"
+        print("Number of objects:", n_obj)
+        print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
+        print("Number of filters:", n_filt)
+        print("Light curves appended...")
 
     def sampling(
         self,
@@ -681,6 +670,163 @@ class SNLightCurveLib(object):
             if filename is None:
                 filename = self.ID
             plt.savefig(filename + "_corner.pdf", bbox_inches="tight")
+
+    def compare_true_vs_fitted_params(self, band: str = "g"):
+        """
+        Compare true vs fitted parameters for a specific band.
+
+        Parameters
+        ----------
+        lib : SNLightCurveLib
+            Light curve library with posterior samples and true parameters.
+        band : str
+            Band to plot for alpha_0. Must be "g" or "r".
+        """
+        import statsmodels.api as sm
+
+        assert band in ["g", "r"], "band must be 'g' or 'r'"
+        assert hasattr(self, "params_true"), "true parameters not found"
+
+        fig, axs = plt.subplots(
+            2,
+            2,
+            figsize=(12, 6),
+            constrained_layout=True,
+            gridspec_kw={"height_ratios": [1, 0.35]},
+        )
+        ax = [axs[0, 0], axs[0, 1]]
+        ax_res = [axs[1, 0], axs[1, 1]]
+
+        for k, varname in enumerate(["alpha_0", "t_fl"]):
+            # Extract true parameters
+            if varname == "alpha_0":
+                true_vals = np.asarray(self.params_true["alpha_0"])
+            else:
+                true_vals = -np.asarray(self.params_true["t_peak"])
+
+            # Posterior medians and uncertainties
+            if varname == "alpha_0":
+                band_idx = 0 if band == "g" else 1
+
+                # Handle different model structures
+                if self.model_structure == "pooled":
+                    # Pooled:  alpha_0 is shared across all objects
+                    # Shape: (n_chains, n_samples, n_filt)
+                    post_alpha = self.post_sample[varname][:, :, band_idx]
+
+                    # Replicate for all objects
+                    fitted_vals = np.full(len(true_vals), np.median(post_alpha))
+                    percentiles = np.percentile(post_alpha, (16, 84))
+                    fitted_vals_down = np.full(
+                        len(true_vals), np.abs(percentiles[0] - fitted_vals[0])
+                    )
+                    fitted_vals_up = np.full(
+                        len(true_vals), percentiles[1] - fitted_vals[0]
+                    )
+
+                else:  # hierarchical (mvn, independent)
+                    # Hierarchical:  alpha_0 per object, per filter
+                    # Shape: (n_chains, n_samples, n_obj, n_filt)
+                    # Select filters for this band
+                    post_alpha = self.post_sample[varname][..., band_idx]
+
+                    # Now post_alpha_avg has shape (n_chains, n_samples, n_obj)
+                    fitted_vals = np.median(post_alpha, axis=(0, 1))
+                    percentiles = np.percentile(post_alpha, (16, 84), axis=(0, 1))
+                    fitted_vals_down = np.abs(percentiles[0] - fitted_vals)
+                    fitted_vals_up = percentiles[1] - fitted_vals
+
+            else:  # t_fl
+                # Shape: (n_chains, n_samples, n_obj)
+                fitted_vals = np.median(self.post_sample[varname], axis=(0, 1))
+                percentiles = np.percentile(
+                    self.post_sample[varname], (16, 84), axis=(0, 1)
+                )
+                fitted_vals_down = np.abs(percentiles[0] - fitted_vals)
+                fitted_vals_up = percentiles[1] - fitted_vals
+
+            fitted_vals_std = 0.5 * (fitted_vals_up + fitted_vals_down)
+
+            # For plotting ranges
+            min_val = np.round(np.min(true_vals), 1) - 0.1
+            max_val = np.round(np.max(true_vals), 1) + 0.1
+
+            # Scatter with error bars
+            ax[k].errorbar(
+                true_vals,
+                fitted_vals,
+                yerr=[fitted_vals_down, fitted_vals_up],
+                alpha=0.5,
+                color="#4F6D7A",
+                fmt="o",
+                linewidth=0.75,
+            )
+
+            # 1: 1 line
+            ax[k].plot(
+                [min_val, max_val],
+                [min_val, max_val],
+                color="k",
+                linestyle="--",
+                zorder=0,
+            )
+
+            # -------- Weighted linear regression (WLS) --------
+            weights = 1.0 / fitted_vals_std**2
+
+            X = sm.add_constant(true_vals)  # add intercept
+            wls_model = sm.WLS(fitted_vals, X, weights=weights)
+            results = wls_model.fit()
+
+            slope = results.params[1]
+            intercept = results.params[0]
+
+            reg_x = np.linspace(min_val, max_val, 200)
+            reg_y = intercept + slope * reg_x
+
+            ax[k].plot(
+                reg_x,
+                reg_y,
+                color="#4F6D7A",
+                linestyle="--",
+                zorder=1,
+            )
+
+            print(f"WLS fit for {varname} ({band}-band, {self.model_structure}):")
+            print(f"  Slope: {slope:.3f}, Intercept: {intercept:.3f}")
+
+            # -------- Residuals / pulls --------
+            pulls = (fitted_vals - true_vals) / fitted_vals_std
+
+            ax_res[k].scatter(
+                true_vals,
+                pulls,
+                alpha=0.5,
+                color="#4F6D7A",
+            )
+            ax_res[k].axhline(0, color="k", linestyle="--", zorder=0)
+            ax_res[k].fill_between(
+                [min_val, max_val], 1, -1, color="gray", alpha=0.2, zorder=-1
+            )
+
+            # Axis formatting
+            ax[k].set_xticks([])
+            ax_res[k].set_ylabel(r"$\mathrm{Pull}$")
+            ax_res[k].set_ylim(-3.5, 3.5)
+            ax[k].set_xlim(min_val, max_val)
+            ax[k].set_ylim(
+                min_val - 0.1 * (max_val - min_val),
+                max_val + 0.1 * (max_val - min_val),
+            )
+            ax_res[k].set_xlim(min_val, max_val)
+
+        # Global labels
+        ax[0].set_ylabel(rf"$\widehat{{\alpha}}_{band}$")
+        ax[1].set_ylabel(r"$\widehat{t}_\mathrm{fl}\ [\mathrm{days}]$")
+        ax_res[0].set_xlabel(rf"$\alpha_{band}$")
+        ax_res[1].set_xlabel(r"$t_\mathrm{fl}\ [\mathrm{days}]$")
+
+        return fig, axs
 
 
 def init_to_median_with_alpha0(site=None, alpha_0_init=2.0):

@@ -539,7 +539,7 @@ class ZTFLib(SNLightCurveLib):
         )
         post_sample_file = post_sample_dir / f"post_sample_{sampling_model}.nc"
 
-        if os.path.exists(post_sample_dir):
+        if os.path.exists(post_sample_file):
             print("Loading existing .nc file...")
             post_sample = xr.load_dataset(post_sample_file)
         else:
