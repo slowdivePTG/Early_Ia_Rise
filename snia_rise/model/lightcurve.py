@@ -33,10 +33,12 @@ class SNLightCurve(object):
         self,
         lc_early: dict = {},
         lc_peak: dict = None,
+        t0_err: float = None,
         ztfid: str = None,
     ) -> None:
         try:
             self.ID = ztfid
+            self.t0_err = t0_err
 
             # observations between 40% and 100% of max flux
             self.lc_early = self._init_lc_package(lc_early)
@@ -169,7 +171,8 @@ class SNLightCurve(object):
             "t": self.lc_early["phase"],
             "flux": self.lc_early["flux"],
             "flux_err": self.lc_early["flux_err"],
-            "idx_obj": np.zeros_like(self.idx_fcqfid, dtype=int),  # only one object
+            "t0_err": self.t0_err,
+            "idx_obj": np.zeros_like(self.idx_fcqfid, dtype=int),
             "idx_fcqfid": self.idx_fcqfid,
             "idx_filt": self.idx_filt,
         }
@@ -332,7 +335,7 @@ class SNLightCurve(object):
         None
         """
 
-        params_names = kwargs.pop("params_names", ["t_fl", "Aprime", "alpha_0"])
+        params_names = kwargs.pop("params_names", ["t_rise", "Aprime", "alpha_0"])
         if "alpha_1" in self.post_sample.keys() and "alpha_1" not in params_names:
             params_names.append("alpha_1")
 
@@ -362,6 +365,7 @@ class SNLightCurveLib(object):
         lc_early_lib: list = None,
         lc_peak_lib: list = None,
         ztfid_lib: list = None,
+        t0_err: list = None,
         post_sample: xr.Dataset = None,
         sampling_model: str = "hierarchical",
     ) -> None:
@@ -376,26 +380,39 @@ class SNLightCurveLib(object):
         if lc_early_lib is None:
             return
 
+        self.t0_err = jnp.array(t0_err, dtype=float) if t0_err is not None else None
+        if t0_err is None:
+            t0_err = [None] * len(lc_early_lib)
+
         if (lc_peak_lib is not None) and (ztfid_lib is not None):
             for k, lc_early in enumerate(lc_early_lib):
                 self.lc_library.append(
                     SNLightCurve(
-                        lc_early=lc_early, lc_peak=lc_peak_lib[k], ztfid=ztfid_lib[k]
+                        lc_early=lc_early,
+                        lc_peak=lc_peak_lib[k],
+                        ztfid=ztfid_lib[k],
+                        t0_err=t0_err[k],
                     )
                 )
         elif lc_peak_lib is not None:
             for k, lc_early in enumerate(lc_early_lib):
                 self.lc_library.append(
-                    SNLightCurve(lc_early=lc_early, lc_peak=lc_peak_lib[k])
+                    SNLightCurve(
+                        lc_early=lc_early, lc_peak=lc_peak_lib[k], t0_err=t0_err[k]
+                    )
                 )
         elif ztfid_lib is not None:
             for k, lc_early in enumerate(lc_early_lib):
                 self.lc_library.append(
-                    SNLightCurve(lc_early=lc_early, ztfid=ztfid_lib[k])
+                    SNLightCurve(
+                        lc_early=lc_early, ztfid=ztfid_lib[k], t0_err=t0_err[k]
+                    )
                 )
         else:
             for k, lc_early in enumerate(lc_early_lib):
-                self.lc_library.append(SNLightCurve(lc_early=lc_early))
+                self.lc_library.append(
+                    SNLightCurve(lc_early=lc_early), t0_err=t0_err[k]
+                )
 
         # Identify n_filt: number of unique filters across all objects
         n_filt = max([len(np.unique(lc.idx_filt)) for lc in self.lc_library])
@@ -462,6 +479,7 @@ class SNLightCurveLib(object):
             lc.post_sample["Aprime"] = self.post_sample["A"][..., k, :]
 
             # t_fl: (n_chains, n_samples, n_obj)
+            lc.post_sample["t_rise"] = self.post_sample["t_rise"][..., k]
             lc.post_sample["t_fl"] = self.post_sample["t_fl"][..., k]
 
             if model_structure == "pooled":  # Pooled:  all objects share alpha_0
@@ -506,6 +524,7 @@ class SNLightCurveLib(object):
             self.phase = lc_lib.phase
             self.flux = lc_lib.flux
             self.flux_err = lc_lib.flux_err
+            self.t0_err = lc_lib.t0_err
 
         else:
             for k, lc in enumerate(lc_lib.lc_library):
@@ -521,6 +540,13 @@ class SNLightCurveLib(object):
                 self.phase = np.append(self.phase, lc.lc_early["phase"])
                 self.flux = np.append(self.flux, lc.lc_early["flux"])
                 self.flux_err = np.append(self.flux_err, lc.lc_early["flux_err"])
+                assert (self.t0_err is None) == (lc.t0_err is None), (
+                    "t0_err presence mismatch"
+                )
+                if self.t0_err is None:
+                    self.t0_err = None
+                else:
+                    self.t0_err = np.append(self.t0_err, lc.t0_err)
 
         self.lc_library.extend(lc_lib.lc_library)
         self.ztfid_lib.extend(lc_lib.ztfid_lib)
@@ -531,7 +557,7 @@ class SNLightCurveLib(object):
 
         assert n_obj == self.idx_obj.max() + 1, "Indexing error: idx_obj"
         assert n_fcqfid == self.idx_fcqfid.max() + 1, "Indexing error: idx_fcqfid"
-        assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt_gr"
+        assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt"
         print("Number of objects:", n_obj)
         print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
         print("Number of filters:", n_filt)
@@ -587,8 +613,8 @@ class SNLightCurveLib(object):
             prior_config["correlation_structure"] = "independent"
             kernel = hierarchical_model
         elif model_structure == "hierarchical_tfl":
-            print("Using hierarchical t_fl model for sampling...")
-            prior_config["correlation_structure"] = "tfl_only"
+            print("Using hierarchical t_rise model for sampling...")
+            prior_config["correlation_structure"] = "trise_only"
             kernel = hierarchical_model
         elif model_structure == "hierarchical_mvn":
             print("Using hierarchical mvn model for sampling...")
@@ -613,6 +639,7 @@ class SNLightCurveLib(object):
             "t": self.phase,
             "flux": self.flux,
             "flux_err": self.flux_err,
+            "t0_err": self.t0_err,
             "idx_obj": self.idx_obj,
             "idx_fcqfid": self.idx_fcqfid,
             "idx_filt": self.idx_filt,
@@ -641,13 +668,29 @@ class SNLightCurveLib(object):
             posterior_predictive=post_pred,
         )
 
+        # process the posterior samples
+        post_sample = self.inf_data.posterior
+
+        # decode Corr, Variance matrices if present
+        for matrix in ["Corr", "Sigma"]:
+            if matrix in self.inf_data.posterior:
+                n_filt = len(np.unique(self.idx_filt))
+                for i in range(n_filt):
+                    post_sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = (
+                        self.inf_data.posterior[matrix][..., i + 1, 0]
+                    )
+                    for j in range(i + 1, n_filt):
+                        post_sample[f"{matrix.lower()}_alpha_flt{i + 1}_flt{j + 1}"] = (
+                            self.inf_data.posterior[matrix][..., i + 1, j + 1]
+                        )
+
         # store the posterior samples
         vars_to_remove = [
             var
-            for var in ["chol_corr", "theta", "alpha-"]
+            for var in ["chol_corr", "theta", "alpha-", "Corr", "Sigma"]
             if var in self.inf_data.posterior
         ]
-        self.post_sample = self.inf_data.posterior.drop_vars(vars_to_remove)
+        self.post_sample = post_sample.drop_vars(vars_to_remove)
         self.decode_post_sample(model_structure=model_structure)
 
     def plot_corner(
@@ -697,7 +740,7 @@ class SNLightCurveLib(object):
         ax = [axs[0, 0], axs[0, 1]]
         ax_res = [axs[1, 0], axs[1, 1]]
 
-        for k, varname in enumerate(["alpha_0", "t_fl"]):
+        for k, varname in enumerate(["alpha_0", "t_rise"]):
             # Extract true parameters
             if varname == "alpha_0":
                 true_vals = np.asarray(self.params_true["alpha_0"])
@@ -736,7 +779,7 @@ class SNLightCurveLib(object):
                     fitted_vals_down = np.abs(percentiles[0] - fitted_vals)
                     fitted_vals_up = percentiles[1] - fitted_vals
 
-            else:  # t_fl
+            else:  # t_rise
                 # Shape: (n_chains, n_samples, n_obj)
                 fitted_vals = np.median(self.post_sample[varname], axis=(0, 1))
                 percentiles = np.percentile(

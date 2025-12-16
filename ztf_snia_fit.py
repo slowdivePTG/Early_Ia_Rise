@@ -89,7 +89,8 @@ if __name__ == "__main__":
             if dr == "dr2":
                 dr_dir = "ztf_snia_dr2"
                 tab_info = Table.read(
-                    "./data/ztf_snia_dr2/tables/snia_data_basic_normal.csv", format="ascii.csv"
+                    "./data/ztf_snia_dr2/tables/snia_data_basic_normal.csv",
+                    format="ascii.csv",
                 )
                 # normal = tab_early_info["sn_type"] != "snia-pec"
                 idx = np.ones(len(tab_info), dtype=bool)

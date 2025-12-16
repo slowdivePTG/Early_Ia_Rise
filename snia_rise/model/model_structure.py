@@ -11,7 +11,8 @@ from .priors import (
     sample_alpha_0,
     sample_alpha_1,
     sample_amp_prime,
-    sample_tfl,
+    sample_t_rise,
+    sample_t_fl,
     sample_hierarchical_params,
 )
 
@@ -68,6 +69,7 @@ def hierarchical_model(
     t: list,
     flux: list = None,
     flux_err: list = None,
+    t0_err: list = None,
     idx_obj: list = None,
     idx_fcqfid: list = None,
     idx_filt: list = None,
@@ -80,21 +82,21 @@ def hierarchical_model(
     `correlation_structure` parameter:
 
     1."mvn" (default): Full multivariate normal with correlations
-       [t_fl_j, alpha_j_g, alpha_j_r, ...] ~ MVN(mu, Sigma)
+       [t_rise_j, alpha_j_g, alpha_j_r, ...] ~ MVN(mu, Sigma)
 
     2."independent": Independent hierarchical priors (diagonal covariance)
-       t_fl_j ~ Normal(mean_t_fl, sigma_t_fl)
+       t_rise_j ~ Normal(mean_t_rise, sigma_t_rise)
        alpha_0_i ~ Hierarchical(mean_alpha_0[i], sigma_alpha[i])
 
-    3."tfl_only": Only t_fl hierarchical, alpha_0 unpooled
-       t_fl_j ~ Normal(mean_t_fl, sigma_t_fl)
+    3."trise_only": Only t_rise hierarchical, alpha_0 unpooled
+       t_rise_j ~ Normal(mean_t_rise, sigma_t_rise)
        alpha_0_i ~ [prior] per object and filter
 
     Posterior samples will have consistent shapes across all variants:
     - alpha_0: (n_chains, n_samples, n_obj, n_filt)
     - alpha_1: (n_chains, n_samples, n_obj, n_filt) [if curved_power_law]
     - A: (n_chains, n_samples, n_obj, n_filt)
-    - t_fl: (n_chains, n_samples, n_obj)
+    - t_rise: (n_chains, n_samples, n_obj)
     - C, beta: (n_chains, n_samples, n_fcqfid)
     - Sigma: (n_chains, n_samples, d, d) - covariance matrix
     - Corr: (n_chains, n_samples, d, d) - correlation matrix
@@ -107,6 +109,8 @@ def hierarchical_model(
         Flux values
     flux_err : list
         Flux uncertainties
+    t0_err : list
+        Uncertainties on t0 (0 for mocked data)
     idx_obj : list
         Object index for each observation
     idx_fcqfid : list
@@ -136,15 +140,18 @@ def hierarchical_model(
     # Observation-level parameters (n_fcqfid,)
     base, beta = sample_fcqf_params(n_fcqfid)
 
-    # Hierarchical structure for t_fl and alpha_0
-    # t_fl:   shape (n_obj,)
+    # Hierarchical structure for t_rise and alpha_0
+    # t_rise:   shape (n_obj,)
     # alpha_0: shape (n_obj, n_filt)
-    t_fl, alpha_0 = sample_hierarchical_params(
+    t_rise, alpha_0 = sample_hierarchical_params(
         n_obj,
         n_filt,
         correlation_structure=correlation_structure,
         prior_config=prior_config,
     )
+
+    # t_fl: shape (n_obj,)
+    t_fl = sample_t_fl(n_obj, t_rise, t0_err)
 
     # Non-hierarchical parameters
     # alpha_1, amp: shape (n_obj, n_filt)
@@ -184,6 +191,7 @@ def unpooled_model(
     t: list,
     flux: list = None,
     flux_err: list = None,
+    t0_err: list = None,
     idx_obj: list = None,
     idx_fcqfid: list = None,
     idx_filt: list = None,
@@ -193,7 +201,7 @@ def unpooled_model(
     Unpooled model:  each object independent, no hierarchical structure.
 
     Model: alpha_0_k ~ [prior] per filter group (shared across objects),
-           t_fl_j ~ Uniform(-40, 0) per object
+           t_rise_j ~ Uniform(0, 40) per object
 
     NOTE: Uses idx_filt_gr for alpha_0 indexing to share parameters across objects
     for the same filter type (g vs r), maintaining consistent model semantics.
@@ -222,9 +230,12 @@ def unpooled_model(
     else:
         alpha_1 = jnp.zeros((n_obj, n_filt))
 
-    # t_fl: shape (n_obj,)
+    # t_rise: shape (n_obj,)
     with numpyro.plate("obj", n_obj):
-        t_fl = sample_tfl(prior_config)
+        t_rise = sample_t_rise(prior_config)
+
+    # t_fl: shape (n_obj,)
+    t_fl = sample_t_fl(n_obj, t_rise, t0_err)
 
     # Likelihood
     with numpyro.plate("data", len(t)):
@@ -249,15 +260,16 @@ def pooled_model(
     t: list,
     flux: list = None,
     flux_err: list = None,
+    t0_err: list = None,
     idx_obj: list = None,
     idx_fcqfid: list = None,
     idx_filt: list = None,
     prior_config: dict = {},
 ):
     """
-    Pooled model: all objects share alpha, while t_fl varies per object.
+    Pooled model: all objects share alpha, while t_rise varies per object.
 
-    Model: alpha_0_k ~ [prior] per filter group, t_fl ~ Uniform per object
+    Model: alpha_0_k ~ [prior] per filter group, t_rise ~ Uniform per object
     """
     # Setup
     n_obj = len(np.unique(idx_obj))
@@ -284,8 +296,12 @@ def pooled_model(
     else:
         alpha_1 = jnp.zeros((n_filt,))
 
+    # t_rise: shape (n_obj,)
     with numpyro.plate("obj", n_obj):
-        t_fl = sample_tfl(prior_config)
+        t_rise = sample_t_rise(prior_config)
+
+    # t_fl: shape (n_obj,)
+    t_fl = sample_t_fl(n_obj, t_rise, t0_err)
 
     # Likelihood
     with numpyro.plate("data", len(t)):

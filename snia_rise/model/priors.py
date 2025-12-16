@@ -152,9 +152,9 @@ def sample_amp_prime():
     return amp_prime
 
 
-def sample_tfl(prior_config):
+def sample_t_rise(prior_config):
     """
-    Sample t_fl parameters.
+    Sample t_rise parameters.
 
     Parameters
     ----------
@@ -163,16 +163,47 @@ def sample_tfl(prior_config):
 
     Returns
     -------
-    t_fl :  array, shape ()
+    t_rise :  array, shape ()
     """
     prior_type = prior_config.get("prior_type", "uniform").lower()
 
     if prior_type in ["gaussian", "normal"]:
-        mean_t_fl = prior_config.get("mean_t_fl", -18)
-        sigma_t_fl = prior_config.get("sigma_t_fl", 1.5)
-        t_fl = numpyro.sample("t_fl", dist.Normal(mean_t_fl, sigma_t_fl))
+        mean_t_rise = prior_config.get("mean_t_rise", 18)
+        sigma_t_rise = prior_config.get("sigma_t_rise", 1.5)
+        t_rise = numpyro.sample("t_rise", dist.Normal(mean_t_rise, sigma_t_rise))
     else:
-        t_fl = numpyro.sample("t_fl", dist.Uniform(-40, -10))
+        t_rise = numpyro.sample("t_rise", dist.Uniform(0, 40))
+
+    return t_rise
+
+
+def sample_t_fl(n_obj: int, t_rise: jnp.ndarray, t0_err: jnp.ndarray):
+    """
+    Sample t_fl parameters.
+
+    Parameters
+    ----------
+    n_obj : int
+        Number of objects
+    t_rise : array, shape ()
+        t_rise values
+    t0_err : array, shape ()
+        Uncertainties on t0
+
+    Returns
+    -------
+    t_fl :  array, shape ()
+    """
+    # with numpyro.plate("obj", n_obj):
+    #     if t0_err == None:
+    #         t_fl = numpyro.deterministic("t_fl", -t_rise)
+    #     else:
+    #         t_fl = numpyro.sample(
+    #             "t_fl",
+    #             dist.Normal(-t_rise, t0_err),
+    #         )
+    with numpyro.plate("obj", n_obj):
+        t_fl = numpyro.deterministic("t_fl", -t_rise)
 
     return t_fl
 
@@ -180,8 +211,8 @@ def sample_tfl(prior_config):
 def _sample_mvn_hierarchical_params(
     n_obj,
     n_filt,
-    mean_t_fl,
-    sigma_t_fl,
+    mean_t_rise,
+    sigma_t_rise,
     mean_alpha_0,
     sigma_alpha_0,
     min_alpha_0,
@@ -197,10 +228,10 @@ def _sample_mvn_hierarchical_params(
         Number of objects
     n_filt : int
         Number of filters
-    mean_t_fl : float
-        Population mean for t_fl
-    sigma_t_fl : float
-        Population std for t_fl
+    mean_t_rise : float
+        Population mean for t_rise
+    sigma_t_rise : float
+        Population std for t_rise
     mean_alpha_0 : array, shape (n_filt_gr,)
         Population mean for alpha_0 per filter group
     sigma_alpha_0 :  array, shape (n_filt_gr,)
@@ -214,14 +245,14 @@ def _sample_mvn_hierarchical_params(
 
     Returns
     -------
-    t_fl :  array, shape (n_obj,)
+    t_rise :  array, shape (n_obj,)
     alpha_0 : array, shape (n_obj, n_filt)
     """
     n_mvn_dim = 1 + n_filt
 
     # Mean and scale vectors
-    mu = jnp.concatenate([jnp.array([mean_t_fl]), mean_alpha_0])
-    sigma = jnp.concatenate([jnp.array([sigma_t_fl]), sigma_alpha_0])
+    mu = jnp.concatenate([jnp.array([mean_t_rise]), mean_alpha_0])
+    sigma = jnp.concatenate([jnp.array([sigma_t_rise]), sigma_alpha_0])
 
     if sample_correlations:
         # Sample correlation matrix
@@ -246,7 +277,7 @@ def _sample_mvn_hierarchical_params(
         theta = numpyro.sample(
             "theta", dist.MultivariateNormal(loc=mu, scale_tril=L_Cholesky)
         )
-        t_fl = numpyro.deterministic("t_fl", theta[..., 0])
+        t_rise = numpyro.deterministic("t_rise", theta[..., 0])
 
     with numpyro.plate("filt", n_filt, dim=-1):
         with numpyro.plate("obj", n_obj, dim=-2):
@@ -254,20 +285,20 @@ def _sample_mvn_hierarchical_params(
                 "alpha_0", jnp.clip(theta[..., 1:], min_alpha_0, max_alpha_0)
             )
 
-    return t_fl, alpha_0
+    return t_rise, alpha_0
 
 
 def _sample_tfl_only_hierarchical_params(
     n_obj,
     n_filt,
-    mean_t_fl,
-    sigma_t_fl,
+    mean_t_rise,
+    sigma_t_rise,
     mean_alpha_0,
     sigma_alpha_0,
     min_alpha_0,
     max_alpha_0,
 ):
-    """Only t_fl hierarchical, alpha_0 sampled independently (like unpooled).
+    """Only t_rise hierarchical, alpha_0 sampled independently (like unpooled).
 
     Parameters
     ----------
@@ -275,10 +306,10 @@ def _sample_tfl_only_hierarchical_params(
         Number of objects
     n_filt : int
         Number of filters
-    mean_t_fl : float
-        Population mean for t_fl
-    sigma_t_fl : float
-        Population std for t_fl
+    mean_t_rise : float
+        Population mean for t_rise
+    sigma_t_rise : float
+        Population std for t_rise
     min_alpha_0 : float
         Minimum alpha value
     max_alpha_0 : float
@@ -286,13 +317,13 @@ def _sample_tfl_only_hierarchical_params(
 
     Returns
     -------
-    t_fl : array, shape (n_obj,)
+    t_rise : array, shape (n_obj,)
     alpha_0 : array, shape (n_obj, n_filt)
     """
 
-    # Sample t_fl hierarchically
+    # Sample t_rise hierarchically
     with numpyro.plate("obj", n_obj):
-        t_fl = numpyro.sample("t_fl", dist.Normal(mean_t_fl, sigma_t_fl))
+        t_rise = numpyro.sample("t_rise", dist.Normal(mean_t_rise, sigma_t_rise))
 
     with numpyro.plate("filt", n_filt):
         with numpyro.plate("obj", n_obj):
@@ -300,7 +331,7 @@ def _sample_tfl_only_hierarchical_params(
                 mean_alpha_0, sigma_alpha_0, min_alpha_0, max_alpha_0
             )
 
-    return t_fl, alpha_0
+    return t_rise, alpha_0
 
 
 def sample_hierarchical_params(
@@ -327,16 +358,16 @@ def sample_hierarchical_params(
 
     Returns
     -------
-    t_fl : array, shape (n_obj,)
+    t_rise : array, shape (n_obj,)
     alpha_0 : array, shape (n_obj, n_filt)
     """
     min_alpha_0 = prior_config.get("min_alpha_0", 1)
     max_alpha_0 = prior_config.get("max_alpha_0", 5)
     assert min_alpha_0 >= 0, "min_alpha_0 must be non-negative"
 
-    # Sample t_fl hyperpriors (common to all structures)
-    mean_t_fl = numpyro.sample("mean_t_fl", dist.Uniform(-30, -10))
-    sigma_t_fl = numpyro.sample("sigma_t_fl", dist.HalfCauchy(1.5))
+    # Sample t_rise hyperpriors (common to all structures)
+    mean_t_rise = numpyro.sample("mean_t_rise", dist.Uniform(0, 40))
+    sigma_t_rise = numpyro.sample("sigma_t_rise", dist.HalfCauchy(1.5))
 
     # Sample alpha_0 hyperpriors only for mvn and independent
     if correlation_structure in ["mvn", "independent"]:
@@ -351,8 +382,8 @@ def sample_hierarchical_params(
             return _sample_mvn_hierarchical_params(
                 n_obj,
                 n_filt,
-                mean_t_fl,
-                sigma_t_fl,
+                mean_t_rise,
+                sigma_t_rise,
                 mean_alpha_0,
                 sigma_alpha_0,
                 min_alpha_0,
@@ -364,8 +395,8 @@ def sample_hierarchical_params(
             return _sample_mvn_hierarchical_params(
                 n_obj,
                 n_filt,
-                mean_t_fl,
-                sigma_t_fl,
+                mean_t_rise,
+                sigma_t_rise,
                 mean_alpha_0,
                 sigma_alpha_0,
                 min_alpha_0,
@@ -374,14 +405,14 @@ def sample_hierarchical_params(
             )
 
     elif correlation_structure == "tfl_only":
-        # Only t_fl hierarchical, alpha_0 non-hierarchical
+        # Only t_rise hierarchical, alpha_0 non-hierarchical
         mean_alpha_0 = prior_config.get("mean_alpha_0", 2)
         sigma_alpha_0 = prior_config.get("sigma_alpha_0", None)
         return _sample_tfl_only_hierarchical_params(
             n_obj,
             n_filt,
-            mean_t_fl,
-            sigma_t_fl,
+            mean_t_rise,
+            sigma_t_rise,
             mean_alpha_0,
             sigma_alpha_0,
             min_alpha_0,

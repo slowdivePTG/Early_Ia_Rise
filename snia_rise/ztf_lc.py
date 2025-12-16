@@ -7,6 +7,8 @@ from astropy.table import Table
 from .model.lightcurve import SNLightCurve, SNLightCurveLib
 from ._utils import data_binning
 
+from numpy.typing import ArrayLike
+
 
 class ZTFDataProcessor:
     """Helper class to handle common ZTF data processing operations."""
@@ -153,6 +155,7 @@ class ZTFIaEarlyLate(SNLightCurve):
 
         data = tab_lc[mask]
         t0 = salt_data[salt_data["ztfid"] == ztfid]["t0"].data[0]
+        t0_err = None  # salt_data[salt_data["ztfid"] == ztfid]["t0_err"].data[0]
         z = meta_data[salt_data["ztfid"] == ztfid]["z"].data[0]
         flux_g_max = salt_data[salt_data["ztfid"] == ztfid]["ztfg_flux_max"].data[0]
         flux_r_max = salt_data[salt_data["ztfid"] == ztfid]["ztfr_flux_max"].data[0]
@@ -297,7 +300,7 @@ class ZTFIaDR2(SNLightCurve):
     """
 
     dr2_dir: str = "./data/ztf_snia_dr2/"
-    tab_info_path: str = "tables/snia_data.csv"
+    tab_info_path: str = "tables/snia_data_basic_normal.csv"
     tab_lc_path: str = "lightcurves/*lc.csv"
 
     def __init__(self, ztfid: str, early_threshold: float = 0.4) -> None:
@@ -344,6 +347,7 @@ class ZTFIaDR2(SNLightCurve):
         data = tab_lc[mask]
 
         t0 = info["t0"].data[0]
+        t0_err = info["t0_err"].data[0]
         z = info["redshift"].data[0]
         flux = data["flux"].data.astype("<f4")
         flux_err = data["flux_err"].data.astype("<f4")
@@ -359,6 +363,7 @@ class ZTFIaDR2(SNLightCurve):
             flux_err,
             filt,
             early_threshold=early_threshold,
+            flux_max=info["flux_peak_ztfg"].data,
             filtid=1,  # g filter
         )
         t_r_early, flux_r_max = ZTFDataProcessor.calculate_early_times(
@@ -367,6 +372,7 @@ class ZTFIaDR2(SNLightCurve):
             flux_err,
             filt,
             early_threshold=early_threshold,
+            flux_max=info["flux_peak_ztfr"].data,
             filtid=2,  # r filter
         )
 
@@ -380,7 +386,7 @@ class ZTFIaDR2(SNLightCurve):
             phase, flux, flux_err, fcqfid, filt, t_g_early, t_r_early
         )
 
-        super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid)
+        super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid, t0_err=t0_err)
 
 
 class ZTFIaEDR(SNLightCurve):
@@ -390,7 +396,7 @@ class ZTFIaEDR(SNLightCurve):
     """
 
     edr_dir: str = "./data/ztf_snia_edr/"
-    tab_info_path: str = "Nobs_cut_salt2_spec_subtype_pec.csv"
+    tab_info_path: str = "snia_data_basic_normal.csv"
     tab_lc_path: str = "ztf_early_Ia_lc_Yao2019.fit"
 
     def __init__(self, ztfid: str, early_threshold: float = 0.4) -> None:
@@ -423,14 +429,14 @@ class ZTFIaEDR(SNLightCurve):
         flux = dat["Flux"].value.astype("<f4") / (10 ** (0.4 * zp))
         flux_err = dat["e_Flux"].value.astype("<f4") / (10 ** (0.4 * zp))
 
-        self.t0_g = info["t0_g_adopted"].value[0]
-        self.t0_B = info["t0_B_salt2"].value[0]
-        self.t0_g_unc = info["t0_g_adopted_unc"].value[0]
-        self.t0_B_unc = info["t0_salt2_unc"].value[0]
+        t0 = info["t0_B_salt2"].value[0]
+        t0_unc = info["t0_salt2_unc"].value[0]
+        # t0_g = info["t0_g_adopted"].value[0]
+        # t0_g_unc = info["t0_g_adopted_unc"].value[0]
 
         z = info["z_adopt"].value[0]
 
-        phase = (dat["JD"].value - self.t0_B) / (1 + z)
+        phase = (dat["JD"].value - t0) / (1 + z)
 
         fcqfid = dat["fcqfid"].value
         filt = fcqfid % 10
@@ -469,7 +475,7 @@ class ZTFIaEDR(SNLightCurve):
             phase, flux, flux_err, fcqfid, filt, t_g_early, t_r_early
         )
 
-        super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid)
+        super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid, t0_err=t0_unc)
 
 
 class ZTFLib(SNLightCurveLib):
@@ -480,6 +486,8 @@ class ZTFLib(SNLightCurveLib):
         early_threshold: float = 0.4,
         rise_model: str = "power_law",
         sampling_model: str = "hierarchical_mvn",
+        volume_complete: bool = False,
+        early_coverage: bool = False,
         **kwargs,
     ) -> None:
         """
@@ -511,6 +519,8 @@ class ZTFLib(SNLightCurveLib):
         lc_early_lib = []
         lc_peak_lib = []
 
+        t0_err_lib = []
+
         ztfid_lib_processed = []
 
         for ztfid in ztfid_lib:
@@ -533,11 +543,18 @@ class ZTFLib(SNLightCurveLib):
 
             lc_early_lib.append(ztf_sn.lc_early)
             lc_peak_lib.append(ztf_sn.lc_peak)
+            t0_err_lib.append(ztf_sn.t0_err)
 
         post_sample_dir = Path(
             f"./data/ztf_snia_{source.lower()}/results/frac{int(early_threshold * 100)}_{rise_model}"
         )
-        post_sample_file = post_sample_dir / f"post_sample_{sampling_model}.nc"
+        filename = f"post_sample_{sampling_model}"
+        if volume_complete:
+            filename += "_volume_complete"
+        if early_coverage or source.lower() in ["early_late", "edr"]:
+            filename += "_early_coverage"
+        filename += ".nc"
+        post_sample_file = post_sample_dir / filename
 
         if os.path.exists(post_sample_file):
             print("Loading existing .nc file...")
@@ -550,5 +567,6 @@ class ZTFLib(SNLightCurveLib):
             lc_peak_lib=lc_peak_lib,
             ztfid_lib=ztfid_lib_processed,
             post_sample=post_sample,
+            t0_err=t0_err_lib,
             **kwargs,
         )
