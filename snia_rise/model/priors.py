@@ -194,16 +194,12 @@ def sample_t_fl(n_obj: int, t_rise: jnp.ndarray, t0_err: jnp.ndarray):
     -------
     t_fl :  array, shape ()
     """
-    # with numpyro.plate("obj", n_obj):
-    #     if t0_err == None:
-    #         t_fl = numpyro.deterministic("t_fl", -t_rise)
-    #     else:
-    #         t_fl = numpyro.sample(
-    #             "t_fl",
-    #             dist.Normal(-t_rise, t0_err),
-    #         )
     with numpyro.plate("obj", n_obj):
-        t_fl = numpyro.deterministic("t_fl", -t_rise)
+        if t0_err == None:
+            t0_offset = 0.0
+        else:
+            t0_offset = numpyro.sample("t0_offset", dist.Normal(0, t0_err))
+        t_fl = numpyro.deterministic("t_fl", -t_rise + t0_offset)
 
     return t_fl
 

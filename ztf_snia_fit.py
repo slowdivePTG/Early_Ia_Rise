@@ -159,7 +159,7 @@ if __name__ == "__main__":
         )
 
         # Save the posterior for the hierarchical model
-        post_sample = xr.Dataset(ztflib.inf_data.posterior)
+        post_sample = xr.Dataset(ztflib.post_sample)
         outfile = f"post_sample_{args.sampling_model}"
         if args.volume_complete:
             outfile += "_volume_complete"
@@ -167,9 +167,3 @@ if __name__ == "__main__":
             outfile += "_early_coverage"
         outfile += ".nc"
         post_sample.to_netcdf(file_dir / outfile)
-
-        # Save the posterior samples for each light curve
-        # for k in range(len(ztflib.lc_library)):
-        #     # save the posterior
-        #     post_sample_lc = xr.Dataset(ztflib.lc_library[k].inf_data.posterior)
-        #     post_sample_lc.to_netcdf(file_dir / f"post_sample_{ztflib.ztfid_lib[k]}.nc")

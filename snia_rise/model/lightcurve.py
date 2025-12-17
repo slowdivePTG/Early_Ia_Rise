@@ -335,9 +335,9 @@ class SNLightCurve(object):
         None
         """
 
-        params_names = kwargs.pop("params_names", ["t_rise", "Aprime", "alpha_0"])
-        if "alpha_1" in self.post_sample.keys() and "alpha_1" not in params_names:
-            params_names.append("alpha_1")
+        var_names = kwargs.pop("var_names", ["t_rise", "Aprime", "alpha_0"])
+        if "alpha_1" in self.post_sample.keys() and "alpha_1" not in var_names:
+            var_names.append("alpha_1")
 
         corner.corner(
             self.post_sample,
@@ -346,7 +346,7 @@ class SNLightCurve(object):
             quantiles=[0.16, 0.5, 0.84],
             title_quantiles=[0.16, 0.5, 0.84],
             **kwargs,
-            var_names=params_names,
+            var_names=var_names,
         )
 
         if save:
@@ -464,6 +464,22 @@ class SNLightCurveLib(object):
         if self.post_sample is None:
             print("Inference data not yet available.")
             return
+
+        # Post calculate the mean and std alpha_0 and t_rise
+        if "mean_alpha_0" not in self.post_sample.keys():
+            self.post_sample["mean_alpha_0"] = jnp.mean(
+                self.post_sample["alpha_0"], axis=-2
+            )
+            self.post_sample["sigma_alpha_0"] = jnp.std(
+                self.post_sample["alpha_0"], axis=-2, ddof=1
+            )
+        if "mean_t_rise" not in self.post_sample.keys():
+            self.post_sample["mean_t_rise"] = jnp.mean(
+                self.post_sample["t_rise"], axis=-1
+            )
+            self.post_sample["sigma_t_rise"] = jnp.std(
+                self.post_sample["t_rise"], axis=-1, ddof=1
+            )
 
         # Decode the posterior samples for each light curve
         for k, lc in enumerate(self.lc_library):
@@ -687,7 +703,7 @@ class SNLightCurveLib(object):
         # store the posterior samples
         vars_to_remove = [
             var
-            for var in ["chol_corr", "theta", "alpha-", "Corr", "Sigma"]
+            for var in ["chol_corr", "theta", "alpha-", "Corr", "Sigma", "t0_offset"]
             if var in self.inf_data.posterior
         ]
         self.post_sample = post_sample.drop_vars(vars_to_remove)
@@ -697,11 +713,11 @@ class SNLightCurveLib(object):
         self,
         save: bool = False,
         filename: str = None,
-        var_name: list = ["mean_alpha_0", "sigma_alpha_0"],
+        var_names: list = ["mean_alpha_0", "sigma_alpha_0"],
         **kwargs,
     ):
         corner.corner(
-            self.post_sample[var_name],
+            self.post_sample[var_names],
             show_titles=True,
             title_kwargs={"fontsize": 12},
             quantiles=[0.16, 0.5, 0.84],
@@ -745,7 +761,7 @@ class SNLightCurveLib(object):
             if varname == "alpha_0":
                 true_vals = np.asarray(self.params_true["alpha_0"])
             else:
-                true_vals = -np.asarray(self.params_true["t_peak"])
+                true_vals = np.asarray(self.params_true["t_peak"])
 
             # Posterior medians and uncertainties
             if varname == "alpha_0":
