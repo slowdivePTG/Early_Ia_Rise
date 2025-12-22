@@ -51,13 +51,13 @@ class ZTFDataProcessor:
                 f, dtype=bool
             )  # For early_threshold >= 1, consider all points
         )
-        # if np.sum(below_threshold) == 0:
-        #     print(
-        #         f"No data below {early_threshold * 100}% of max flux, skip filter {filtid}."
-        #     )
-        #     return -np.inf, flux_max
+        below_threshold[1:] &= below_threshold[:-1]  # ensure monotonicity
+        idx_early = below_threshold & (t < 0)
 
-        t_early = t[below_threshold & (t < 0)][-1] + 0.25
+        if np.sum(idx_early) == 0:
+            t_early = -np.inf
+        else:
+            t_early = t[idx_early][-1] + 0.25
 
         return t_early, flux_max
 

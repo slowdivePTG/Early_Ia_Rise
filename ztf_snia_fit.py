@@ -80,11 +80,17 @@ if __name__ == "__main__":
     args = parser.parse_args()
     drs = [dr.lower() for dr in args.dr]
 
-    ztflib = ZTFLib()
-
     dr_dir = None
 
     for early_threshold in args.early_threshold:
+        ztflib = ZTFLib()
+
+        print(f"Processing DRs: {drs} with early threshold: {early_threshold}")
+        print(
+            f"Volume-complete: {args.volume_complete}, Early-coverage: {args.early_coverage}"
+        )
+        print(f"Model: {args.model}, Sampling model: {args.sampling_model}")
+
         for dr in drs:
             if dr == "dr2":
                 dr_dir = "ztf_snia_dr2"
