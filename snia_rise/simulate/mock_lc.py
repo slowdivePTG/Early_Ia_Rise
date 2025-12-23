@@ -95,14 +95,14 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
         self.params_true = params_true
         self.params_names = dict(
-            t_fl=r"$t_\mathrm{fl}$",
+            t_rise=r"$t_\mathrm{rise}$",
             base=r"$C$",
             amp=r"$A$",
             alpha_0=r"$\alpha$",
             mean_alpha_0=r"$\mu_\alpha$",
-            std_alpha_0=r"$\sigma_\alpha$",
-            mean_t_fl=r"$\mu_{t_\mathrm{fl}}$",
-            std_t_fl=r"$\sigma_{t_\mathrm{fl}}$",
+            sigma_alpha_0=r"$\sigma_\alpha$",
+            mean_t_rise=r"$\mu_{t_\mathrm{rise}}$",
+            sigma_t_rise=r"$\sigma_{t_\mathrm{rise}}$",
         )
 
     @classmethod
@@ -110,26 +110,30 @@ class RedbackLightCurveLib(SNLightCurveLib):
         cls,
         n_lc: int = 10,
         params_mean: dict = None,
-        params_std: dict = None,
+        params_sigma: dict = None,
         model: str = "curved_power_law",
+        min_dist_lum: float = 10,
+        max_dist_lum: float = 250,
     ) -> list[pd.DataFrame]:
         """
         Simulate light curves using Redback.
         """
         import os
         import pandas as pd
+
+        from astropy.cosmology import FlatLambdaCDM
         from pathlib import Path
         from redback.simulate_transients import SimulateOpticalTransient
         from .._utils._plt import set_plot_style
 
-        from .sed import power_law_rise_flat_sed
+        from .sed import power_law_rise_flat_sed, snf_2011fe_sed
 
         import logging
 
         logging.getLogger("redback").setLevel(logging.WARNING)
 
         T0_MJD_TRANSIENT = 59050.0
-        PEAK_LUMINOSITY = 2e28  # erg/s/Hz
+        PEAK_LUMINOSITY = 2e28  # intrinsic peak luminosity (erg/s/Hz)
 
         # Sample the population parameters using numpy.random
         num_tot = n_lc * 10  # oversample to account for non-detections
@@ -138,48 +142,64 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
         if params_mean is None:
             params_mean = {}
-        if params_std is None:
-            params_std = {}
+        if params_sigma is None:
+            params_sigma = {}
 
-        # True hyper-parameters for the power-law rise model
-        params_true = dict(
-            mean_alpha=params_mean.get("alpha", 2.0),
-            std_alpha=params_std.get("alpha", 0.3),
-            mean_t_fl=params_mean.get("t_fl", -18.0),
-            std_t_fl=params_std.get("t_fl", 1.5),
-        )
-
-        # Parameters for simulating the population
         params_sim = dict(
-            base=np.random.normal(
-                params_mean.get("base", 0.0), params_std.get("base", 0.1), num_tot
-            ),
-            t_peak=np.random.normal(
-                -params_true["mean_t_fl"], params_true["std_t_fl"], num_tot
-            ),
-            alpha_0=np.random.normal(
-                params_true["mean_alpha"], params_true["std_alpha"], num_tot
-            ),
+            dist_lum=np.random.uniform(10, 250, num_tot),
+        )
+        params_sim["redshift"] = (
+            FlatLambdaCDM(H0=70, Om0=0.3).redshift(params_sim["dist_lum"] * u.Mpc).z
         )
 
-        # Compute alpha_1 based on other parameters
-        params_sim["alpha_1"] = -1 / (
-            params_sim["t_peak"] * (1 + np.log(params_sim["t_peak"]))
-        )
+        if model in ["power_law", "curved_power_law"]:
+            # True hyper-parameters for the power-law rise model
+            params_true = dict(
+                mean_alpha=params_mean.get("alpha", 2.0),
+                sigma_alpha=params_sigma.get("alpha", 0.3),
+                mean_t_rise=params_mean.get("t_rise", 18.0),
+                sigma_t_rise=params_sigma.get("t_rise", 1.5),
+            )
 
-        # Prior on intrinsic peak luminosity (erg/s/Hz) - fixed value
-        params_sim["peak_luminosity"] = np.full(num_tot, PEAK_LUMINOSITY)
+            # Parameters for simulating the population
+            params_sim = dict(
+                base=np.random.normal(
+                    params_mean.get("base", 0.0), params_sigma.get("base", 0.1), num_tot
+                ),
+                t_rise=np.random.normal(
+                    params_true["mean_t_rise"], params_true["sigma_t_rise"], num_tot
+                ),
+                alpha_0=np.random.normal(
+                    params_true["mean_alpha"], params_true["sigma_alpha"], num_tot
+                ),
+                peak_luminosity=np.full(num_tot, PEAK_LUMINOSITY),
+            )
 
-        # dist_lum ~ PowerLaw(alpha=2, min=10, max=250)
+            # Compute alpha_1 based on other parameters
+            params_sim["alpha_1"] = 1 / (
+                params_sim["t_rise"] * (1 + np.log(params_sim["t_rise"]))
+            )
+
+        elif model == "snf_2011fe":
+            params_true = None
+
+        else:
+            raise ValueError(f"Model {model} not recognized.")
+
+        # dist_lum ~ PowerLaw(alpha=2)
         # For power law: f(x) ∝ x^(alpha_lum), we use inverse transform sampling
         # CDF^(-1)(u) = (min^(1+alpha_lum) + u*(max^(1+alpha_lum) - min^(1+alpha_lum)))^(1/(1+alpha_lum))
-        alpha_lum = 2
-        min_dist, max_dist = 10, 250
-        u = np.random.uniform(0, 1, num_tot)
-        params_sim["dist_lum"] = (
-            min_dist ** (1 + alpha_lum)
-            + u * (max_dist ** (1 + alpha_lum) - min_dist ** (1 + alpha_lum))
-        ) ** (1 / (1 + alpha_lum))
+        if min_dist_lum < max_dist_lum:
+            alpha_lum = 2
+            u = np.random.uniform(0, 1, num_tot)
+            params_sim["dist_lum"] = (
+                min_dist_lum ** (1 + alpha_lum)
+                + u
+                * (max_dist_lum ** (1 + alpha_lum) - min_dist_lum ** (1 + alpha_lum))
+            ) ** (1 / (1 + alpha_lum))
+        elif min_dist_lum == max_dist_lum:
+            print("Using fixed distance luminosity for all transients.")
+            params_sim["dist_lum"] = np.full(num_tot, min_dist_lum)
 
         # Add the required t0_mjd_transient parameter
         # This sets when each transient begins (in MJD)
@@ -205,9 +225,14 @@ class RedbackLightCurveLib(SNLightCurveLib):
             if len(params_valid_det) >= n_lc:
                 break
 
+            if model in ["power_law", "curved_power_law"]:
+                sed_model = power_law_rise_flat_sed
+            elif model == "snf_2011fe":
+                sed_model = snf_2011fe_sed
+
             # Simulate single transient
             sim = SimulateOpticalTransient.simulate_transient_in_ztf(
-                model=power_law_rise_flat_sed,
+                model=sed_model,
                 survey="ztf",
                 parameters=single_params,
                 end_transient_time=100,
@@ -229,14 +254,13 @@ class RedbackLightCurveLib(SNLightCurveLib):
             obs["phase"] = (
                 obs["time"]
                 - single_params["t0_mjd_transient"]
-                - single_params["t_peak"]
-            )
+                - single_params["t_rise"]
+            ) / (1 + single_params["redshift"])
             idx_early = obs["phase"] < -10
             idx_rise = (obs["phase"] >= -10) & (obs["phase"] < 0)
             idx_fall = (obs["phase"] >= 0) & (obs["phase"] < 10)
             idx_baseline = obs["phase"] < -25
 
-            # require  band during rise and peak, and
             if (
                 # >= 2 high-SNR points in either g or r band during early phase
                 (
@@ -273,7 +297,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
             # Normalize flux to 100 at peak for both g and r bands
             for band in ["ztfg", "ztfr"]:
                 idx_band = obs["band"] == band
-                peak_flux_band = cls.get_peak_flux(
+                peak_flux_band = cls.get_rise_flux(
                     flt=band, dist_lum=single_params["dist_lum"]
                 )
                 flux_mock[idx_band] = flux_mock[idx_band] / peak_flux_band * 100
@@ -309,22 +333,30 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             params_valid_det.append(single_params)
 
-        params_valid_det = pd.DataFrame(params_valid_det).reset_index(drop=True)
+        if model in ["power_law", "curved_power_law"]:
+            params_valid_det = pd.DataFrame(params_valid_det).reset_index(drop=True)
 
-        params_true["alpha_0"] = params_valid_det["alpha_0"].values
-        params_true["alpha_1"] = params_valid_det["alpha_1"].values
-        params_true["t_fl"] = -params_valid_det["t_peak"].values
+            params_true["alpha_0"] = params_valid_det["alpha_0"].values
+            params_true["alpha_1"] = params_valid_det["alpha_1"].values
+            params_true["t_rise"] = params_valid_det["t_rise"].values
 
-        params_valid_det.to_csv(
-            data_dir / f"simulated_lc_params.csv",
-            index=False,
-        )
+            params_valid_det.to_csv(
+                data_dir / f"simulated_lc_params.csv",
+                index=False,
+            )
+        elif model == "snf_2011fe":
+            params_valid_det = pd.DataFrame(params_valid_det).reset_index(drop=True)
+
+            params_valid_det.to_csv(
+                data_dir / f"simulated_lc_params.csv",
+                index=False,
+            )
 
         # Reset the plot style after Redback's modification
         set_plot_style()
 
     @staticmethod
-    def get_peak_flux(flt: str, dist_lum: float, peak_luminosity: float = 2e28):
+    def get_rise_flux(flt: str, dist_lum: float, peak_luminosity: float = 2e28):
         """
         Calculate the peak flux (in erg/cm^2/s) given the distance luminosity (in Mpc) within ZTF filters.
         """
@@ -359,13 +391,17 @@ class MockLightCurveLib(SNLightCurveLib):
     The light curves are generated using the curved power-law rise model with added noise.
     """
 
+    raise DeprecationWarning(
+        "MockLightCurveLib is deprecated and may be removed in future versions."
+    )
+
     def __init__(
         self,
         cadence: float = 1,
         n_lc: int = 10,
-        params_true: dict = dict(t_fl=-20.0, base=0.0, amp_prime=50, alpha=2.0),
+        params_true: dict = dict(t_rise=-20.0, base=0.0, amp_prime=50, alpha=2.0),
         params_mean: dict = dict(t_fl=-20.0, base=0.0, amp_prime=50, alpha=2.0),
-        params_std: dict = dict(t_fl=1.0, base=0.1, amp_prime=5, alpha=0.1),
+        params_sigma: dict = dict(t_fl=1.0, base=0.1, amp_prime=5, alpha=0.1),
         fix_values: bool = True,
         mag_peak: float = 18,
         realistic_mag: bool = False,
@@ -392,24 +428,24 @@ class MockLightCurveLib(SNLightCurveLib):
             self.params_true = params_true
         else:
             t_fl = np.random.randn(n_lc) * (
-                params_std.get("t_fl", 1.0)
+                params_sigma.get("t_fl", 1.0)
             ) + params_mean.get("t_fl", -20.0)
-            base = np.random.randn(n_lc) * (params_std.get("C", 0.1)) + params_mean.get(
-                "C", 0.0
-            )
+            base = np.random.randn(n_lc) * (
+                params_sigma.get("C", 0.1)
+            ) + params_mean.get("C", 0.0)
             amp_prime = np.random.randn(n_lc) * (
-                params_std.get("Aprime", 0.1)
+                params_sigma.get("Aprime", 0.1)
             ) + params_mean.get("Aprime", 50)
             alpha = np.random.randn(n_lc) * (
-                params_std.get("alpha", 0.1)
+                params_sigma.get("alpha", 0.1)
             ) + params_mean.get("alpha", 2.0)
             self.params_true = dict(
                 t_fl=t_fl, base=base, amp_prime=amp_prime, alpha=alpha
             )
             self.params_true["mean_alpha"] = params_mean.get("alpha", 2.0)
-            self.params_true["std_alpha"] = params_std.get("alpha", 0.1)
+            self.params_true["sigma_alpha"] = params_sigma.get("alpha", 0.1)
             self.params_true["mean_t_fl"] = params_mean.get("t_fl", -20.0)
-            self.params_true["std_t_fl"] = params_std.get("t_fl", 1.0)
+            self.params_true["sigma_t_fl"] = params_sigma.get("t_fl", 1.0)
 
         amp = amp_prime / jnp.power(10, alpha)
 
@@ -463,9 +499,9 @@ class MockLightCurveLib(SNLightCurveLib):
             amp=r"$A$",
             alpha=r"$\alpha$",
             mean_alpha=r"$\mu_\alpha$",
-            std_alpha=r"$\sigma_\alpha$",
+            sigma_alpha=r"$\sigma_\alpha$",
             mean_t_fl=r"$\mu_{t_\mathrm{fl}}$",
-            std_t_fl=r"$\sigma_{t_\mathrm{fl}}$",
+            sigma_t_fl=r"$\sigma_{t_\mathrm{fl}}$",
         )
 
         self.inf_data = None

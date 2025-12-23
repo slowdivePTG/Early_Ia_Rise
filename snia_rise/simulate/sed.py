@@ -1,6 +1,11 @@
 import numpy as np
+import pandas as pd
+import sncosmo
+from redback.sed import RedbackTimeSeriesSource
 
-from jax._src.typing import ArrayLike, Array
+from jax._src.typing import ArrayLike
+
+MPC_TO_CM = 3.086e24
 
 
 def f_t(
@@ -43,6 +48,7 @@ def power_law_rise_flat_sed(
     alpha_0: float,
     alpha_1: float,
     dist_lum: float,
+    redshift: float,
     force_power_law: bool = False,
     **kwargs,
 ):
@@ -52,7 +58,7 @@ def power_law_rise_flat_sed(
     Parameters:
     -----------
     time : float or array-like
-        Time array (days since explosion).
+        Time array in the observor frame (days since explosion).
     peak_luminosity : float
         Peak luminosity (erg/s).
     alpha_0 : float
@@ -65,8 +71,6 @@ def power_law_rise_flat_sed(
         If True, use a simple power-law rise (alpha_1 = 0), but keep other parameters unchanged.
         Determine the flux normalization at peak time based on the curved power-law model.
     """
-    import pandas as pd
-    from redback.sed import RedbackTimeSeriesSource
     from scipy.special import lambertw
 
     MPC_TO_CM = 3.086e24
@@ -82,14 +86,14 @@ def power_law_rise_flat_sed(
             return float(val)
 
     # Ensure time is 1D
-    time = np.atleast_1d(time)
+    phase = np.atleast_1d(time) / (1 + redshift)
 
     # Convert to scalars
     peak_luminosity = to_scalar(peak_luminosity)
     alpha_0 = to_scalar(alpha_0)
     alpha_1 = to_scalar(alpha_1)
     dist_lum = to_scalar(dist_lum)
-    t_peak = np.exp(lambertw(-np.exp(1) / alpha_1).real - 1)
+    t_rise = np.exp(lambertw(-np.exp(1) / alpha_1).real - 1)
 
     # Calculate distance and redshift
     dist_lum_cm = dist_lum * MPC_TO_CM
@@ -99,7 +103,7 @@ def power_law_rise_flat_sed(
     flux_density_jy = flux_density_cgs / 1e-23
 
     flux_max = f_t(
-        t=t_peak,
+        t=t_rise,
         t_fl=0,
         alpha_0=alpha_0,
         alpha_1=alpha_1,
@@ -107,7 +111,7 @@ def power_law_rise_flat_sed(
 
     flux_norm = (
         f_t(
-            t=time,
+            t=phase,
             t_fl=0,
             alpha_0=alpha_0,
             alpha_1=0.0 if force_power_law else alpha_1,
@@ -130,6 +134,82 @@ def power_law_rise_flat_sed(
 
     # Always return sncosmo source (simpler for redback to handle)
     source = RedbackTimeSeriesSource(
-        phase=time, wave=lambda_array, flux=flux_density_cgs
+        phase=phase, wave=lambda_array, flux=flux_density_cgs
     )
     return source
+
+
+def snf_2011fe_sed(
+    time: float | ArrayLike,
+    dist_lum: float,
+    redshift: float,
+    t_rise: float = 0.0,
+    **kwargs,
+):
+    """
+    A transient model using the 'snf-2011fe' SED template from sncosmo.
+
+    This wrapper converts physical parameters (peak_luminosity, dist_lum) to
+    sncosmo format (amplitude, redshift) and applies proper redshift corrections.
+
+    Parameters:
+    -----------
+    time : float or array-like
+        Time array (days in observer frame).
+    peak_luminosity : float
+        Peak luminosity (erg/s).
+    dist_lum : float
+        Luminosity distance (Mpc).
+    t_rise : float, optional, default = 0.0
+        Time of B-band maximum (days).
+    """
+
+    # Calculate redshift from luminosity distance using astropy
+    from astropy import units as u
+
+    # Helper to extract scalar
+    def to_scalar(val):
+        if isinstance(val, pd.Series):
+            return float(val.iloc[0])
+        elif isinstance(val, np.ndarray):
+            return float(val.flat[0])
+        else:
+            return float(val)
+
+    # Ensure time is 1D
+    phase = np.atleast_1d(time) / (1 + redshift)
+
+    # Convert to scalars
+    peak_luminosity = to_scalar(peak_luminosity)
+    dist_lum = to_scalar(dist_lum)
+    t_rise = to_scalar(t_rise)
+
+    # Create sncosmo model with snf-2011fe source
+    model = sncosmo.Model(source="snf-2011fe")
+    model.set(z=redshift)
+    model.set(t0=t_rise)
+
+    # Set B-band absolute magnitude
+    model.set_source_peakabsmag(-19.0, "bessellb", "ab")
+
+    # Define wavelength array in observer frame
+    lambda_array = np.linspace(3000, 10000, 100) * (1 + redshift)
+
+    # Get the SED at each time point
+    flux_2d = np.zeros((len(phase), len(lambda_array)))
+
+    for i, t in enumerate(phase):
+        try:
+            # sncosmo automatically handles redshift corrections
+            sed_flux = model.flux(t, lambda_array)
+            flux_2d[i, :] = sed_flux
+
+        except Exception:
+            flux_2d[i, :] = np.zeros_like(lambda_array)
+
+    # Convert to Redback source
+    source_redback = RedbackTimeSeriesSource(
+        phase=phase, wave=lambda_array, flux=flux_2d
+    )
+
+    return source_redback

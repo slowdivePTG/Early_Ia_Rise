@@ -418,6 +418,8 @@ class SNLightCurveLib(object):
         n_filt = max([len(np.unique(lc.idx_filt)) for lc in self.lc_library])
 
         for k, lc in enumerate(self.lc_library):
+            if lc.n_obs == 0:
+                print(f"Warning: Light curve {lc.ID} has no observations. Skipping...")
             # concatenate the indices
             self.idx_filt = np.append(self.idx_filt, lc.idx_filt)
             self.idx_fcqfid = np.append(
@@ -432,9 +434,10 @@ class SNLightCurveLib(object):
 
         n_obj = len(np.unique(self.idx_obj))
         n_fcqfid = len(np.unique(self.idx_fcqfid))
+        breakpoint()
         assert n_obj == self.idx_obj.max() + 1, "Indexing error: idx_obj"
         assert n_fcqfid == self.idx_fcqfid.max() + 1, "Indexing error: idx_fcqfid"
-        assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt_gr"
+        assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt"
         print("Number of objects:", n_obj)
         print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
         print("Number of filters:", n_filt)

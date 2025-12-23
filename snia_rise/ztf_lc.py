@@ -301,7 +301,7 @@ class ZTFIaDR2(SNLightCurve):
 
     dr2_dir: str = "./data/ztf_snia_dr2/"
     tab_info_path: str = "tables/snia_data_basic_normal.csv"
-    tab_lc_path: str = "lightcurves/*lc.csv"
+    tab_lc_path: str = "lightcurves/*LC.csv"
 
     def __init__(self, ztfid: str, early_threshold: float = 0.4) -> None:
         """
