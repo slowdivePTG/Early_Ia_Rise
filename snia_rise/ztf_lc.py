@@ -348,7 +348,7 @@ class ZTFIaDR2(SNLightCurve):
 
         t0 = info["t0"].data[0]
         t0_err = info["t0_err"].data[0]
-        z = info["redshift"].data[0]
+        z = info["z"].data[0]
         flux = data["flux"].data.astype("<f4")
         flux_err = data["flux_err"].data.astype("<f4")
         phase = (data["mjd"].data - t0) / (1 + z)
