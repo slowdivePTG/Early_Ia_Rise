@@ -1,6 +1,6 @@
 import numpy as np
-
 import numpyro
+import jax
 import jax.numpy as jnp
 from numpyro import distributions as dist
 from numpy.typing import ArrayLike
@@ -21,6 +21,7 @@ from .priors import (
 ####################################################################################################
 
 
+@jax.jit
 def f_t(
     t: float | ArrayLike,
     t_fl: float | ArrayLike,
@@ -28,7 +29,7 @@ def f_t(
     amp: float | ArrayLike,
     alpha_0: float | ArrayLike,
     alpha_1: float | ArrayLike = 0.0,
-    eps: float = 1e-10,
+    eps: float | ArrayLike = 1e-10,
 ):
     """
     Calculate the flux with a power-law rise model.
@@ -58,6 +59,36 @@ def f_t(
     du = jnp.maximum(t - t_fl, eps)
     f = jnp.where(t < t_fl, 0, amp * jnp.power(du, alpha_0 * (1 + alpha_1 * du))) + base
     return f
+
+
+def df_t_dt_fl(
+    t: float | ArrayLike,
+    t_fl: float | ArrayLike,
+    base: float | ArrayLike,
+    amp: float | ArrayLike,
+    alpha_0: float | ArrayLike,
+    alpha_1: float | ArrayLike = 0.0,
+    eps: float = 1e-10,
+):
+    """
+    Compute the derivative of f_t with respect to t_fl using JAX autodiff.
+
+    Returns:
+    --------
+    float | ArrayLike
+        The derivative df_t/dt_fl.
+    """
+
+    # Create gradient function w.r.t. t_fl (argnums=1)
+    # Only works for scalar inputs
+    grad_fn = jax.grad(f_t, argnums=1)
+
+    # Vectorize over all inputs
+    grad_fn_vectorized = jax.vmap(grad_fn)
+
+    return grad_fn_vectorized(
+        t, t_fl, base, amp, alpha_0, alpha_1, jnp.full_like(t, eps)
+    )
 
 
 ####################################################################################################
@@ -168,6 +199,20 @@ def hierarchical_model(
             amp_prime = sample_amp_prime()
             amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
 
+    flux_err_obs = flux_err * beta[idx_fcqfid]
+
+    if t0_err is not None:
+        # Add extra uncertainty component from t0_err via error propagation
+        df_dtfl = df_t_dt_fl(
+            t,
+            t_fl[idx_obj],
+            base[idx_fcqfid],
+            amp[idx_obj, idx_filt],
+            alpha_0[idx_obj, idx_filt],
+            alpha_1[idx_obj, idx_filt],
+        )
+        flux_err_obs = jnp.sqrt(flux_err_obs**2 + (df_dtfl * t0_err[idx_obj]) ** 2)
+
     # Likelihood
     with numpyro.plate("data", len(t)):
         numpyro.sample(
@@ -181,7 +226,7 @@ def hierarchical_model(
                     alpha_0[idx_obj, idx_filt],
                     alpha_1[idx_obj, idx_filt],
                 ),
-                flux_err * beta[idx_fcqfid],
+                flux_err_obs,
             ),
             obs=flux,
         )
@@ -237,6 +282,20 @@ def unpooled_model(
     # t_fl: shape (n_obj,)
     t_fl = sample_t_fl(n_obj, t_rise, t0_err)
 
+    flux_err_obs = flux_err * beta[idx_fcqfid]
+
+    if t0_err is not None:
+        # Add extra uncertainty component from t0_err via error propagation
+        df_dtfl = df_t_dt_fl(
+            t,
+            t_fl[idx_obj],
+            base[idx_fcqfid],
+            amp[idx_obj, idx_filt],
+            alpha_0[idx_obj, idx_filt],
+            alpha_1[idx_obj, idx_filt],
+        )
+        flux_err_obs = jnp.sqrt(flux_err_obs**2 + (df_dtfl * t0_err[idx_obj]) ** 2)
+
     # Likelihood
     with numpyro.plate("data", len(t)):
         numpyro.sample(
@@ -250,7 +309,7 @@ def unpooled_model(
                     alpha_0[idx_obj, idx_filt],
                     alpha_1[idx_obj, idx_filt],
                 ),
-                flux_err * beta[idx_fcqfid],
+                flux_err_obs,
             ),
             obs=flux,
         )
@@ -301,7 +360,21 @@ def pooled_model(
         t_rise = sample_t_rise(prior_config)
 
     # t_fl: shape (n_obj,)
-    t_fl = sample_t_fl(n_obj, t_rise, t0_err)
+    t_fl = sample_t_fl(n_obj, t_rise)
+
+    flux_err_obs = flux_err * beta[idx_fcqfid]
+
+    if t0_err is not None:
+        # Add extra uncertainty component from t0_err via error propagation
+        df_dtfl = df_t_dt_fl(
+            t,
+            t_fl[idx_obj],
+            base[idx_fcqfid],
+            amp[idx_obj, idx_filt],
+            alpha_0[idx_filt],
+            alpha_1[idx_filt],
+        )
+        flux_err_obs = jnp.sqrt(flux_err_obs**2 + (df_dtfl * t0_err[idx_obj]) ** 2)
 
     # Likelihood
     with numpyro.plate("data", len(t)):
@@ -316,7 +389,7 @@ def pooled_model(
                     alpha_0[idx_filt],
                     alpha_1[idx_filt],
                 ),
-                flux_err * beta[idx_fcqfid],
+                flux_err_obs,
             ),
             obs=flux,
         )

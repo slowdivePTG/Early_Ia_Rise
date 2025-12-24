@@ -1,3 +1,5 @@
+from mimetypes import init
+from re import sub
 import numpy as np
 import warnings
 
@@ -434,7 +436,6 @@ class SNLightCurveLib(object):
 
         n_obj = len(np.unique(self.idx_obj))
         n_fcqfid = len(np.unique(self.idx_fcqfid))
-        breakpoint()
         assert n_obj == self.idx_obj.max() + 1, "Indexing error: idx_obj"
         assert n_fcqfid == self.idx_fcqfid.max() + 1, "Indexing error: idx_fcqfid"
         assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt"
@@ -644,16 +645,6 @@ class SNLightCurveLib(object):
                 "Invalid model structure.Options: 'pooled', 'unpooled', 'hierarchical' (as well as '_mvn' and '_tfl')"
             )
 
-        self.sampler = infer.MCMC(
-            infer.NUTS(
-                kernel,
-                init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
-                **nuts_params,
-            ),
-            num_warmup=num_warmup,
-            num_samples=num_samples,
-            num_chains=num_chains,
-        )
         running_params = {
             "t": self.phase,
             "flux": self.flux,
@@ -663,20 +654,98 @@ class SNLightCurveLib(object):
             "idx_fcqfid": self.idx_fcqfid,
             "idx_filt": self.idx_filt,
         }
+
+        rng_key = jax.random.PRNGKey(random_seed)
+
+        # Warmup without t0_err
+        if self.t0_err is not None:
+            print("\nWarmup without t0_err...")
+            running_params_no_to_err = running_params.copy()
+            running_params_no_to_err["t0_err"] = None
+
+            sampler_no_to_err = infer.MCMC(
+                infer.NUTS(
+                    kernel,
+                    init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
+                    target_accept_prob=0.8,
+                    **nuts_params,
+                ),
+                num_warmup=num_warmup // 10,
+                num_samples=1,
+                num_chains=num_chains,
+            )
+            sampler_no_to_err.run(
+                rng_key,
+                **running_params_no_to_err,
+                prior_config=prior_config,
+            )
+
+            # Use mean of the last 10% of samples to initialize simulated annealing
+            samples_warmup = sampler_no_to_err.get_samples()
+            last_n = max(1, len(list(samples_warmup.values())[0]) // 10)
+            init_values_no_t0 = {
+                k: jnp.mean(v[-last_n:], axis=0) for k, v in samples_warmup.items()
+            }
+
+            init_strategy_sa = infer.init_to_value(values=init_values_no_t0)
+
+        else:
+            init_strategy_sa = init_to_median_with_alpha0(alpha_0_init=2.0)
+
+        print("\nSimulated annealing warmup...")
+        rng_key, subkey = jax.random.split(rng_key)
+        sampler_sa = infer.MCMC(
+            infer.SA(
+                kernel,
+                init_strategy=init_strategy_sa,
+                adapt_state_size=num_chains,
+            ),
+            num_warmup=0,
+            num_samples=num_warmup // 4,
+            num_chains=num_chains,
+        )
+        sampler_sa.run(
+            subkey,
+            **running_params,
+            prior_config=prior_config,
+        )
+
+        # Use mean of last 10% of samples to initialize main sampling
+        samples_sa = sampler_sa.get_samples()
+        last_n = max(1, len(list(samples_sa.values())[0]) // 10)
+        init_values_sa = {
+            k: jnp.mean(v[-last_n:], axis=0) for k, v in samples_sa.items()
+        }
+
+        print("\nMain sampling...")
+        rng_key, subkey = jax.random.split(rng_key)
+        self.sampler = infer.MCMC(
+            infer.NUTS(
+                kernel,
+                init_strategy=infer.init_to_value(values=init_values_sa),
+                target_accept_prob=0.9,
+                **nuts_params,
+            ),
+            num_warmup=num_warmup // 4 * 3,
+            num_samples=num_samples,
+            num_chains=num_chains,
+        )
         self.sampler.run(
-            jax.random.PRNGKey(random_seed),
+            subkey,
             **running_params,
             prior_config=prior_config,
         )
 
         # prior and posterior predictive checks
+        rng_key, subkey = jax.random.split(rng_key)
         prior_pred = infer.Predictive(kernel, num_samples=prior_pred_samples)(
-            jax.random.PRNGKey(1919810 + random_seed),
+            subkey,
             **running_params,
             prior_config=prior_config,
         )
+        rng_key, subkey = jax.random.split(rng_key)
         post_pred = infer.Predictive(kernel, self.sampler.get_samples())(
-            jax.random.PRNGKey(114514 + random_seed),
+            subkey,
             **running_params,
             prior_config=prior_config,
         )
@@ -764,7 +833,7 @@ class SNLightCurveLib(object):
             if varname == "alpha_0":
                 true_vals = np.asarray(self.params_true["alpha_0"])
             else:
-                true_vals = np.asarray(self.params_true["t_peak"])
+                true_vals = np.asarray(self.params_true["t_rise"])
 
             # Posterior medians and uncertainties
             if varname == "alpha_0":

@@ -149,10 +149,10 @@ if __name__ == "__main__":
             f"./data/{dr_dir}/results/frac{int(early_threshold * 100)}_{args.model}"
         )
 
-        if os.path.exists(file_dir):
-            # Remove existing results to avoid conflicts
-            shutil.rmtree(file_dir)
-        os.makedirs(file_dir)
+        # if os.path.exists(file_dir):
+        #     # Remove existing results to avoid conflicts
+        #     shutil.rmtree(file_dir)
+        os.makedirs(file_dir, exist_ok=True)
 
         ztflib.sampling(
             num_warmup=args.num_warmup,
