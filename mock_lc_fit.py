@@ -31,11 +31,11 @@ if __name__ == "__main__":
             "pooled",
             "unpooled",
             "hierarchical",
-            "hierarchical_tfl",
+            "hierarchical_trise",
             "hierarchical_mvn",
         ],
         default="hierarchical_mvn",
-        help="Select sampling model: 'pooled', 'unpooled', or 'hierarchical (including _tfl and _mvn)' (default: 'hierarchical_mvn')",
+        help="Select sampling model: 'pooled', 'unpooled', or 'hierarchical (including _trise and _mvn)' (default: 'hierarchical_mvn')",
     )
     parser.add_argument(
         "--prior_type",
@@ -112,7 +112,7 @@ if __name__ == "__main__":
 
         # Save the posterior for the hierarchical model
         post_sample = xr.Dataset(lib.post_sample)
-        if args.sampling_model in ["hierarchical_tfl", "unpooled", "pooled"]:
+        if args.sampling_model in ["hierarchical_trise", "unpooled", "pooled"]:
             sampling_model_str = f"{args.sampling_model}_{args.prior_type.lower()}"
         else:
             sampling_model_str = args.sampling_model

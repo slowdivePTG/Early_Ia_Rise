@@ -1,17 +1,18 @@
+import os
+import glob
 import shutil
 import numpy as np
+import pandas as pd
 import xarray as xr
 
+from pathlib import Path
 from ..model.lightcurve import SNLightCurveLib
-from .._utils import plt
 
 
 class RedbackLightCurveLib(SNLightCurveLib):
     """
     A mock light curve library using Redback to simulate ZTF light curves.
     """
-
-    import pandas as pd
 
     def __init__(
         self,
@@ -22,12 +23,6 @@ class RedbackLightCurveLib(SNLightCurveLib):
         sampling_model: str = "hierarchical",
         prior_type: str = "uniform",
     ) -> None:
-        import os
-        import glob
-        import pandas as pd
-
-        from pathlib import Path
-
         file_dir = Path(f"./data/mock/{true_model}")
 
         peak_files = sorted(glob.glob(str(Path(file_dir) / "lc_peak*.csv")))

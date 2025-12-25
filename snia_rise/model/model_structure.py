@@ -360,7 +360,7 @@ def pooled_model(
         t_rise = sample_t_rise(prior_config)
 
     # t_fl: shape (n_obj,)
-    t_fl = sample_t_fl(n_obj, t_rise)
+    t_fl = sample_t_fl(n_obj, t_rise, t0_err)
 
     flux_err_obs = flux_err * beta[idx_fcqfid]
 

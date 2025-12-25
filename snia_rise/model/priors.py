@@ -285,7 +285,7 @@ def _sample_mvn_hierarchical_params(
     return t_rise, alpha_0
 
 
-def _sample_tfl_only_hierarchical_params(
+def _sample_trise_only_hierarchical_params(
     n_obj,
     n_filt,
     mean_t_rise,
@@ -349,7 +349,7 @@ def sample_hierarchical_params(
     n_filt : int
         Number of filters
     correlation_structure : str
-        "mvn", "independent", or "tfl_only"
+        "mvn", "independent", or "trise_only"
     prior_config : dict
         Configuration dict
 
@@ -401,11 +401,11 @@ def sample_hierarchical_params(
                 sample_correlations=False,  # Diagonal covariance
             )
 
-    elif correlation_structure == "tfl_only":
+    elif correlation_structure == "trise_only":
         # Only t_rise hierarchical, alpha_0 non-hierarchical
         mean_alpha_0 = prior_config.get("mean_alpha_0", 2)
         sigma_alpha_0 = prior_config.get("sigma_alpha_0", None)
-        return _sample_tfl_only_hierarchical_params(
+        return _sample_trise_only_hierarchical_params(
             n_obj,
             n_filt,
             mean_t_rise,
@@ -419,5 +419,5 @@ def sample_hierarchical_params(
     else:
         raise ValueError(
             f"Invalid correlation_structure '{correlation_structure}'. "
-            "Options: 'mvn', 'independent', 'tfl_only'"
+            "Options: 'mvn', 'independent', 'trise_only'"
         )

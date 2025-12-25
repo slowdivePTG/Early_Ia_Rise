@@ -1,5 +1,3 @@
-from mimetypes import init
-from re import sub
 import numpy as np
 import warnings
 
@@ -469,21 +467,50 @@ class SNLightCurveLib(object):
             print("Inference data not yet available.")
             return
 
-        # Post calculate the mean and std alpha_0 and t_rise
-        if "mean_alpha_0" not in self.post_sample.keys():
-            self.post_sample["mean_alpha_0"] = jnp.mean(
-                self.post_sample["alpha_0"], axis=-2
-            )
-            self.post_sample["sigma_alpha_0"] = jnp.std(
-                self.post_sample["alpha_0"], axis=-2, ddof=1
-            )
-        if "mean_t_rise" not in self.post_sample.keys():
-            self.post_sample["mean_t_rise"] = jnp.mean(
-                self.post_sample["t_rise"], axis=-1
-            )
-            self.post_sample["sigma_t_rise"] = jnp.std(
-                self.post_sample["t_rise"], axis=-1, ddof=1
-            )
+        # Post-calculate population-level parameters if not sampled directly
+        if "obj" in self.post_sample["t_rise"].dims:
+            if "mean_t_rise" not in self.post_sample.keys():
+                self.post_sample["mean_t_rise"] = self.post_sample["t_rise"].mean(
+                    dim="obj"
+                )
+                self.post_sample["sigma_t_rise"] = self.post_sample["t_rise"].std(
+                    dim="obj", ddof=1
+                )
+
+        if "obj" in self.post_sample["alpha_0"].dims:
+            if "mean_alpha_0" not in self.post_sample.keys():
+                self.post_sample["mean_alpha_0"] = self.post_sample["alpha_0"].mean(
+                    dim="obj"
+                )
+                self.post_sample["sigma_alpha_0"] = self.post_sample["alpha_0"].std(
+                    dim="obj", ddof=1
+                )
+
+            n_filt = self.post_sample.sizes["filt"]
+            if "corr_alpha_0_t_rise" not in self.post_sample.keys():
+                for j in range(n_filt):
+                    self.post_sample[f"corr_t_rise_alpha_flt{j + 1}"] = xr.corr(
+                        self.post_sample["t_rise"],
+                        self.post_sample["alpha_0"][..., j],
+                        dim="obj",
+                    )
+                    for k in range(j + 1, n_filt):
+                        self.post_sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"] = xr.corr(
+                            self.post_sample["alpha_0"][..., j],
+                            self.post_sample["alpha_0"][..., k],
+                            dim="obj",
+                        )
+
+            for j in range(n_filt):
+                for k in range(j + 1, n_filt):
+                    self.post_sample[f"corr_t_rise_alpha_flt{j + 1}_flt{k + 1}"] = (
+                        xr.corr(
+                            self.post_sample["t_rise"],
+                            self.post_sample["alpha_0"][..., j]
+                            - self.post_sample["alpha_0"][..., k],
+                            dim="obj",
+                        )
+                    )
 
         # Decode the posterior samples for each light curve
         for k, lc in enumerate(self.lc_library):
@@ -632,7 +659,7 @@ class SNLightCurveLib(object):
             print("Using hierarchical model for sampling...")
             prior_config["correlation_structure"] = "independent"
             kernel = hierarchical_model
-        elif model_structure == "hierarchical_tfl":
+        elif model_structure == "hierarchical_trise":
             print("Using hierarchical t_rise model for sampling...")
             prior_config["correlation_structure"] = "trise_only"
             kernel = hierarchical_model
@@ -642,7 +669,7 @@ class SNLightCurveLib(object):
             kernel = hierarchical_model
         else:
             raise ValueError(
-                "Invalid model structure.Options: 'pooled', 'unpooled', 'hierarchical' (as well as '_mvn' and '_tfl')"
+                "Invalid model structure.Options: 'pooled', 'unpooled', 'hierarchical' (as well as '_mvn' and '_trise')"
             )
 
         running_params = {
@@ -692,41 +719,47 @@ class SNLightCurveLib(object):
         else:
             init_strategy_sa = init_to_median_with_alpha0(alpha_0_init=2.0)
 
-        print("\nSimulated annealing warmup...")
-        rng_key, subkey = jax.random.split(rng_key)
-        sampler_sa = infer.MCMC(
-            infer.SA(
-                kernel,
-                init_strategy=init_strategy_sa,
-                adapt_state_size=num_chains,
-            ),
-            num_warmup=0,
-            num_samples=num_warmup // 4,
-            num_chains=num_chains,
-        )
-        sampler_sa.run(
-            subkey,
-            **running_params,
-            prior_config=prior_config,
-        )
+        if "hierarchical" in model_structure:
+            print("\nSimulated annealing warmup...")
+            num_sa = num_warmup // 4
+            rng_key, subkey = jax.random.split(rng_key)
+            sampler_sa = infer.MCMC(
+                infer.SA(
+                    kernel,
+                    init_strategy=init_strategy_sa,
+                    adapt_state_size=num_chains,
+                ),
+                num_warmup=0,
+                num_samples=num_sa,
+                num_chains=num_chains,
+            )
+            sampler_sa.run(
+                subkey,
+                **running_params,
+                prior_config=prior_config,
+            )
 
-        # Use mean of last 10% of samples to initialize main sampling
-        samples_sa = sampler_sa.get_samples()
-        last_n = max(1, len(list(samples_sa.values())[0]) // 10)
-        init_values_sa = {
-            k: jnp.mean(v[-last_n:], axis=0) for k, v in samples_sa.items()
-        }
+            # Use mean of last 10% of samples to initialize main sampling
+            samples_sa = sampler_sa.get_samples()
+            last_n = max(1, len(list(samples_sa.values())[0]) // 10)
+            init_values_sa = {
+                k: jnp.mean(v[-last_n:], axis=0) for k, v in samples_sa.items()
+            }
+            init_strategy_main = infer.init_to_value(values=init_values_sa)
+        else:
+            num_sa = 0
+            init_strategy_main = init_strategy_sa
 
         print("\nMain sampling...")
         rng_key, subkey = jax.random.split(rng_key)
         self.sampler = infer.MCMC(
             infer.NUTS(
                 kernel,
-                init_strategy=infer.init_to_value(values=init_values_sa),
+                init_strategy=init_strategy_main,
                 target_accept_prob=0.9,
                 **nuts_params,
             ),
-            num_warmup=num_warmup // 4 * 3,
+            num_warmup=num_warmup - num_sa,
             num_samples=num_samples,
             num_chains=num_chains,
         )
@@ -779,7 +812,6 @@ class SNLightCurveLib(object):
             if var in self.inf_data.posterior
         ]
         self.post_sample = post_sample.drop_vars(vars_to_remove)
-        self.decode_post_sample(model_structure=model_structure)
 
     def plot_corner(
         self,
