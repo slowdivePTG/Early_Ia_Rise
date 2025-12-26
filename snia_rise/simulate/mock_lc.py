@@ -29,7 +29,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         params_file = file_dir / f"simulated_lc_params.csv"
 
         post_sample_dir = Path(file_dir) / f"{model}_frac{int(early_threshold * 100)}"
-        if sampling_model in ["hierarchical_tfl", "unpooled", "pooled"]:
+        if sampling_model in ["hierarchical_trise", "unpooled", "pooled"]:
             sampling_model_str = f"{sampling_model}_{prior_type.lower()}"
         else:
             sampling_model_str = sampling_model

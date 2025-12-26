@@ -45,8 +45,8 @@ if __name__ == "__main__":
             "maximum_entropy",
             "normal",
         ],
-        default="flat",
-        help="Select prior type for alpha_0 in 'independent' correlation structure or non-hierarchical models (default: 'flat')",
+        default="uniform",
+        help="Select prior type for alpha_0 in 'independent' correlation structure or non-hierarchical models (default: 'uniform')",
     )
     parser.add_argument(
         "--num_lc",

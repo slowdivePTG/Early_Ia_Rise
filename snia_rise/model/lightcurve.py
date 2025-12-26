@@ -487,23 +487,20 @@ class SNLightCurveLib(object):
                 )
 
             n_filt = self.post_sample.sizes["filt"]
-            if "corr_alpha_0_t_rise" not in self.post_sample.keys():
-                for j in range(n_filt):
-                    self.post_sample[f"corr_t_rise_alpha_flt{j + 1}"] = xr.corr(
-                        self.post_sample["t_rise"],
+            for j in range(n_filt):
+                self.post_sample[f"corr_t_rise_alpha_flt{j + 1}"] = xr.corr(
+                    self.post_sample["t_rise"],
+                    self.post_sample["alpha_0"][..., j],
+                    dim="obj",
+                )
+                for k in range(j + 1, n_filt):
+                    self.post_sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"] = xr.corr(
                         self.post_sample["alpha_0"][..., j],
+                        self.post_sample["alpha_0"][..., k],
                         dim="obj",
                     )
-                    for k in range(j + 1, n_filt):
-                        self.post_sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"] = xr.corr(
-                            self.post_sample["alpha_0"][..., j],
-                            self.post_sample["alpha_0"][..., k],
-                            dim="obj",
-                        )
 
-            for j in range(n_filt):
-                for k in range(j + 1, n_filt):
-                    self.post_sample[f"corr_t_rise_alpha_flt{j + 1}_flt{k + 1}"] = (
+                    self.post_sample[f"corr_t_rise_alpha_flt{j + 1}-flt{k + 1}"] = (
                         xr.corr(
                             self.post_sample["t_rise"],
                             self.post_sample["alpha_0"][..., j]
@@ -795,20 +792,31 @@ class SNLightCurveLib(object):
         # decode Corr, Variance matrices if present
         for matrix in ["Corr", "Sigma"]:
             if matrix in self.inf_data.posterior:
-                n_filt = len(np.unique(self.idx_filt))
-                for i in range(n_filt):
-                    post_sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = (
-                        self.inf_data.posterior[matrix][..., i + 1, 0]
-                    )
-                    for j in range(i + 1, n_filt):
-                        post_sample[f"{matrix.lower()}_alpha_flt{i + 1}_flt{j + 1}"] = (
-                            self.inf_data.posterior[matrix][..., i + 1, j + 1]
-                        )
+                # n_filt = len(np.unique(self.idx_filt))
+                # for i in range(n_filt):
+                #     post_sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = (
+                #         self.inf_data.posterior[matrix][..., i + 1, 0]
+                #     )
+                #     for j in range(i + 1, n_filt):
+                #         post_sample[f"{matrix.lower()}_alpha_flt{i + 1}_flt{j + 1}"] = (
+                #             self.inf_data.posterior[matrix][..., i + 1, j + 1]
+                #         )
+                post_sample[f"{matrix.lower()}_t_rise_alpha"] = self.inf_data.posterior[
+                    matrix
+                ][..., 0, 1]
 
         # store the posterior samples
         vars_to_remove = [
             var
-            for var in ["chol_corr", "theta", "alpha-", "Corr", "Sigma", "t0_offset"]
+            for var in [
+                "chol_corr",
+                "theta",
+                "alpha-",
+                "Corr",
+                "Sigma",
+                "t0_offset",
+                "Delta",
+            ]
             if var in self.inf_data.posterior
         ]
         self.post_sample = post_sample.drop_vars(vars_to_remove)

@@ -1,5 +1,6 @@
 """Helper functions for hierarchical Bayesian models of supernova light curves."""
 
+from random import sample
 import numpy as np
 import jax.numpy as jnp
 import numpyro
@@ -229,58 +230,71 @@ def _sample_mvn_hierarchical_params(
         Population mean for t_rise
     sigma_t_rise : float
         Population std for t_rise
-    mean_alpha_0 : array, shape (n_filt_gr,)
-        Population mean for alpha_0 per filter group
-    sigma_alpha_0 :  array, shape (n_filt_gr,)
-        Population std for alpha_0 per filter group
-    min_alpha_0 :  float
+    mean_alpha_0 : float
+        Population mean for the common-mode alpha_0
+    sigma_alpha_0 : float
+        Population standard deviation for the common-mode alpha_0
+    min_alpha_0 : float
         Minimum alpha value
-    max_alpha_0 :  float
+    max_alpha_0 : float
         Maximum alpha value
     sample_correlations : bool
         If True, sample correlation matrix. If False, use identity (independent)
 
     Returns
     -------
-    t_rise :  array, shape (n_obj,)
+    t_rise : array, shape (n_obj,)
     alpha_0 : array, shape (n_obj, n_filt)
     """
-    n_mvn_dim = 1 + n_filt
+    n_mvn_dim = 2
 
-    # Mean and scale vectors
-    mu = jnp.concatenate([jnp.array([mean_t_rise]), mean_alpha_0])
-    sigma = jnp.concatenate([jnp.array([sigma_t_rise]), sigma_alpha_0])
+    # Mean and scale vectors for MVN
+    mu = jnp.array([mean_t_rise, mean_alpha_0])
+    sigma = jnp.array([sigma_t_rise, sigma_alpha_0])
 
+    # Sample or fix correlation structure
     if sample_correlations:
-        # Sample correlation matrix
         chol_corr = numpyro.sample(
             "chol_corr", dist.LKJCholesky(n_mvn_dim, concentration=2.0)
         )
     else:
-        # Use identity (independent)
         chol_corr = jnp.eye(n_mvn_dim)
 
     L_Cholesky = jnp.matmul(jnp.diag(sigma), chol_corr)
 
     if sample_correlations:
-        # Store covariance and correlation
+        # Store covariance and correlation for diagnostics
         with numpyro.plate("mvn_dim_0", n_mvn_dim, dim=-2):
             with numpyro.plate("mvn_dim_1", n_mvn_dim, dim=-1):
                 _ = numpyro.deterministic("Sigma", jnp.matmul(L_Cholesky, L_Cholesky.T))
                 _ = numpyro.deterministic("Corr", jnp.matmul(chol_corr, chol_corr.T))
 
-    # Sample from MVN
+    # Sample filter-specific noise scales for ALL filters
+    with numpyro.plate("filt_delta", n_filt - 1):
+        sigma_delta = numpyro.sample("sigma_delta", dist.HalfCauchy(0.3))
+        with numpyro.plate("obj", n_obj):
+            delta_raw = numpyro.sample(
+                "delta_raw", dist.Normal(jnp.zeros(n_filt - 1), jnp.ones(n_filt - 1))
+            )
+            delta = delta_raw * sigma_delta[None, :]
+            delta_last = -jnp.sum(delta, axis=-1, keepdims=True)
+            delta_full = numpyro.deterministic(
+                "delta", jnp.concatenate([delta, delta_last], axis=-1)
+            )
+
     with numpyro.plate("obj", n_obj):
+        # Sample (t_rise, alpha_0_cm) from MVN
         theta = numpyro.sample(
             "theta", dist.MultivariateNormal(loc=mu, scale_tril=L_Cholesky)
         )
         t_rise = numpyro.deterministic("t_rise", theta[..., 0])
+        alpha_0_cm = numpyro.deterministic("alpha_0_cm", theta[..., 1])
 
-    with numpyro.plate("filt", n_filt, dim=-1):
-        with numpyro.plate("obj", n_obj, dim=-2):
-            alpha_0 = numpyro.deterministic(
-                "alpha_0", jnp.clip(theta[..., 1:], min_alpha_0, max_alpha_0)
-            )
+        # Final alpha per filter:  common-mode + color deviation
+        alpha_0 = numpyro.deterministic(
+            "alpha_0",
+            jnp.clip(alpha_0_cm[:, None] + delta_full, min_alpha_0, max_alpha_0),
+        )
 
     return t_rise, alpha_0
 
@@ -368,11 +382,10 @@ def sample_hierarchical_params(
 
     # Sample alpha_0 hyperpriors only for mvn and independent
     if correlation_structure in ["mvn", "independent"]:
-        with numpyro.plate("n_filt", n_filt):
-            mean_alpha_0 = numpyro.sample(
-                "mean_alpha_0", dist.Uniform(min_alpha_0, max_alpha_0)
-            )
-            sigma_alpha_0 = numpyro.sample("sigma_alpha_0", dist.HalfCauchy(0.3))
+        mean_alpha_0 = numpyro.sample(
+            "mean_alpha_0_cm", dist.Uniform(min_alpha_0, max_alpha_0)
+        )
+        sigma_alpha_0 = numpyro.sample("sigma_alpha_0_cm", dist.HalfCauchy(0.3))
 
         if correlation_structure == "mvn":
             # Full MVN with correlations
@@ -398,7 +411,7 @@ def sample_hierarchical_params(
                 sigma_alpha_0,
                 min_alpha_0,
                 max_alpha_0,
-                sample_correlations=False,  # Diagonal covariance
+                sample_correlations=False,
             )
 
     elif correlation_structure == "trise_only":
