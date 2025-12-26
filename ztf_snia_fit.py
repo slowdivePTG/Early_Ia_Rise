@@ -5,7 +5,6 @@ import numpyro
 import xarray as xr
 
 numpyro.set_host_device_count(4)
-numpyro.enable_x64()
 
 from pathlib import Path
 from astropy.table import Table

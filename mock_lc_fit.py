@@ -1,10 +1,8 @@
-from ast import arg
 import os
 import numpyro
 import xarray as xr
 
 numpyro.set_host_device_count(4)
-numpyro.enable_x64()
 
 from pathlib import Path
 
@@ -21,7 +19,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--true_model",
-        choices=["power_law", "curved_power_law", None],
+        choices=[
+            "power_law",
+            "curved_power_law",
+            "broken_power_law",
+            "snf_2011fe",
+            None,
+        ],
         default=None,
         help="Select the underlying true model: 'power_law' or 'curved_power_law'. Default is the same as the fitting model.",
     )

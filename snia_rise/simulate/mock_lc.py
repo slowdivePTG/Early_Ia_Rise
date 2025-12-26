@@ -7,6 +7,7 @@ import xarray as xr
 
 from pathlib import Path
 from ..model.lightcurve import SNLightCurveLib
+from .._utils._plt import plt
 
 
 class RedbackLightCurveLib(SNLightCurveLib):
@@ -116,11 +117,16 @@ class RedbackLightCurveLib(SNLightCurveLib):
         import pandas as pd
         import astropy.units as u
         from astropy.cosmology import FlatLambdaCDM, z_at_value
+        from scipy.optimize import brentq
         from pathlib import Path
         from redback.simulate_transients import SimulateOpticalTransient
         from .._utils._plt import set_plot_style
 
-        from .sed import power_law_rise_flat_sed, snf_2011fe_sed
+        from .sed import (
+            power_law_rise_flat_sed,
+            broken_power_law_rise_flat_sed,
+            snf_2011fe_sed,
+        )
 
         import logging
 
@@ -145,7 +151,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
             )
         )
 
-        if model in ["power_law", "curved_power_law"]:
+        if "power_law" in model:
             # True hyper-parameters for the power-law rise model
             params_true = dict(
                 mean_alpha=params_mean.get("alpha", 2.0),
@@ -162,10 +168,81 @@ class RedbackLightCurveLib(SNLightCurveLib):
             )
             params_sim["peak_luminosity"] = np.full(num_tot, PEAK_LUMINOSITY)
 
-            # Compute alpha_1 based on other parameters
-            params_sim["alpha_1"] = -1 / (
-                params_sim["t_rise"] * (1 + np.log(params_sim["t_rise"]))
-            )
+            if model in ["power_law", "curved_power_law"]:
+                # Compute alpha_1 based on other parameters
+                params_sim["alpha_1"] = -1 / (
+                    params_sim["t_rise"] * (1 + np.log(params_sim["t_rise"]))
+                )
+
+            elif model == "broken_power_law":
+                # Compuate alpha_1 based on other parameters
+                params_sim["t_b"] = (
+                    np.random.uniform(-1, 1, num_tot) + params_sim["t_rise"]
+                )
+                params_sim["s"] = np.random.uniform(0.5, 1.5, num_tot)
+
+                alpha_v_1 = params_sim["alpha_0"] / 2 - 1
+
+                # Define the function we want to solve: func(alpha_v_2) = 0
+                def _peak_equation(av2, av1, s, target_ratio):
+                    # Avoid division by zero or invalid powers if the solver wanders
+                    if av2 == av1 or (1 + av2) == 0:
+                        return 1e9
+
+                    # Calculate the theoretical ratio from the slopes and smoothness
+                    # Using the equation provided
+                    base = -(1 + av1) / (1 + av2)
+
+                    if base <= 0:
+                        return 1e9  # Invalid mathematical domain for fractional power
+
+                    exponent = 1 / (s * (av1 - av2))
+                    val = np.power(base, exponent)
+
+                    return val - target_ratio
+
+                # Solve for alpha_v_2 for each simulation
+                alpha_v_2 = np.zeros(num_tot)
+
+                # Target ratio is t_rise / t_b
+                target_ratios = params_sim["t_rise"] / params_sim["t_b"]
+
+                for i in range(num_tot):
+                    av1 = alpha_v_1[i]
+                    s_val = params_sim["s"][i]
+                    ratio = target_ratios[i]
+
+                    # Constraints: (1+av1)/(1+av2) < 0
+                    # alpha_v_1 ~ 0 (-0.5 to 0.5).
+                    # => alpha_v_2 < -1
+                    try:
+                        # Looking for a solution somewhat far from alpha_v_1 to avoid singularity
+                        sol = brentq(
+                            _peak_equation,
+                            av1 - 5,
+                            -1.01,
+                            args=(av1, s_val, ratio),
+                        )
+                    except ValueError:
+                        # Fallback or wider search if root is not bracketed in standard decay range
+                        av2s = np.linspace(av1 - 5, -1.01, 1000)
+                        func_vals = [
+                            _peak_equation(av2, av1, s_val, ratio) for av2 in av2s
+                        ]
+
+                        plt.plot(av2s, func_vals)
+                        plt.axhline(0, color="k", ls=":")
+                        plt.title(f"Failed to bracket root for index {i}")
+                        plt.xlabel("alpha_v_2")
+                        plt.ylabel("Function Value")
+                        plt.show()
+                        raise RuntimeError(
+                            f"Failed to find root for alpha_v_2 at index {i}: av1={av1}, s={s_val}, ratio={ratio}"
+                        )
+
+                    alpha_v_2[i] = sol
+
+                params_sim["alpha_1"] = alpha_v_1 - alpha_v_2
 
         elif model == "snf_2011fe":
             params_sim["t_rise"] = np.full(num_tot, 20.0)
@@ -223,6 +300,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             if model in ["power_law", "curved_power_law"]:
                 sed_model = power_law_rise_flat_sed
+            elif model == "broken_power_law":
+                sed_model = broken_power_law_rise_flat_sed
             elif model == "snf_2011fe":
                 sed_model = snf_2011fe_sed
 
@@ -356,6 +435,19 @@ class RedbackLightCurveLib(SNLightCurveLib):
             params_true["alpha_0"] = params_valid_det["alpha_0"].values
             params_true["alpha_1"] = params_valid_det["alpha_1"].values
             params_true["t_rise"] = params_valid_det["t_rise"].values
+
+            params_valid_det.to_csv(
+                data_dir / f"simulated_lc_params.csv",
+                index=False,
+            )
+        elif model == "broken_power_law":
+            params_valid_det = pd.DataFrame(params_valid_det).reset_index(drop=True)
+
+            params_true["alpha_0"] = params_valid_det["alpha_0"].values
+            params_true["alpha_1"] = params_valid_det["alpha_1"].values
+            params_true["t_rise"] = params_valid_det["t_rise"].values
+            params_true["t_b"] = params_valid_det["t_b"].values
+            params_true["s"] = params_valid_det["s"].values
 
             params_valid_det.to_csv(
                 data_dir / f"simulated_lc_params.csv",

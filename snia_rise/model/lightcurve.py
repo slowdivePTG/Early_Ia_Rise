@@ -477,6 +477,8 @@ class SNLightCurveLib(object):
                     dim="obj", ddof=1
                 )
 
+        # Post-calculate differences between filters for mean_alpha_0 (color evolution)
+
         if "obj" in self.post_sample["alpha_0"].dims:
             if "mean_alpha_0" not in self.post_sample.keys():
                 self.post_sample["mean_alpha_0"] = self.post_sample["alpha_0"].mean(
@@ -494,12 +496,15 @@ class SNLightCurveLib(object):
                     dim="obj",
                 )
                 for k in range(j + 1, n_filt):
+                    self.post_sample[f"mean_alpha_flt{j + 1}-flt{k + 1}"] = (
+                        self.post_sample["mean_alpha_0"][..., j]
+                        - self.post_sample["mean_alpha_0"][..., k]
+                    )
                     self.post_sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"] = xr.corr(
                         self.post_sample["alpha_0"][..., j],
                         self.post_sample["alpha_0"][..., k],
                         dim="obj",
                     )
-
                     self.post_sample[f"corr_t_rise_alpha_flt{j + 1}-flt{k + 1}"] = (
                         xr.corr(
                             self.post_sample["t_rise"],
