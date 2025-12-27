@@ -307,8 +307,7 @@ def snf_2011fe_sed(
     # Set redshift - sncosmo will handle all transformations
     model.set(z=z)
 
-    # Set t0 = 0 because redback passes time as "days since t0_mjd_transient"
-    model.set(t0=20.0)
+    model.set(t0=20.0 * (1 + z))  # Set t0 in observer frame
 
     # Set B-band absolute magnitude
     model.set_source_peakabsmag(-19.0, "bessellb", "ab")
@@ -333,11 +332,6 @@ def snf_2011fe_sed(
             continue
 
         try:
-            # Try getting flux at rest-frame wavelengths without redshift set
-            # Actually, let's use a workaround: interpolate from bandfluxes
-
-            # Get flux in multiple bands and interpolate
-            # This is more robust than model.flux()
             sed_flux = model.flux(t, lambda_obs)
             flux_2d[i, :] = sed_flux
 

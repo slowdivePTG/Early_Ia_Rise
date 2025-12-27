@@ -3,6 +3,7 @@ import numpyro
 import xarray as xr
 
 numpyro.set_host_device_count(4)
+numpyro.enable_x64()
 
 from pathlib import Path
 
@@ -66,6 +67,12 @@ if __name__ == "__main__":
         help="fraction of maximum luminosity to truncate light curves (default: [0.4])",
     )
     parser.add_argument(
+        "--z_fixed",
+        type=float,
+        default=None,
+        help="Fixed redshift for all mock light curves (default: None, i.e., draw from distribution)",
+    )
+    parser.add_argument(
         "--num_warmup",
         type=int,
         default=3000,
@@ -89,6 +96,10 @@ if __name__ == "__main__":
     for early_threshold in args.early_threshold:
         model = args.model
         true_model = model if args.true_model is None else args.true_model
+
+        true_model = (
+            true_model if args.z_fixed is None else f"{true_model}_z_{args.z_fixed:.2f}".replace(".", "_")
+        )
 
         lib = RedbackLightCurveLib(
             n_lc=args.num_lc,

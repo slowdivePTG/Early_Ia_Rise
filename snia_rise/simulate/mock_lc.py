@@ -109,6 +109,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         model: str = "curved_power_law",
         min_dist_lum: float = 10,
         max_dist_lum: float = 250,
+        z_fixed: float = None,
     ) -> list[pd.DataFrame]:
         """
         Simulate light curves using Redback.
@@ -116,6 +117,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         import os
         import pandas as pd
         import astropy.units as u
+
         from astropy.cosmology import FlatLambdaCDM, z_at_value
         from scipy.optimize import brentq
         from pathlib import Path
@@ -136,7 +138,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         PEAK_LUMINOSITY = 2e28  # intrinsic peak luminosity (erg/s/Hz)
 
         # Sample the population parameters using numpy.random
-        num_tot = n_lc * 10  # oversample to account for non-detections
+        num_tot = n_lc * 20  # oversample to account for non-detections
 
         np.random.seed(n_lc * 114514)
 
@@ -253,26 +255,36 @@ class RedbackLightCurveLib(SNLightCurveLib):
         # dist_lum ~ PowerLaw(alpha=2)
         # For power law: f(x) ∝ x^(alpha_lum), we use inverse transform sampling
         # CDF^(-1)(u) = (min^(1+alpha_lum) + u*(max^(1+alpha_lum) - min^(1+alpha_lum)))^(1/(1+alpha_lum))
-        if min_dist_lum < max_dist_lum:
-            alpha_lum = 2
-            mu = np.random.uniform(0, 1, num_tot)
-            params_sim["dist_lum"] = (
-                min_dist_lum ** (1 + alpha_lum)
-                + mu
-                * (max_dist_lum ** (1 + alpha_lum) - min_dist_lum ** (1 + alpha_lum))
-            ) ** (1 / (1 + alpha_lum))
-        elif min_dist_lum == max_dist_lum:
-            print("Using fixed distance luminosity for all transients.")
-            params_sim["dist_lum"] = np.full(num_tot, min_dist_lum)
-
-        # Compute redshift from distance luminosity
         cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
-        params_sim["redshift"] = np.array(
-            [
-                z_at_value(cosmo.luminosity_distance, dl * u.Mpc)
-                for dl in params_sim["dist_lum"]
-            ]
-        )
+        if z_fixed is not None:
+            z_fixed = max(z_fixed, 1e-3)
+            print(f"Using fixed redshift z={z_fixed:.3f} for all transients.")
+            dl_fixed = cosmo.luminosity_distance(z_fixed).value  # in Mpc
+            params_sim["dist_lum"] = np.full(num_tot, dl_fixed)
+            params_sim["redshift"] = np.full(num_tot, z_fixed)
+        else:
+            if min_dist_lum < max_dist_lum:
+                alpha_lum = 2
+                mu = np.random.uniform(0, 1, num_tot)
+                params_sim["dist_lum"] = (
+                    min_dist_lum ** (1 + alpha_lum)
+                    + mu
+                    * (
+                        max_dist_lum ** (1 + alpha_lum)
+                        - min_dist_lum ** (1 + alpha_lum)
+                    )
+                ) ** (1 / (1 + alpha_lum))
+            elif min_dist_lum == max_dist_lum:
+                print("Using fixed distance luminosity for all transients.")
+                params_sim["dist_lum"] = np.full(num_tot, min_dist_lum)
+
+            # Compute redshift from distance luminosity
+            params_sim["redshift"] = np.array(
+                [
+                    z_at_value(cosmo.luminosity_distance, dl * u.Mpc)
+                    for dl in params_sim["dist_lum"]
+                ]
+            )
 
         # Add the required t0_mjd_transient parameter
         # This sets when each transient begins (in MJD)
@@ -284,7 +296,11 @@ class RedbackLightCurveLib(SNLightCurveLib):
         lc_peak_lib = np.empty(shape=n_lc, dtype=object)
         params_valid_det = []
 
-        data_dir = Path(f"./data/mock/{model}")
+        model_dir = (
+            model if z_fixed is None else f"{model}_z_{z_fixed:.2f}".replace(".", "_")
+        )
+
+        data_dir = Path(f"./data/mock/") / model_dir
         if os.path.exists(data_dir):
             shutil.rmtree(data_dir)
         os.makedirs(data_dir, exist_ok=True)
@@ -360,7 +376,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             idx_obs = len(params_valid_det)
             print(
-                f"Simulating transient {idx_obs + 1}/{n_lc} ({i + 1}/{num_tot} attempts)..."
+                f"Simulating transient {idx_obs + 1}/{n_lc} ({i + 1} attempts)..."
             )
             print(f"  → {len(sim.inference_observations)} detections")
 
@@ -371,12 +387,18 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             # Normalize flux to 100 at peak for both g and r bands
             for band in ["ztfg", "ztfr"]:
+                if "power_law" in model:
+                    peak_flux_band = cls.get_rise_flux(
+                        flt=band,
+                        dist_lum=single_params["dist_lum"],
+                        redshift=single_params["redshift"],
+                    )
+                elif "2011fe" in model:
+                    peak_flux_band = cls.get_rise_flux_11fe(
+                        flt=band, redshift=single_params["redshift"]
+                    )
+
                 idx_band = obs["band"] == band
-                peak_flux_band = cls.get_rise_flux(
-                    flt=band,
-                    dist_lum=single_params["dist_lum"],
-                    redshift=single_params["redshift"],
-                )
                 flux_mock[idx_band] = flux_mock[idx_band] / peak_flux_band * 100
                 flux_err_mock[idx_band] = flux_err_mock[idx_band] / peak_flux_band * 100
 
@@ -496,3 +518,31 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
         peak_flux = peak_flux_cgs * eff_width  # erg/cm^2/s
         return peak_flux
+
+    @staticmethod
+    def get_rise_flux_11fe(flt: str, redshift: float, peak_absmag: float = -19.0):
+        """
+        Calculate the peak flux (in erg/cm^2/s) given the peak absolute magnitude within ZTF filters.
+        """
+        import sncosmo
+
+        if flt == "ztfg":
+            eff_width = 1.65636e14  # Hz
+        elif flt == "ztfr":
+            eff_width = 1.08076e14  # Hz
+        elif flt == "ztfi":
+            eff_width = 5.86690e13  # Hz
+        else:
+            raise ValueError(f"Filter {flt} not recognized.")
+
+        src = sncosmo.Model(source="snf-2011fe")
+        src.set(z=redshift)
+        src.set(t0=0)
+        src.set_source_peakabsmag(peak_absmag, "bessellb", "ab")
+
+        mag = src.bandmag(flt, "ab", 0)  # at t=0
+
+        flux_cgs_per_hz = 10 ** (-0.4 * (mag + 48.6))  # erg/cm^2/s/Hz
+        flux_cgs = flux_cgs_per_hz * eff_width  # erg/cm^2/s
+
+        return flux_cgs
