@@ -294,6 +294,8 @@ def snf_2011fe_sed(
         Cosmological redshift.
     """
 
+    raise NotImplementedError("snf_2011fe_sed is deprecated.")
+
     # Ensure time is 1D (observer frame from redback)
     time_obs = np.atleast_1d(time)
 
