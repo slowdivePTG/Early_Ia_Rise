@@ -461,10 +461,14 @@ def sample_hierarchical_params(
 
     # Sample alpha_0 hyperpriors only for mvn and independent
     if correlation_structure in ["mvn", "independent"]:
+        # mean_alpha_0 = numpyro.sample(
+        # "mean_alpha_0_cm", dist.Uniform(min_alpha_0, max_alpha_0)
+        # )
+        # sigma_alpha_0 = numpyro.sample("sigma_alpha_0_cm", dist.HalfCauchy(0.3))
         mean_alpha_0 = numpyro.sample(
-            "mean_alpha_0_cm", dist.Uniform(min_alpha_0, max_alpha_0)
+            "mean_alpha_0", dist.Uniform(min_alpha_0, max_alpha_0)
         )
-        sigma_alpha_0 = numpyro.sample("sigma_alpha_0_cm", dist.HalfCauchy(0.3))
+        sigma_alpha_0 = numpyro.sample("sigma_alpha_0", dist.HalfCauchy(0.3))
 
         if correlation_structure == "mvn":
             # Full MVN with correlations
