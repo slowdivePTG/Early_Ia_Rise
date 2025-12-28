@@ -1,17 +1,16 @@
-import numpy as np
 import warnings
 
-import jax
-import jax.numpy as jnp
 import arviz as az
 import corner
+import jax
+import jax.numpy as jnp
+import numpy as np
 import xarray as xr
 from numpyro import infer
 from numpyro.infer.initialization import init_to_median
 from sklearn.preprocessing import LabelEncoder
 
 from .._utils import plt
-
 from .model_structure import (
     f_t,
     hierarchical_model,
@@ -447,6 +446,70 @@ class SNLightCurveLib(object):
         self.model_structure = sampling_model
         self.decode_post_sample(model_structure=sampling_model)
 
+    @staticmethod
+    def decode_sample(sample: xr.DataArray) -> xr.DataArray:
+        """
+        Decode the posterior samples of each light curve from the packed hierarchical model.
+
+        Parameters
+        ----------
+        sample : xr.DataArray
+            The prior/posterior samples to decode.
+
+        Returns
+        -------
+        None
+        """
+
+        # Post-calculate population-level parameters if not sampled directly
+        if "obj" in sample["t_rise"].dims:
+            if "mean_t_rise" not in sample.keys():
+                sample["mean_t_rise"] = sample["t_rise"].mean(dim="obj")
+                sample["sigma_t_rise"] = sample["t_rise"].std(dim="obj", ddof=1)
+
+        # Post-calculate differences between filters for mean_alpha_0 (color evolution)
+        if "obj" in sample["alpha_0"].dims:
+            if "mean_alpha_0" not in sample.keys():
+                sample["mean_alpha_0"] = sample["alpha_0"].mean(dim="obj")
+                sample["sigma_alpha_0"] = sample["alpha_0"].std(dim="obj", ddof=1)
+
+            n_filt = sample.sizes["filt"]
+            for j in range(n_filt):
+                sample[f"corr_t_rise_alpha_flt{j + 1}"] = xr.corr(
+                    sample["t_rise"],
+                    sample["alpha_0"][..., j],
+                    dim="obj",
+                )
+                for k in range(j + 1, n_filt):
+                    sample[f"mean_alpha_flt{j + 1}-flt{k + 1}"] = (
+                        sample["mean_alpha_0"][..., j] - sample["mean_alpha_0"][..., k]
+                    )
+                    sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"] = xr.corr(
+                        sample["alpha_0"][..., j],
+                        sample["alpha_0"][..., k],
+                        dim="obj",
+                    )
+                    sample[f"corr_t_rise_alpha_flt{j + 1}-flt{k + 1}"] = xr.corr(
+                        sample["t_rise"],
+                        sample["alpha_0"][..., j] - sample["alpha_0"][..., k],
+                        dim="obj",
+                    )
+        return sample
+
+    def decode_prior_sample(self):
+        """
+        Decode the prior samples of each light curve from the packed hierarchical model.
+
+        Returns
+        -------
+        None
+        """
+        if self.prior_sample is None:
+            print("Inference data not yet available.")
+            return
+
+        self.prior_sample = self.decode_sample(self.prior_sample)
+
     def decode_post_sample(self, model_structure: str = "hierarchical"):
         """
         Decode the posterior samples of each light curve from the packed hierarchical model.
@@ -467,52 +530,7 @@ class SNLightCurveLib(object):
             print("Inference data not yet available.")
             return
 
-        # Post-calculate population-level parameters if not sampled directly
-        if "obj" in self.post_sample["t_rise"].dims:
-            if "mean_t_rise" not in self.post_sample.keys():
-                self.post_sample["mean_t_rise"] = self.post_sample["t_rise"].mean(
-                    dim="obj"
-                )
-                self.post_sample["sigma_t_rise"] = self.post_sample["t_rise"].std(
-                    dim="obj", ddof=1
-                )
-
-        # Post-calculate differences between filters for mean_alpha_0 (color evolution)
-
-        if "obj" in self.post_sample["alpha_0"].dims:
-            if "mean_alpha_0" not in self.post_sample.keys():
-                self.post_sample["mean_alpha_0"] = self.post_sample["alpha_0"].mean(
-                    dim="obj"
-                )
-                self.post_sample["sigma_alpha_0"] = self.post_sample["alpha_0"].std(
-                    dim="obj", ddof=1
-                )
-
-            n_filt = self.post_sample.sizes["filt"]
-            for j in range(n_filt):
-                self.post_sample[f"corr_t_rise_alpha_flt{j + 1}"] = xr.corr(
-                    self.post_sample["t_rise"],
-                    self.post_sample["alpha_0"][..., j],
-                    dim="obj",
-                )
-                for k in range(j + 1, n_filt):
-                    self.post_sample[f"mean_alpha_flt{j + 1}-flt{k + 1}"] = (
-                        self.post_sample["mean_alpha_0"][..., j]
-                        - self.post_sample["mean_alpha_0"][..., k]
-                    )
-                    self.post_sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"] = xr.corr(
-                        self.post_sample["alpha_0"][..., j],
-                        self.post_sample["alpha_0"][..., k],
-                        dim="obj",
-                    )
-                    self.post_sample[f"corr_t_rise_alpha_flt{j + 1}-flt{k + 1}"] = (
-                        xr.corr(
-                            self.post_sample["t_rise"],
-                            self.post_sample["alpha_0"][..., j]
-                            - self.post_sample["alpha_0"][..., k],
-                            dim="obj",
-                        )
-                    )
+        self.post_sample = self.decode_sample(self.post_sample)
 
         # Decode the posterior samples for each light curve
         for k, lc in enumerate(self.lc_library):
@@ -618,6 +636,7 @@ class SNLightCurveLib(object):
         num_warmup: int = 3000,
         num_chains: int = 2,
         random_seed: int = 11,
+        sample_prior: bool = False,
         prior_pred_samples: int = 500,
         prior_config: dict = {},
         nuts_params: dict = {},
@@ -636,6 +655,8 @@ class SNLightCurveLib(object):
             Number of chains to run (default: 2).
         random_seed : int, optional
             Random seed for reproducibility (default: 11).
+        sample_prior : bool, optional
+            Whether to sample from the prior distribution only (default: False).
         prior_pred_samples : int, optional
             Number of samples to draw from the prior predictive distribution (default: 500).
         prior_config : dict, optional
@@ -686,12 +707,39 @@ class SNLightCurveLib(object):
 
         rng_key = jax.random.PRNGKey(random_seed)
 
+        print("Sampling from prior...")
+        prior_pred = infer.Predictive(kernel, num_samples=prior_pred_samples)(
+            rng_key,
+            **running_params,
+            prior_config=prior_config,
+        )
+        prior_sample = az.from_numpyro(prior=prior_pred).prior
+        vars_to_remove = [
+            var
+            for var in [
+                "chol_corr",
+                "theta",
+                "alpha-",
+                "Corr",
+                "Sigma",
+                "t0_offset",
+                "Delta",
+            ]
+            if var in prior_sample
+        ]
+        self.prior_sample = prior_sample.drop_vars(vars_to_remove)
+
+        if sample_prior:
+            self.decode_prior_sample()
+            return
+
         # Warmup without t0_err
         if self.t0_err is not None:
             print("\nWarmup without t0_err...")
             running_params_no_to_err = running_params.copy()
             running_params_no_to_err["t0_err"] = None
 
+            rng_key, subkey = jax.random.split(rng_key)
             sampler_no_to_err = infer.MCMC(
                 infer.NUTS(
                     kernel,
@@ -704,7 +752,7 @@ class SNLightCurveLib(object):
                 num_chains=num_chains,
             )
             sampler_no_to_err.run(
-                rng_key,
+                subkey,
                 **running_params_no_to_err,
                 prior_config=prior_config,
             )
@@ -771,13 +819,7 @@ class SNLightCurveLib(object):
             prior_config=prior_config,
         )
 
-        # prior and posterior predictive checks
-        rng_key, subkey = jax.random.split(rng_key)
-        prior_pred = infer.Predictive(kernel, num_samples=prior_pred_samples)(
-            subkey,
-            **running_params,
-            prior_config=prior_config,
-        )
+        # Posterior predictive checks
         rng_key, subkey = jax.random.split(rng_key)
         post_pred = infer.Predictive(kernel, self.sampler.get_samples())(
             subkey,

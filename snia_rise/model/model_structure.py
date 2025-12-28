@@ -1,19 +1,18 @@
-import numpy as np
-import numpyro
 import jax
 import jax.numpy as jnp
-from numpyro import distributions as dist
+import numpy as np
+import numpyro
 from numpy.typing import ArrayLike
-
+from numpyro import distributions as dist
 
 from .priors import (
-    sample_fcqf_params,
     sample_alpha_0,
     sample_alpha_1,
     sample_amp_prime,
-    sample_t_rise,
-    sample_t_fl,
+    sample_fcqf_params,
     sample_hierarchical_params,
+    sample_t_fl,
+    sample_t_rise,
 )
 
 ####################################################################################################

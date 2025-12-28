@@ -1,8 +1,7 @@
 """Helper functions for hierarchical Bayesian models of supernova light curves."""
 
-from random import sample
-import numpy as np
 import jax.numpy as jnp
+import numpy as np
 import numpyro
 import numpyro.distributions as dist
 

@@ -1,14 +1,14 @@
-from math import dist
-import os
 import glob
+import os
 import shutil
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import xarray as xr
 
-from pathlib import Path
-from ..model.lightcurve import SNLightCurveLib
 from .._utils._plt import plt
+from ..model.lightcurve import SNLightCurveLib
 
 
 class RedbackLightCurveLib(SNLightCurveLib):
@@ -109,25 +109,21 @@ class RedbackLightCurveLib(SNLightCurveLib):
         params_sigma: dict = None,
         model: str = "curved_power_law",
         min_dist_lum: float = 10,
-        max_dist_lum: float = 250,
+        max_dist_lum: float = 270,
         z_fixed: float = None,
     ) -> list[pd.DataFrame]:
         """
         Simulate light curves using Redback.
         """
-        import os
-        import pandas as pd
-        import astropy.units as u
-
-        from astropy.cosmology import FlatLambdaCDM, z_at_value
-        from scipy.optimize import brentq
-        from pathlib import Path
-        from redback.simulate_transients import SimulateOpticalTransient
-        from .._utils._plt import set_plot_style
-
-        from .sed import power_law_rise_flat_sed, broken_power_law_rise_flat_sed
-
         import logging
+        import os
+        from pathlib import Path
+
+        import pandas as pd
+        from scipy.optimize import brentq
+
+        from .._utils._plt import set_plot_style
+        from .sed import broken_power_law_rise_flat_sed, power_law_rise_flat_sed
 
         logging.getLogger("redback").setLevel(logging.WARNING)
 
@@ -138,7 +134,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         # Sample the population parameters using numpy.random
         num_tot = n_lc * 20  # oversample to account for non-detections
 
-        np.random.seed(n_lc * 114514)
+        np.random.seed(n_lc * 114514 + 1919810)
 
         if params_mean is None:
             params_mean = {}
@@ -156,13 +152,13 @@ class RedbackLightCurveLib(SNLightCurveLib):
             # This sets when each transient begins (in MJD)
             params_sim["t0_mjd_transient"] = np.full(num_tot, T0_MJD_TRANSIENT)
             params_sim["ra"] = np.random.uniform(0, 360, num_tot)
-            params_sim["dec"] = np.random.uniform(-30, 90, num_tot)
+            params_sim["dec"] = np.random.uniform(-20, 70, num_tot)
 
             # True hyper-parameters for the power-law rise model
             params_true = dict(
                 mean_alpha=params_mean.get("alpha", 2.0),
                 sigma_alpha=params_sigma.get("alpha", 0.3),
-                mean_t_rise=params_mean.get("t_rise", 18.0),
+                mean_t_rise=params_mean.get("t_rise", 18.5),
                 sigma_t_rise=params_sigma.get("t_rise", 1.5),
             )
 
@@ -350,7 +346,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
     def get_dist_lum_redshift(
         n: int,
         min_dist_lum: float = 10,
-        max_dist_lum: float = 250,
+        max_dist_lum: float = 270,
         z_fixed: float = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -531,11 +527,11 @@ class RedbackLightCurveLib(SNLightCurveLib):
         Simulate a single light curve using Pereira et al. (2013) SNIFS spectrophotometric time series.
         """
 
+        import glob
         import os
+
         import redback
         import sncosmo
-        import glob
-
         from astropy.cosmology import FlatLambdaCDM
 
         Z_11FE = 0.000804

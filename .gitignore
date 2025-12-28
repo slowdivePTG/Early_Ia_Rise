@@ -152,6 +152,12 @@ orcid-ID.png
 # vscode
 .vscode
 
+# configuration files
+pyrightconfig.json
+
+# ZED files
+.zed
+
 # jupyter notebooks (temporarily)
 *.ipynb
 
