@@ -365,7 +365,6 @@ class SNLightCurveLib(object):
         lc_peak_lib: list = None,
         ztfid_lib: list = None,
         t0_err: list = None,
-        post_sample: xr.Dataset = None,
         sampling_model: str = "hierarchical",
     ) -> None:
         self.lc_library: list[SNLightCurve] = []
@@ -442,9 +441,9 @@ class SNLightCurveLib(object):
         print("Light curves compiled...")
 
         self.inf_data = None
-        self.post_sample = post_sample
         self.model_structure = sampling_model
-        self.decode_post_sample(model_structure=sampling_model)
+        self.post_sample: xr.DataArray = None
+        self.prior_sample: xr.DataArray = None
 
     @staticmethod
     def decode_sample(sample: xr.DataArray) -> xr.DataArray:
@@ -508,7 +507,8 @@ class SNLightCurveLib(object):
             print("Inference data not yet available.")
             return
 
-        self.prior_sample = self.decode_sample(self.prior_sample)
+        prior_sample = self.decode_sample(self.prior_sample)
+        self.prior_sample = self.drop_nuisances(prior_sample)
 
     def decode_post_sample(self, model_structure: str = "hierarchical"):
         """
@@ -637,10 +637,8 @@ class SNLightCurveLib(object):
         num_chains: int = 2,
         random_seed: int = 11,
         sample_prior: bool = False,
-        prior_pred_samples: int = 500,
         prior_config: dict = {},
         nuts_params: dict = {},
-        model_structure: str = "hierarchical",
     ):
         """
         Perform MCMC sampling using NUTS algorithm.
@@ -663,14 +661,21 @@ class SNLightCurveLib(object):
             Dictionary containing the prior information for the model.
         nuts_params : dict, optional
             Dictionary containing the parameters for infer.NUTS.
-        model_structure : str, optional
-            Type of model to use for the MCMC sampling (default: "hierarchical").
-            Options: "pooled", "unpooled", "hierarchical"
 
         Returns
         -------
         None
         """
+
+        model_structure = self.model_structure
+
+        assert model_structure in [
+            "pooled",
+            "unpooled",
+            "hierarchical",
+            "hierarchical_trise",
+            "hierarchical_mvn",
+        ], f"Invalid model structure: {model_structure}"
 
         if model_structure == "pooled":
             print("Using pooled model for sampling...")
@@ -708,26 +713,25 @@ class SNLightCurveLib(object):
         rng_key = jax.random.PRNGKey(random_seed)
 
         print("Sampling from prior...")
-        prior_pred = infer.Predictive(kernel, num_samples=prior_pred_samples)(
+        prior_pred = infer.Predictive(kernel, num_samples=num_samples * num_chains)(
             rng_key,
             **running_params,
             prior_config=prior_config,
         )
-        prior_sample = az.from_numpyro(prior=prior_pred).prior
-        vars_to_remove = [
-            var
-            for var in [
-                "chol_corr",
-                "theta",
-                "alpha-",
-                "Corr",
-                "Sigma",
-                "t0_offset",
-                "Delta",
-            ]
-            if var in prior_sample
-        ]
-        self.prior_sample = prior_sample.drop_vars(vars_to_remove)
+
+        # Extract coordinate names and dimensions from the model
+        # Import here to avoid circular import with _utils
+        from .._utils import extract_coords_dims_from_model
+
+        coords, dims = extract_coords_dims_from_model(
+            kernel,
+            model_kwargs={**running_params, "prior_config": prior_config},
+            num_samples=1,
+        )
+
+        self.prior_sample = az.from_numpyro(
+            prior=prior_pred, coords=coords, dims=dims
+        ).prior
 
         if sample_prior:
             self.decode_prior_sample()
@@ -839,34 +843,41 @@ class SNLightCurveLib(object):
         # decode Corr, Variance matrices if present
         for matrix in ["Corr", "Sigma"]:
             if matrix in self.inf_data.posterior:
-                # n_filt = len(np.unique(self.idx_filt))
-                # for i in range(n_filt):
-                #     post_sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = (
-                #         self.inf_data.posterior[matrix][..., i + 1, 0]
-                #     )
-                #     for j in range(i + 1, n_filt):
-                #         post_sample[f"{matrix.lower()}_alpha_flt{i + 1}_flt{j + 1}"] = (
-                #             self.inf_data.posterior[matrix][..., i + 1, j + 1]
-                #         )
-                post_sample[f"{matrix.lower()}_t_rise_alpha"] = self.inf_data.posterior[
-                    matrix
-                ][..., 0, 1]
+                n_filt = len(np.unique(self.idx_filt))
+                for i in range(n_filt):
+                    post_sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = (
+                        self.inf_data.posterior[matrix][..., i + 1, 0]
+                    )
+                    for j in range(i + 1, n_filt):
+                        post_sample[f"{matrix.lower()}_alpha_flt{i + 1}_flt{j + 1}"] = (
+                            self.inf_data.posterior[matrix][..., i + 1, j + 1]
+                        )
+                # post_sample[f"{matrix.lower()}_t_rise_alpha"] = self.inf_data.posterior[
+                #     matrix
+                # ][..., 0, 1]
 
         # store the posterior samples
-        vars_to_remove = [
-            var
-            for var in [
-                "chol_corr",
-                "theta",
-                "alpha-",
-                "Corr",
-                "Sigma",
-                "t0_offset",
-                "Delta",
-            ]
-            if var in self.inf_data.posterior
+        self.post_sample = self.drop_nuisances(post_sample)
+
+    @staticmethod
+    def drop_nuisances(sample: xr.DataArray | None):
+        NUISANCES = [
+            "alpha-",
+            "chol_corr",
+            "theta",
+            "Corr",
+            "Sigma",
+            "t0_offset",
+            # "delta",
+            # "delta_raw",
+            # "alpha_0_cm",
+            # "mean_alpha_0_cm",
+            # "sigma_alpha_0_cm",
         ]
-        self.post_sample = post_sample.drop_vars(vars_to_remove)
+        if sample is not None:
+            vars_to_remove = [var for var in NUISANCES if var in sample]
+            sample = sample.drop_vars(vars_to_remove)
+        return sample
 
     def plot_corner(
         self,

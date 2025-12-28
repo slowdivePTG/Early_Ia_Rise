@@ -28,7 +28,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         file_dir = Path(f"./data/mock/{true_model}")
 
         peak_files = sorted(glob.glob(str(Path(file_dir) / "lc_peak*.csv")))
-        params_file = file_dir / f"simulated_lc_params.csv"
+        params_file = file_dir / "simulated_lc_params.csv"
 
         post_sample_dir = Path(file_dir) / f"{model}_frac{int(early_threshold * 100)}"
         if sampling_model in ["hierarchical_trise", "unpooled", "pooled"]:
@@ -38,6 +38,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
         post_sample_full_file = (
             post_sample_dir / f"post_sample_{sampling_model_str}_{n_lc}.nc"
         )
+
+        print(post_sample_full_file)
 
         if n_lc is None:
             n_lc = len(peak_files)
@@ -85,7 +87,6 @@ class RedbackLightCurveLib(SNLightCurveLib):
         super().__init__(
             lc_early_lib=lc_early_lib,
             lc_peak_lib=lc_peak_lib,
-            post_sample=post_sample,
             sampling_model=sampling_model,
         )
 
@@ -100,6 +101,16 @@ class RedbackLightCurveLib(SNLightCurveLib):
             mean_t_rise=r"$\mu_{t_\mathrm{rise}}$",
             sigma_t_rise=r"$\sigma_{t_\mathrm{rise}}$",
         )
+
+        if post_sample is not None:
+            self.post_sample = post_sample
+            self.decode_post_sample()
+
+            self.sampling(
+                sample_prior=True,
+                prior_config=dict(rise_model=model, prior_type=prior_type),
+            )
+            self.decode_prior_sample()
 
     @classmethod
     def simulate_mock_light_curve(
@@ -267,7 +278,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
             model if z_fixed is None else f"{model}_z_{z_fixed:.2f}".replace(".", "_")
         )
 
-        data_dir = Path(f"./data/mock") / model_dir
+        data_dir = Path("./data/mock") / model_dir
         if os.path.exists(data_dir):
             shutil.rmtree(data_dir)
         os.makedirs(data_dir, exist_ok=True)
@@ -335,7 +346,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         params_valid_det = pd.DataFrame(params_valid_det).reset_index(drop=True)
 
         params_valid_det.to_csv(
-            data_dir / f"simulated_lc_params.csv",
+            data_dir / "simulated_lc_params.csv",
             index=False,
         )
 
@@ -380,7 +391,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 ) ** (1 / (1 + alpha_lum))
             elif min_dist_lum == max_dist_lum:
                 print("Using fixed distance luminosity for all transients.")
-                dist_lum = np.full(num_tot, min_dist_lum)
+                dist_lum = np.full(n, min_dist_lum)
 
             # Compute redshift from distance luminosity
             z = np.array(

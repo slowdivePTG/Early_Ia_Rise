@@ -1,15 +1,15 @@
 import os
-import shutil
+from pathlib import Path
+
 import numpy as np
 import numpyro
 import xarray as xr
+from astropy.table import Table
+
+from snia_rise.ztf_lc import ZTFLib
 
 numpyro.set_host_device_count(4)
 numpyro.enable_x64()
-
-from pathlib import Path
-from astropy.table import Table
-from snia_rise.ztf_lc import ZTFLib
 
 if __name__ == "__main__":
     import argparse

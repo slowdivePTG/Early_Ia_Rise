@@ -121,11 +121,6 @@ def sample_alpha_1():
 
     Must be called within a numpyro.plate context.
 
-    Parameters
-    ----------
-    curved_power_law : bool
-        Whether to include curvature term
-
     Returns
     -------
     alpha_1 : array, shape ()
@@ -206,6 +201,91 @@ def sample_t_fl(n_obj: int, t_rise: jnp.ndarray, t0_err: jnp.ndarray):
 
 
 def _sample_mvn_hierarchical_params(
+    n_obj,
+    n_filt,
+    mean_t_rise,
+    sigma_t_rise,
+    mean_alpha_0,
+    sigma_alpha_0,
+    min_alpha_0,
+    max_alpha_0,
+    sample_correlations=True,
+):
+    """
+    Sample MVN hyperpriors and per-object parameters.
+
+    Parameters
+    ----------
+    n_obj : int
+        Number of objects
+    n_filt : int
+        Number of filters
+    mean_t_rise : float
+        Population mean for t_rise
+    sigma_t_rise : float
+        Population std for t_rise
+    mean_alpha_0 : float
+        Population mean for alpha_0 (assumed same for all filters)
+    sigma_alpha_0 : float
+        Population standard deviation for alpha_0 (assumed same for all filters)
+    min_alpha_0 : float
+        Minimum alpha value
+    max_alpha_0 : float
+        Maximum alpha value
+    sample_correlations : bool
+        If True, sample correlation matrix. If False, use identity (independent)
+
+    Returns
+    -------
+    t_rise : array, shape (n_obj,)
+    alpha_0 : array, shape (n_obj, n_filt)
+    """
+    # Dimension is t_rise (1) + alpha_0 for each filter (n_filt)
+    n_mvn_dim = 1 + n_filt
+
+    # Mean and scale vectors for MVN
+    # t_rise is index 0
+    # alpha_0 for filters are indices 1..n_filt
+    mu = jnp.concatenate([jnp.array([mean_t_rise]), jnp.full(n_filt, mean_alpha_0)])
+    sigma = jnp.concatenate(
+        [jnp.array([sigma_t_rise]), jnp.full(n_filt, sigma_alpha_0)]
+    )
+
+    # Sample or fix correlation structure
+    if sample_correlations:
+        chol_corr = numpyro.sample(
+            "chol_corr", dist.LKJCholesky(n_mvn_dim, concentration=1.0)
+        )
+    else:
+        chol_corr = jnp.eye(n_mvn_dim)
+
+    L_Cholesky = jnp.matmul(jnp.diag(sigma), chol_corr)
+
+    if sample_correlations:
+        # Store covariance and correlation for diagnostics
+        with numpyro.plate("mvn_dim_0", n_mvn_dim, dim=-2):
+            with numpyro.plate("mvn_dim_1", n_mvn_dim, dim=-1):
+                _ = numpyro.deterministic("Sigma", jnp.matmul(L_Cholesky, L_Cholesky.T))
+                _ = numpyro.deterministic("Corr", jnp.matmul(chol_corr, chol_corr.T))
+
+    with numpyro.plate("obj", n_obj):
+        # Sample (t_rise, alpha_0_1, alpha_0_2, ...) from MVN
+        theta = numpyro.sample(
+            "theta", dist.MultivariateNormal(loc=mu, scale_tril=L_Cholesky)
+        )
+        t_rise = numpyro.deterministic("t_rise", theta[..., 0])
+
+        # Extract alpha_0s (indices 1 to end) and clip
+        alpha_0_raw = theta[..., 1:]
+        alpha_0 = numpyro.deterministic(
+            "alpha_0",
+            jnp.clip(alpha_0_raw, min_alpha_0, max_alpha_0),
+        )
+
+    return t_rise, alpha_0
+
+
+def _sample_mvn_hierarchical_params_common_mode(
     n_obj,
     n_filt,
     mean_t_rise,

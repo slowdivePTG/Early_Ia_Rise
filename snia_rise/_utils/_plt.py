@@ -1,8 +1,12 @@
 # snia_rise/_utils/_plt.py
-import matplotlib.pyplot as plt
+from typing import TYPE_CHECKING, Callable, Optional
 
-from typing import Callable, Optional
+import matplotlib.pyplot as plt
 from numpy.typing import ArrayLike
+from pandas._libs.tslibs.offsets import BDay
+
+if TYPE_CHECKING:
+    from ..model.lightcurve import SNLightCurveLib
 
 
 def set_plot_style():
@@ -26,6 +30,9 @@ def set_plot_style():
             "ytick.minor.size": 3,
         }
     )
+
+
+set_plot_style()
 
 
 def show_and_save(f: Callable) -> Callable:
@@ -99,4 +106,54 @@ def plot_box_spec(
     return ax
 
 
-set_plot_style()
+def show_kde_posterior(
+    lib: "SNLightCurveLib",
+    param: str,
+    ax: plt.Axes,
+    range=None,
+    show_prior=False,
+    **kwargs,
+):
+    import numpy as np
+    import seaborn as sns
+    from astropy.stats import mad_std
+
+    prior_sample = lib.prior_sample.copy()
+    post_sample = lib.post_sample.copy()
+
+    for sample in [prior_sample, post_sample]:
+        if sample is None:
+            return
+        sample["mean_alpha_flt1"] = sample["mean_alpha_0"][..., 0]
+        sample["mean_alpha_flt2"] = sample["mean_alpha_0"][..., 1]
+        sample["sigma_alpha_flt1"] = sample["sigma_alpha_0"][..., 0]
+        sample["sigma_alpha_flt2"] = sample["sigma_alpha_0"][..., 1]
+
+    # Flatten the xarray DataArray to 1D array for seaborn
+    param_post = post_sample[param].values.flatten()
+    param_prior = prior_sample[param].values.flatten()
+
+    if range is not None:
+        param_post = param_post[(param_post >= range[0]) & (param_post <= range[1])]
+        param_prior = param_prior[(param_prior >= range[0]) & (param_prior <= range[1])]
+
+    bw_adjust = kwargs.pop("bw_adjust", None)
+    if bw_adjust is None:
+        bw_adjust = (np.percentile(param_post, 95) - np.percentile(param_post, 5)) * 2
+    params = dict(fill=True, alpha=0.25, lw=2, **kwargs)
+    params_prior = dict(color="0.5", alpha=0.5, lw=1, linestyle="--")
+
+    if show_prior:
+        # sns.kdeplot(x=param_prior, ax=ax, bw_adjust=bw_adjust, **params_prior)
+        # histtype is not a valid argument for seaborn.histplot; use element="step" instead
+        sns.histplot(
+            x=param_prior,
+            ax=ax,
+            stat="density",
+            bins=30,
+            element="step",
+            **params_prior,
+        )
+
+    sns.kdeplot(x=param_post, ax=ax, bw_adjust=bw_adjust, **params)
+    ax.set_xlim(range)

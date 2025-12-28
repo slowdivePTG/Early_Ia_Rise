@@ -1,13 +1,13 @@
 import os
+from pathlib import Path
+
 import numpyro
 import xarray as xr
 
+from snia_rise.simulate.mock_lc import RedbackLightCurveLib
+
 numpyro.set_host_device_count(4)
 numpyro.enable_x64()
-
-from pathlib import Path
-
-from snia_rise.simulate.mock_lc import RedbackLightCurveLib
 
 if __name__ == "__main__":
     import argparse
@@ -98,7 +98,9 @@ if __name__ == "__main__":
         true_model = model if args.true_model is None else args.true_model
 
         true_model = (
-            true_model if args.z_fixed is None else f"{true_model}_z_{args.z_fixed:.2f}".replace(".", "_")
+            true_model
+            if args.z_fixed is None
+            else f"{true_model}_z_{args.z_fixed:.2f}".replace(".", "_")
         )
 
         lib = RedbackLightCurveLib(
@@ -106,6 +108,8 @@ if __name__ == "__main__":
             early_threshold=early_threshold,
             model=model,
             true_model=true_model,
+            sampling_model=args.sampling_model,
+            prior_type=args.prior_type.lower(),
         )
 
         result_dir = Path(
@@ -122,7 +126,6 @@ if __name__ == "__main__":
             num_warmup=args.num_warmup,
             num_samples=args.num_samples,
             num_chains=args.num_chains,
-            model_structure=args.sampling_model,
         )
 
         # Save the posterior for the hierarchical model

@@ -153,12 +153,11 @@ def hierarchical_model(
             "mvn", "independent", or "tfl_only"
         - prior_type : str, default="Maximum_Entropy"
             For "independent" mode: type of prior for alpha_0
-        - curved_power_law : bool, default=False
+        - rise_model : str, choices=["power_law", "curved_power_law"]
         - mean_alpha_0 :  float, default=2 (tfl_only)
         - sigma_alpha_0 :  float or None, default=None (tfl_only)
         - min_alpha_0 :  float, default=1
         - max_alpha_0 :  float, default=5
-        - curved_power_law : bool, default=False
     """
     # Setup
     correlation_structure = prior_config.get("correlation_structure", "mvn")
@@ -185,8 +184,8 @@ def hierarchical_model(
 
     # Non-hierarchical parameters
     # alpha_1, amp: shape (n_obj, n_filt)
-    curved_power_law = prior_config.get("curved_power_law", False)
-    if curved_power_law:
+    rise_model = prior_config.get("rise_model", "power_law")
+    if rise_model == "curved_power_law":
         with numpyro.plate("filt", n_filt, dim=-1):
             with numpyro.plate("obj", n_obj, dim=-2):
                 alpha_1 = sample_alpha_1()
@@ -266,8 +265,8 @@ def unpooled_model(
             amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
 
     # alpha_1: shape (n_obj, n_filt)
-    curved_power_law = prior_config.get("curved_power_law", False)
-    if curved_power_law:
+    rise_model = prior_config.get("rise_model", "power_law")
+    if rise_model == "curved_power_law":
         with numpyro.plate("filt", n_filt, dim=-1):
             with numpyro.plate("obj", n_obj, dim=-2):
                 alpha_1 = sample_alpha_1()
@@ -347,8 +346,8 @@ def pooled_model(
             amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
 
     # alpha_1: shape (n_filt,)
-    curved_power_law = prior_config.get("curved_power_law", False)
-    if curved_power_law:
+    rise_model = prior_config.get("rise_model", "power_law")
+    if rise_model == "curved_power_law":
         with numpyro.plate("filt", n_filt, dim=-1):
             alpha_1 = sample_alpha_1()
     else:

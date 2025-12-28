@@ -1,13 +1,12 @@
 import glob
+
 import numpy as np
 import pandas as pd
 import xarray as xr
-
 from astropy.table import Table
-from .model.lightcurve import SNLightCurve, SNLightCurveLib
-from ._utils import data_binning
 
-from numpy.typing import ArrayLike
+from ._utils import data_binning
+from .model.lightcurve import SNLightCurve, SNLightCurveLib
 
 
 class ZTFDataProcessor:
@@ -502,7 +501,7 @@ class ZTFLib(SNLightCurveLib):
         rise_model : str
             Rise model: "power_law" or "curved_power_law".
         sampling_model : str
-            Sampling model: "pooled", "unpooled", "hierarchical", "hierarchical_tfl", or "hierarchical_mvn".
+            Sampling model: "pooled", "unpooled", "hierarchical", "hierarchical_trise", or "hierarchical_mvn".
 
         Returns
         -------
@@ -566,7 +565,17 @@ class ZTFLib(SNLightCurveLib):
             lc_early_lib=lc_early_lib,
             lc_peak_lib=lc_peak_lib,
             ztfid_lib=ztfid_lib_processed,
-            post_sample=post_sample,
             t0_err=t0_err_lib,
+            sampling_model=sampling_model,
             **kwargs,
         )
+
+        if post_sample is not None:
+            self.post_sample = post_sample
+            self.decode_post_sample()
+
+            self.sampling(
+                sample_prior=True,
+                prior_config=dict(rise_model=rise_model),
+            )
+            self.decode_prior_sample()
