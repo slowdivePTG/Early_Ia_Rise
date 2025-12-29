@@ -512,7 +512,7 @@ class ZTFLib(SNLightCurveLib):
         from pathlib import Path
 
         if ztfid_lib is None or source is None:
-            super().__init__()
+            super().__init__(sampling_model=sampling_model)
             return
 
         lc_early_lib = []

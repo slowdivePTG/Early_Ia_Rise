@@ -369,6 +369,7 @@ class SNLightCurveLib(object):
     ) -> None:
         self.lc_library: list[SNLightCurve] = []
         self.ztfid_lib: list = ztfid_lib if ztfid_lib is not None else []
+        self.model_structure = sampling_model
 
         self.phase, self.flux, self.flux_err = [], [], []
         self.idx_filt = np.array([], dtype=int)
@@ -441,7 +442,6 @@ class SNLightCurveLib(object):
         print("Light curves compiled...")
 
         self.inf_data = None
-        self.model_structure = sampling_model
         self.post_sample: xr.DataArray = None
         self.prior_sample: xr.DataArray = None
 

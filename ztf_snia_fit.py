@@ -83,7 +83,7 @@ if __name__ == "__main__":
     dr_dir = None
 
     for early_threshold in args.early_threshold:
-        ztflib = ZTFLib()
+        ztflib = ZTFLib(rise_model=args.model, sampling_model=args.sampling_model)
 
         print(f"Processing DRs: {drs} with early threshold: {early_threshold}")
         print(
@@ -160,8 +160,6 @@ if __name__ == "__main__":
             num_chains=args.num_chains,
             nuts_params=dict(max_tree_depth=12),
             random_seed=114514,
-            prior_config={"curved_power_law": args.model == "curved_power_law"},
-            model_structure=args.sampling_model,
         )
 
         # Save the posterior for the hierarchical model
