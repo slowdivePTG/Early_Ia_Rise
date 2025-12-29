@@ -246,10 +246,8 @@ def _sample_mvn_hierarchical_params(
     # Mean and scale vectors for MVN
     # t_rise is index 0
     # alpha_0 for filters are indices 1..n_filt
-    mu = jnp.concatenate([jnp.array([mean_t_rise]), jnp.full(n_filt, mean_alpha_0)])
-    sigma = jnp.concatenate(
-        [jnp.array([sigma_t_rise]), jnp.full(n_filt, sigma_alpha_0)]
-    )
+    mu = jnp.concatenate([jnp.array([mean_t_rise]), mean_alpha_0])
+    sigma = jnp.concatenate([jnp.array([sigma_t_rise]), sigma_alpha_0])
 
     # Sample or fix correlation structure
     if sample_correlations:
@@ -465,10 +463,11 @@ def sample_hierarchical_params(
         # "mean_alpha_0_cm", dist.Uniform(min_alpha_0, max_alpha_0)
         # )
         # sigma_alpha_0 = numpyro.sample("sigma_alpha_0_cm", dist.HalfCauchy(0.3))
-        mean_alpha_0 = numpyro.sample(
-            "mean_alpha_0", dist.Uniform(min_alpha_0, max_alpha_0)
-        )
-        sigma_alpha_0 = numpyro.sample("sigma_alpha_0", dist.HalfCauchy(0.3))
+        with numpyro.plate("filt", n_filt):
+            mean_alpha_0 = numpyro.sample(
+                "mean_alpha_0", dist.Uniform(min_alpha_0, max_alpha_0)
+            )
+            sigma_alpha_0 = numpyro.sample("sigma_alpha_0", dist.HalfCauchy(0.3))
 
         if correlation_structure == "mvn":
             # Full MVN with correlations
