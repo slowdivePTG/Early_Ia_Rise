@@ -570,10 +570,10 @@ class ZTFLib(SNLightCurveLib):
             **kwargs,
         )
 
-        if post_sample is not None:
-            self.post_sample = post_sample
-            self.decode_post_sample()
+        self.post_sample = post_sample
+        self.decode_post_sample()
 
+        if self.post_sample is not None:
             self.sampling(
                 sample_prior=True,
                 prior_config=dict(rise_model=rise_model),

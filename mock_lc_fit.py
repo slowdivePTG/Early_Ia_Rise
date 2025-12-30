@@ -75,14 +75,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_warmup",
         type=int,
-        default=3000,
-        help="Number of warmup steps (default: 3000)",
+        default=2000,
+        help="Number of warmup steps (default: 2000)",
     )
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=1000,
-        help="Number of samples (default: 1000)",
+        default=2000,
+        help="Number of samples (default: 2000)",
     )
     parser.add_argument(
         "--num_chains",

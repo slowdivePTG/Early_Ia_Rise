@@ -20,6 +20,7 @@ dependencies = [
   "astropy>=7.1.0",
   "redback>=1.12.1",
   "statsmodels>=0.14.6",
+  "graphviz>=0.21",
 ]
 
 [dependency-groups]

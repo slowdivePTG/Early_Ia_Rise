@@ -731,11 +731,42 @@ class SNLightCurveLib(object):
 
         self.prior_sample = az.from_numpyro(
             prior=prior_pred, coords=coords, dims=dims
-        ).prior
+        ).prior.astype("float32")
 
         if sample_prior:
             self.decode_prior_sample()
             return
+
+        if "hierarchical" in model_structure:
+            print("\nSimulated annealing warmup...")
+            num_sa = num_warmup // 4
+            rng_key, subkey = jax.random.split(rng_key)
+            sampler_sa = infer.MCMC(
+                infer.SA(
+                    kernel,
+                    init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
+                    adapt_state_size=num_chains,
+                ),
+                num_warmup=0,
+                num_samples=num_sa,
+                num_chains=num_chains,
+            )
+            sampler_sa.run(
+                subkey,
+                **running_params,
+                prior_config=prior_config,
+            )
+
+            # Use mean of last 10% of samples to initialize main sampling
+            samples_sa = sampler_sa.get_samples()
+            last_n = max(1, len(list(samples_sa.values())[0]) // 10)
+            init_values_sa = {
+                k: jnp.mean(v[-last_n:], axis=0) for k, v in samples_sa.items()
+            }
+            init_strategy_warmup = infer.init_to_value(values=init_values_sa)
+        else:
+            num_sa = 0
+            init_strategy_warmup = init_to_median_with_alpha0(alpha_0_init=2.0)
 
         # Warmup without t0_err
         if self.t0_err is not None:
@@ -747,7 +778,7 @@ class SNLightCurveLib(object):
             sampler_no_to_err = infer.MCMC(
                 infer.NUTS(
                     kernel,
-                    init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
+                    init_strategy=init_strategy_warmup,
                     target_accept_prob=0.8,
                     **nuts_params,
                 ),
@@ -768,41 +799,10 @@ class SNLightCurveLib(object):
                 k: jnp.mean(v[-last_n:], axis=0) for k, v in samples_warmup.items()
             }
 
-            init_strategy_sa = infer.init_to_value(values=init_values_no_t0)
+            init_strategy_main = infer.init_to_value(values=init_values_no_t0)
 
         else:
-            init_strategy_sa = init_to_median_with_alpha0(alpha_0_init=2.0)
-
-        if "hierarchical" in model_structure:
-            print("\nSimulated annealing warmup...")
-            num_sa = num_warmup // 4
-            rng_key, subkey = jax.random.split(rng_key)
-            sampler_sa = infer.MCMC(
-                infer.SA(
-                    kernel,
-                    init_strategy=init_strategy_sa,
-                    adapt_state_size=num_chains,
-                ),
-                num_warmup=0,
-                num_samples=num_sa,
-                num_chains=num_chains,
-            )
-            sampler_sa.run(
-                subkey,
-                **running_params,
-                prior_config=prior_config,
-            )
-
-            # Use mean of last 10% of samples to initialize main sampling
-            samples_sa = sampler_sa.get_samples()
-            last_n = max(1, len(list(samples_sa.values())[0]) // 10)
-            init_values_sa = {
-                k: jnp.mean(v[-last_n:], axis=0) for k, v in samples_sa.items()
-            }
-            init_strategy_main = infer.init_to_value(values=init_values_sa)
-        else:
-            num_sa = 0
-            init_strategy_main = init_strategy_sa
+            init_strategy_main = init_strategy_warmup
 
         print("\nMain sampling...")
         rng_key, subkey = jax.random.split(rng_key)
@@ -838,7 +838,7 @@ class SNLightCurveLib(object):
         )
 
         # process the posterior samples
-        post_sample = self.inf_data.posterior
+        post_sample = self.inf_data.posterior.astype("float32")
 
         # decode Corr, Variance matrices if present
         for matrix in ["Corr", "Sigma"]:

@@ -39,8 +39,6 @@ class RedbackLightCurveLib(SNLightCurveLib):
             post_sample_dir / f"post_sample_{sampling_model_str}_{n_lc}.nc"
         )
 
-        print(post_sample_full_file)
-
         if n_lc is None:
             n_lc = len(peak_files)
         else:
@@ -91,24 +89,14 @@ class RedbackLightCurveLib(SNLightCurveLib):
         )
 
         self.params_true = params_true
-        self.params_names = dict(
-            t_rise=r"$t_\mathrm{rise}$",
-            base=r"$C$",
-            amp=r"$A$",
-            alpha_0=r"$\alpha$",
-            mean_alpha_0=r"$\mu_\alpha$",
-            sigma_alpha_0=r"$\sigma_\alpha$",
-            mean_t_rise=r"$\mu_{t_\mathrm{rise}}$",
-            sigma_t_rise=r"$\sigma_{t_\mathrm{rise}}$",
-        )
 
-        if post_sample is not None:
-            self.post_sample = post_sample
-            self.decode_post_sample()
+        self.post_sample = post_sample
+        self.decode_post_sample()
 
+        if self.post_sample is not None:
             self.sampling(
                 sample_prior=True,
-                prior_config=dict(rise_model=model, prior_type=prior_type),
+                prior_config=dict(rise_model=model),
             )
             self.decode_prior_sample()
 
