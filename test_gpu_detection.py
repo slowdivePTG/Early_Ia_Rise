@@ -33,9 +33,10 @@ def test_gpu_detection():
         print(f"✓ Available JAX backends: {available}")
 
         # Check for GPU devices
-        if "gpu" in available:
+        if "gpu" in available or "cuda" in available:
+            gpu_kind = "cuda" if "cuda" in available else "gpu"
             try:
-                gpu_devices = jax.devices("gpu")
+                gpu_devices = jax.devices(gpu_kind)
                 print(f"✓ GPU devices found: {len(gpu_devices)}")
                 for i, device in enumerate(gpu_devices):
                     print(f"  - Device {i}: {device}")
@@ -56,8 +57,6 @@ def test_gpu_detection():
     # Test 2: Test platform auto-detection
     print("\nTest 2: Testing auto-detection with prefer_gpu=True...")
     try:
-        import numpyro
-
         from snia_rise._utils import set_best_platform
 
         platform = set_best_platform(prefer_gpu=True)
@@ -135,7 +134,7 @@ def test_gpu_detection():
     print("SUMMARY")
     print("=" * 70)
     print(f"Platform: {platform}")
-    print(f"GPU available: {'gpu' in available}")
+    print(f"GPU available: {'gpu' in available or 'cuda' in available}")
     if "gpu" in available:
         print("  ✓ NVIDIA GPU detected - cluster deployment ready!")
         print("  ✓ Supports float64 (x64) precision (always enabled)")
