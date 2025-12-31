@@ -9,6 +9,9 @@ from astropy.table import Table
 from snia_rise._utils import set_best_platform
 from snia_rise.ztf_lc import ZTFLib
 
+numpyro.set_host_device_count(4)
+numpyro.enable_x64()
+
 if __name__ == "__main__":
     import argparse
 
@@ -99,10 +102,6 @@ if __name__ == "__main__":
     if args.num_host_devices:
         numpyro.set_host_device_count(args.num_host_devices)
         print(f"Set host device count: {args.num_host_devices}")
-
-    # Always enable x64 (required for NUTS sampling)
-    numpyro.enable_x64()
-    print("Enabled x64 (float64) precision")
 
     # Set platform based on auto-detection or user preference
     if args.platform == "auto":
