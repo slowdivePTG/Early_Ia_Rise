@@ -135,7 +135,7 @@ def test_gpu_detection():
     print("=" * 70)
     print(f"Platform: {platform}")
     print(f"GPU available: {'gpu' in available or 'cuda' in available}")
-    if "gpu" in available:
+    if "gpu" in available or "cuda" in available:
         print("  ✓ NVIDIA GPU detected - cluster deployment ready!")
         print("  ✓ Supports float64 (x64) precision (always enabled)")
         print("  ✓ Recommended: Use --platform auto (default)")

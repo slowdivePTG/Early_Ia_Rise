@@ -131,7 +131,7 @@ def get_recommended_chain_method(platform=None, num_chains=4):
     platform = platform.upper()
 
     # GPU/TPU platforms: use vectorized
-    if platform in ["GPU", "TPU"]:
+    if platform in ["GPU", "TPU", "CUDA"]:
         return "vectorized"
 
     # CPU: decide between vectorized and sequential based on available cores
