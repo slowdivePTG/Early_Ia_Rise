@@ -75,7 +75,7 @@ def sample_alpha_0(
     if min_alpha_0 is None:
         min_alpha_0 = prior_config.get("min_alpha_0", 1)
     if max_alpha_0 is None:
-        max_alpha_0 = prior_config.get("max_alpha_0", 5)
+        max_alpha_0 = prior_config.get("max_alpha_0", 3)
     assert min_alpha_0 >= 0, "min_alpha_0 must be non-negative"
 
     if prior_type == "miller":

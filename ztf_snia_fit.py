@@ -6,10 +6,8 @@ import numpyro
 import xarray as xr
 from astropy.table import Table
 
+from snia_rise._utils import set_best_platform
 from snia_rise.ztf_lc import ZTFLib
-
-numpyro.set_host_device_count(4)
-numpyro.enable_x64()
 
 if __name__ == "__main__":
     import argparse
@@ -21,6 +19,18 @@ if __name__ == "__main__":
         type=str,
         default=["dr2"],
         help="data release to use (default: dr2; options: dr2, edr, early_late)",
+    )
+    parser.add_argument(
+        "--platform",
+        choices=["cpu", "gpu", "auto"],
+        default="auto",
+        help="JAX platform to use (default: auto - detects NVIDIA GPU if available)",
+    )
+    parser.add_argument(
+        "--num-host-devices",
+        type=int,
+        default=None,
+        help="Number of CPU devices for parallel chains (e.g., 4)",
     )
     parser.add_argument(
         "--volume-complete",
@@ -80,12 +90,42 @@ if __name__ == "__main__":
     args = parser.parse_args()
     drs = [dr.lower() for dr in args.dr]
 
+    # Configure JAX/NumPyro platform
+    print("\n" + "=" * 70)
+    print("PLATFORM CONFIGURATION")
+    print("=" * 70)
+
+    # Set host device count if specified (must be before platform selection)
+    if args.num_host_devices:
+        numpyro.set_host_device_count(args.num_host_devices)
+        print(f"Set host device count: {args.num_host_devices}")
+
+    # Always enable x64 (required for NUTS sampling)
+    numpyro.enable_x64()
+    print("Enabled x64 (float64) precision")
+
+    # Set platform based on auto-detection or user preference
+    if args.platform == "auto":
+        # Auto-detect: prefer GPU (NVIDIA CUDA) if available
+        platform = set_best_platform(prefer_gpu=True)
+    elif args.platform == "cpu":
+        platform = set_best_platform(prefer_gpu=False)
+    elif args.platform == "gpu":
+        # Force GPU (will use it if available, otherwise fall back to CPU)
+        platform = set_best_platform(prefer_gpu=True)
+    else:
+        platform = set_best_platform(prefer_gpu=True)
+
+    print(f"Using platform: {platform}")
+    print("Precision: float64 (x64 mode)")
+    print("=" * 70 + "\n")
+
     dr_dir = None
 
     for early_threshold in args.early_threshold:
         ztflib = ZTFLib(rise_model=args.model, sampling_model=args.sampling_model)
 
-        print(f"Processing DRs: {drs} with early threshold: {early_threshold}")
+        print(f"\nProcessing DRs: {drs} with early threshold: {early_threshold}")
         print(
             f"Volume-complete: {args.volume_complete}, Early-coverage: {args.early_coverage}"
         )
@@ -160,6 +200,7 @@ if __name__ == "__main__":
             num_chains=args.num_chains,
             nuts_params=dict(max_tree_depth=12),
             random_seed=114514,
+            prior_config=dict(rise_model=args.model),
         )
 
         # Save the posterior for the hierarchical model

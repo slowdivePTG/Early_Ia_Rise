@@ -379,7 +379,7 @@ class SNLightCurveLib(object):
         if lc_early_lib is None:
             return
 
-        self.t0_err = jnp.array(t0_err, dtype=float) if t0_err is not None else None
+        self.t0_err = np.array(t0_err, dtype=float) if t0_err is not None else None
         if t0_err is None:
             t0_err = [None] * len(lc_early_lib)
 
@@ -739,6 +739,8 @@ class SNLightCurveLib(object):
 
         if "hierarchical" in model_structure:
             print("\nSimulated annealing warmup...")
+            running_params_sa = running_params.copy()
+            running_params_sa["t0_err"] = None
             num_sa = num_warmup // 4
             rng_key, subkey = jax.random.split(rng_key)
             sampler_sa = infer.MCMC(
@@ -757,18 +759,18 @@ class SNLightCurveLib(object):
                 prior_config=prior_config,
             )
 
-            # Use mean of last 10% of samples to initialize main sampling
+            # Use mean of the last 10% of samples to initialize the NUTS warmup
             samples_sa = sampler_sa.get_samples()
             last_n = max(1, len(list(samples_sa.values())[0]) // 10)
-            init_values_sa = {
+            init_values_warmup = {
                 k: jnp.mean(v[-last_n:], axis=0) for k, v in samples_sa.items()
             }
-            init_strategy_warmup = infer.init_to_value(values=init_values_sa)
+            init_strategy_warmup = infer.init_to_value(values=init_values_warmup)
+
         else:
-            num_sa = 0
             init_strategy_warmup = init_to_median_with_alpha0(alpha_0_init=2.0)
 
-        # Warmup without t0_err
+        # Warmup without t0_err (if needed)
         if self.t0_err is not None:
             print("\nWarmup without t0_err...")
             running_params_no_to_err = running_params.copy()
@@ -792,15 +794,10 @@ class SNLightCurveLib(object):
                 prior_config=prior_config,
             )
 
-            # Use mean of the last 10% of samples to initialize simulated annealing
+            # Use the last sample to initialize the main sampler
             samples_warmup = sampler_no_to_err.get_samples()
-            last_n = max(1, len(list(samples_warmup.values())[0]) // 10)
-            init_values_no_t0 = {
-                k: jnp.mean(v[-last_n:], axis=0) for k, v in samples_warmup.items()
-            }
-
+            init_values_no_t0 = {k: v[-1] for k, v in samples_warmup.items()}
             init_strategy_main = infer.init_to_value(values=init_values_no_t0)
-
         else:
             init_strategy_main = init_strategy_warmup
 

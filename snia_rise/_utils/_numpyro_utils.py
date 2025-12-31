@@ -1,8 +1,151 @@
 """Utility functions for working with NumPyro models and ArviZ."""
 
+import warnings
+
 import jax.random as random
 import numpyro
 from numpyro import handlers
+
+
+def set_best_platform(prefer_gpu=True):
+    """
+    Automatically detect and set the best available JAX/NumPyro platform.
+
+    This function checks available platforms and sets the best one:
+    - On Linux/Windows with NVIDIA GPU: gpu (CUDA)
+    - Fallback: cpu
+
+    Parameters
+    ----------
+    prefer_gpu : bool, optional
+        If True (default), prefer GPU/accelerator platforms over CPU.
+        If False, use CPU even if GPU is available.
+
+    Returns
+    -------
+    str
+        The platform that was set.
+
+    Notes
+    -----
+    - NVIDIA GPUs (CUDA) fully support float64 operations.
+    - On systems without NVIDIA GPUs, CPU will be used.
+
+    Examples
+    --------
+    >>> from snia_rise._utils import set_best_platform
+    >>> platform = set_best_platform()
+    >>> print(f"Using platform: {platform}")
+    """
+    import jax
+
+    # Get available platforms
+    try:
+        from jax.extend import backend
+
+        backends = backend.backends()
+    except (ImportError, AttributeError):
+        # Fallback for older JAX versions
+        try:
+            backends = jax.lib.xla_bridge.backends()
+        except AttributeError:
+            # Very old JAX version
+            backends = {"cpu": None}
+
+    available = list(backends.keys())
+
+    # Determine platform: prioritize NVIDIA GPU
+    if not prefer_gpu or len(available) == 1:
+        platform = "cpu"
+    else:
+        # Priority: gpu (NVIDIA CUDA) > tpu > cpu
+        if "gpu" in available:
+            platform = "gpu"
+            # Check if it's actually CUDA (NVIDIA)
+            try:
+                devices = jax.devices("gpu")
+                if devices:
+                    device_kind = devices[0].device_kind
+                    print(f"Detected GPU: {device_kind}")
+            except Exception:
+                pass
+        elif "tpu" in available:
+            platform = "tpu"
+        else:
+            platform = "cpu"
+
+    print(f"Available platforms: {available}")
+    print(f"Setting platform to: {platform}")
+    numpyro.set_platform(platform)
+
+    return platform
+
+
+def get_recommended_chain_method(platform=None, num_chains=4):
+    """
+    Get the recommended chain_method for MCMC based on the platform.
+
+    Different platforms have different optimal strategies for running multiple chains:
+    - GPU/TPU: "parallel" - runs chains in parallel on the accelerator
+    - CPU with many cores: "vectorized" - vectorizes across chains for efficiency
+    - CPU with few cores: "sequential" - runs chains one after another
+
+    Parameters
+    ----------
+    platform : str, optional
+        The platform being used. If None, will auto-detect from JAX.
+        Options: "gpu", "METAL", "tpu", "cpu"
+    num_chains : int, optional
+        Number of chains to run (default: 4). Used to determine if vectorization
+        is beneficial.
+
+    Returns
+    -------
+    str
+        Recommended chain_method: "parallel", "vectorized", or "sequential"
+
+    Examples
+    --------
+    >>> from snia_rise._utils import get_recommended_chain_method
+    >>> chain_method = get_recommended_chain_method()
+    >>> print(f"Using chain_method: {chain_method}")
+    """
+    import os
+
+    import jax
+
+    # Auto-detect platform if not provided
+    if platform is None:
+        try:
+            from jax.extend import backend
+
+            current_backend = backend.get_backend()
+            platform = current_backend.platform
+        except (ImportError, AttributeError):
+            try:
+                current_backend = jax.lib.xla_bridge.get_backend()
+                platform = current_backend.platform
+            except AttributeError:
+                platform = "cpu"
+
+    platform = platform.upper()
+
+    # GPU/TPU platforms: use parallel
+    if platform in ["GPU", "TPU"]:
+        return "parallel"
+
+    # CPU: decide between vectorized and sequential based on available cores
+    # and number of chains
+    cpu_count = os.cpu_count() or 4
+
+    # If we have enough cores and multiple chains, vectorized is often faster
+    if num_chains <= cpu_count and num_chains > 1:
+        return "vectorized"
+    elif num_chains == 1:
+        return "sequential"
+    else:
+        # More chains than cores - sequential might be better to avoid overhead
+        return "sequential"
 
 
 def extract_coords_dims_from_model(

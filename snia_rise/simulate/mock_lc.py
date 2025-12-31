@@ -96,7 +96,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         if self.post_sample is not None:
             self.sampling(
                 sample_prior=True,
-                prior_config=dict(rise_model=model),
+                prior_config=dict(rise_model=model, prior_type=prior_type),
             )
             self.decode_prior_sample()
 

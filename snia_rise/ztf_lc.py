@@ -67,7 +67,7 @@ class ZTFDataProcessor:
         """Create early and peak light curve dictionaries."""
         # Filter out observations < 40% of max flux
         idx_i = filt == 3
-        idx_rise = (phase < 5) & (phase > -100) & ~idx_i
+        idx_rise = (phase < 0) & (phase > -50) & ~idx_i
         idx_g = (filt == filtids[0]) & (phase < t_g_early)
         idx_r = (filt == filtids[1]) & (phase < t_r_early)
         idx = idx_rise & (idx_g | idx_r)

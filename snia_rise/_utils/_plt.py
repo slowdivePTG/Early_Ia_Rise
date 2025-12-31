@@ -109,14 +109,13 @@ def plot_box_spec(
 def show_kde_posterior(
     lib: "SNLightCurveLib",
     param: str,
-    ax: plt.Axes,
+    ax: plt.Axes | list[plt.Axes],
     range=None,
     show_prior=False,
     **kwargs,
 ):
     import numpy as np
     import seaborn as sns
-    from astropy.stats import mad_std
 
     prior_sample = lib.prior_sample.copy()
     post_sample = lib.post_sample.copy()
@@ -141,19 +140,19 @@ def show_kde_posterior(
     if bw_adjust is None:
         bw_adjust = (np.percentile(param_post, 95) - np.percentile(param_post, 5)) * 2
     params = dict(fill=True, alpha=0.25, lw=2, **kwargs)
-    params_prior = dict(color="0.5", alpha=0.5, lw=1, linestyle="--")
+    params_prior = dict(
+        alpha=0.25, lw=2, linestyle="--", color=kwargs.get("color", "0.5")
+    )
 
-    if show_prior:
-        # sns.kdeplot(x=param_prior, ax=ax, bw_adjust=bw_adjust, **params_prior)
-        # histtype is not a valid argument for seaborn.histplot; use element="step" instead
-        sns.histplot(
-            x=param_prior,
-            ax=ax,
-            stat="density",
-            bins=30,
-            element="step",
-            **params_prior,
-        )
+    sns.kdeplot(x=param_prior, ax=ax, bw_adjust=bw_adjust, **params_prior)
+    # sns.histplot(
+    #     x=param_prior,
+    #     ax=ax,
+    #     stat="density",
+    #     bins=30,
+    #     element="step",
+    #     **params_prior,
+    # )
 
     sns.kdeplot(x=param_post, ax=ax, bw_adjust=bw_adjust, **params)
     ax.set_xlim(range)

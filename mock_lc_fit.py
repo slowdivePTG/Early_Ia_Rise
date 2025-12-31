@@ -120,7 +120,7 @@ if __name__ == "__main__":
         # Sampling
         lib.sampling(
             prior_config={
-                "curved_power_law": args.model == "curved_power_law",
+                "rise_model": model,
                 "prior_type": args.prior_type.lower(),
             },
             num_warmup=args.num_warmup,
