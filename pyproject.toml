@@ -5,16 +5,13 @@ description = "Hierarchical Bayesian Modeling of Early-time SNe Ia Light Curves"
 authors = [
   { name = "slowdivePTG" }
 ]
-requires-python = ">=3.12"
+requires-python = "==3.11.*"
 
 dependencies = [
   "numpy",
-  "matplotlib",
   "seaborn",
-  "numpyro",
-  "jax==0.4.35",
-  "jaxlib==0.4.35",
-  "jax-cuda12-plugin==0.4.35 ; sys_platform == 'linux'",
+  "jax==0.5.2",
+  "numpyro>=0.15,<0.17",
   "arviz",
   "corner",
   "xarray",
@@ -23,6 +20,11 @@ dependencies = [
   "redback>=1.12.1",
   "statsmodels>=0.14.6",
   "graphviz>=0.21",
+]
+
+[project.optional-dependencies]
+cuda = [
+  "jax[cuda12]",
 ]
 
 [[tool.uv.index]]
