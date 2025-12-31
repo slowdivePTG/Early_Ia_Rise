@@ -721,7 +721,13 @@ class SNLightCurveLib(object):
 
         # Extract coordinate names and dimensions from the model
         # Import here to avoid circular import with _utils
-        from .._utils import extract_coords_dims_from_model
+        from .._utils import (
+            extract_coords_dims_from_model,
+            get_recommended_chain_method,
+        )
+
+        platform = jax.default_backend()
+        chain_method = get_recommended_chain_method(platform)
 
         coords, dims = extract_coords_dims_from_model(
             kernel,
@@ -752,6 +758,7 @@ class SNLightCurveLib(object):
                 num_warmup=0,
                 num_samples=num_sa,
                 num_chains=num_chains,
+                chain_method=chain_method,
             )
             sampler_sa.run(
                 subkey,
@@ -787,6 +794,7 @@ class SNLightCurveLib(object):
                 num_warmup=num_warmup // 10,
                 num_samples=1,
                 num_chains=num_chains,
+                chain_method=chain_method,
             )
             sampler_no_to_err.run(
                 subkey,
@@ -813,6 +821,7 @@ class SNLightCurveLib(object):
             num_warmup=num_warmup - num_sa,
             num_samples=num_samples,
             num_chains=num_chains,
+            chain_method=chain_method,
         )
         self.sampler.run(
             subkey,
