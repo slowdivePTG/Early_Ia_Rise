@@ -1,13 +1,13 @@
 """Utility functions for working with NumPyro models and ArviZ."""
 
-import warnings
+from typing import Literal
 
 import jax.random as random
 import numpyro
 from numpyro import handlers
 
 
-def set_best_platform(prefer_gpu=True):
+def set_best_platform(prefer_gpu=True) -> Literal["cpu", "gpu", "tpu"]:
     """
     Automatically detect and set the best available JAX/NumPyro platform.
 
@@ -59,8 +59,8 @@ def set_best_platform(prefer_gpu=True):
         platform = "cpu"
     else:
         # Priority: gpu (NVIDIA CUDA) > tpu > cpu
-        if "gpu" in available:
-            platform = "gpu"
+        if "gpu" in available or "cuda" in available:
+            platform = "cuda" if "cuda" in available else "gpu"
             # Check if it's actually CUDA (NVIDIA)
             try:
                 devices = jax.devices("gpu")
@@ -130,17 +130,16 @@ def get_recommended_chain_method(platform=None, num_chains=4):
 
     platform = platform.upper()
 
-    # GPU/TPU platforms: use parallel
+    # GPU/TPU platforms: use vectorized
     if platform in ["GPU", "TPU"]:
-        return "parallel"
+        return "vectorized"
 
     # CPU: decide between vectorized and sequential based on available cores
     # and number of chains
     cpu_count = os.cpu_count() or 4
 
-    # If we have enough cores and multiple chains, vectorized is often faster
     if num_chains <= cpu_count and num_chains > 1:
-        return "vectorized"
+        return "parallel"
     elif num_chains == 1:
         return "sequential"
     else:
