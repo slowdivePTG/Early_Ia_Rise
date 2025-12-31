@@ -29,7 +29,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-host-devices",
         type=int,
-        default=None,
+        default=4,
         help="Number of CPU devices for parallel chains (e.g., 4)",
     )
     parser.add_argument(
