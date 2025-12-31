@@ -748,7 +748,7 @@ class SNLightCurveLib(object):
             running_params_sa = running_params.copy()
             running_params_sa["t0_err"] = None
             num_sa = num_warmup // 4
-            rng_key, subkey = jax.random.split(rng_key)
+            rng_key, sa_key = jax.random.split(rng_key)
             sampler_sa = infer.MCMC(
                 infer.SA(
                     kernel,
@@ -761,8 +761,8 @@ class SNLightCurveLib(object):
                 chain_method=chain_method,
             )
             sampler_sa.run(
-                subkey,
-                **running_params,
+                sa_key,
+                **running_params_sa,
                 prior_config=prior_config,
             )
 
@@ -783,7 +783,8 @@ class SNLightCurveLib(object):
             running_params_no_to_err = running_params.copy()
             running_params_no_to_err["t0_err"] = None
 
-            rng_key, subkey = jax.random.split(rng_key)
+            rng_key, no_to_err_key = jax.random.split(rng_key)
+
             sampler_no_to_err = infer.MCMC(
                 infer.NUTS(
                     kernel,
@@ -797,7 +798,7 @@ class SNLightCurveLib(object):
                 chain_method=chain_method,
             )
             sampler_no_to_err.run(
-                subkey,
+                no_to_err_key,
                 **running_params_no_to_err,
                 prior_config=prior_config,
             )
@@ -810,7 +811,7 @@ class SNLightCurveLib(object):
             init_strategy_main = init_strategy_warmup
 
         print("\nMain sampling...")
-        rng_key, subkey = jax.random.split(rng_key)
+        rng_key, main_key = jax.random.split(rng_key)
         self.sampler = infer.MCMC(
             infer.NUTS(
                 kernel,
@@ -824,15 +825,15 @@ class SNLightCurveLib(object):
             chain_method=chain_method,
         )
         self.sampler.run(
-            subkey,
+            main_key,
             **running_params,
             prior_config=prior_config,
         )
 
         # Posterior predictive checks
-        rng_key, subkey = jax.random.split(rng_key)
+        rng_key, post_key = jax.random.split(rng_key)
         post_pred = infer.Predictive(kernel, self.sampler.get_samples())(
-            subkey,
+            post_key,
             **running_params,
             prior_config=prior_config,
         )
