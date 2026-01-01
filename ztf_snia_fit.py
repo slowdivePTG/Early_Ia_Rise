@@ -123,8 +123,7 @@ if __name__ == "__main__":
 
     print(f"Using platform: {platform}")
     print("Precision: float64 (x64 mode)")
-    if platform == "cpu":
-        print(f"Number of CPU devices: {jax.device_count()}")
+    print(f"Number of {platform.upper()} devices: {jax.device_count()}")
     print("=" * 70 + "\n")
 
     dr_dir = None

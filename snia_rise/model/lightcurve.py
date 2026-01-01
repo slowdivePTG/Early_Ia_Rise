@@ -709,7 +709,9 @@ class SNLightCurveLib(object):
             "t": self.phase,
             "flux": self.flux,
             "flux_err": self.flux_err,
-            "t0_err": self.t0_err,
+            "t0_err": self.t0_err
+            if self.t0_err is not None
+            else jnp.zeros_like(self.phase),
             "idx_obj": self.idx_obj,
             "idx_fcqfid": self.idx_fcqfid,
             "idx_filt": self.idx_filt,
@@ -751,7 +753,7 @@ class SNLightCurveLib(object):
         if "hierarchical" in model_structure:
             print("\nSimulated annealing warmup...")
             running_params_sa = running_params.copy()
-            running_params_sa["t0_err"] = None
+            running_params_sa["t0_err"] = jnp.zeros_like(running_params["t"])
             num_sa = num_warmup // 4
             rng_key, sa_key = jax.random.split(rng_key)
             # SA with adapt_state_size is incompatible with vectorized chain_method
@@ -764,8 +766,8 @@ class SNLightCurveLib(object):
                 ),
                 num_warmup=0,
                 num_samples=num_sa,
-                num_chains=num_chains,
-                chain_method="sequential" if jax.device_count() == 1 else "parallel",
+                num_chains=1,
+                chain_method="sequential",
             )
             sampler_sa.run(
                 sa_key,
@@ -788,7 +790,7 @@ class SNLightCurveLib(object):
         if self.t0_err is not None:
             print("\nWarmup without t0_err...")
             running_params_no_to_err = running_params.copy()
-            running_params_no_to_err["t0_err"] = None
+            running_params_no_to_err["t0_err"] = jnp.zeros_like(running_params["t"])
 
             rng_key, no_to_err_key = jax.random.split(rng_key)
 

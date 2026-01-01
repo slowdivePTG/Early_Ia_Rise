@@ -192,10 +192,7 @@ def get_recommended_chain_method(platform=None, num_chains=4, num_devices=None):
     if num_chains == 1:
         return "sequential"
     elif num_chains <= cpu_count:
-        # Can benefit from parallelization
-        # For CPU, both "parallel" and "vectorized" can work
-        # "parallel" with pmap might have overhead, so use vectorized
-        return "vectorized"
+        return "parallel"
     else:
         # More chains than cores - sequential might be better to avoid overhead
         print(
