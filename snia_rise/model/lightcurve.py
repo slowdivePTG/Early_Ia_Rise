@@ -637,6 +637,7 @@ class SNLightCurveLib(object):
         num_samples: int = 1000,
         num_warmup: int = 3000,
         num_chains: int = 2,
+        thinning: int = 1,
         random_seed: int = 11,
         sample_prior: bool = False,
         prior_config: dict = {},
@@ -653,6 +654,8 @@ class SNLightCurveLib(object):
             Number of warmup samples to discard (default: 3000).
         num_chains : int, optional
             Number of chains to run (default: 2).
+        thinning : int, optional
+            Thinning factor for MCMC samples (default: 1).
         random_seed : int, optional
             Random seed for reproducibility (default: 11).
         sample_prior : bool, optional
@@ -824,7 +827,8 @@ class SNLightCurveLib(object):
                 **nuts_params,
             ),
             num_warmup=num_warmup - num_sa,
-            num_samples=num_samples,
+            num_samples=num_samples * thinning,
+            thinning=thinning,
             num_chains=num_chains,
             chain_method=chain_method,
         )

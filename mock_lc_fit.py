@@ -90,6 +90,12 @@ if __name__ == "__main__":
         default=4,
         help="Number of chains (default: 4)",
     )
+    parser.add_argument(
+        "--thinning",
+        type=int,
+        default=1,
+        help="Thinning factor for MCMC samples (default: 1)",
+    )
 
     args = parser.parse_args()
 

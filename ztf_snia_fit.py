@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+import jax
 import numpy as np
 import numpyro
 import xarray as xr
@@ -9,7 +10,6 @@ from astropy.table import Table
 from snia_rise._utils import set_best_platform
 from snia_rise.ztf_lc import ZTFLib
 
-numpyro.set_host_device_count(4)
 numpyro.enable_x64()
 
 if __name__ == "__main__":
@@ -80,7 +80,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=2000,
+        default=1000,
         help="Number of samples (default: 2000)",
     )
     parser.add_argument(
@@ -88,6 +88,12 @@ if __name__ == "__main__":
         type=int,
         default=4,
         help="Number of chains (default: 4)",
+    )
+    parser.add_argument(
+        "--thinning",
+        type=int,
+        default=2,
+        help="Thinning factor for samples (default: 2)",
     )
 
     args = parser.parse_args()
@@ -98,10 +104,10 @@ if __name__ == "__main__":
     print("PLATFORM CONFIGURATION")
     print("=" * 70)
 
-    # Set host device count if specified (must be before platform selection)
+    # Set host device count (must be before platform selection)
+    # Only useful if platform is CPU
     if args.num_host_devices:
         numpyro.set_host_device_count(args.num_host_devices)
-        print(f"Set host device count: {args.num_host_devices}")
 
     # Set platform based on auto-detection or user preference
     if args.platform == "auto":
@@ -117,6 +123,8 @@ if __name__ == "__main__":
 
     print(f"Using platform: {platform}")
     print("Precision: float64 (x64 mode)")
+    if platform == "cpu":
+        print(f"Number of CPU devices: {jax.device_count()}")
     print("=" * 70 + "\n")
 
     dr_dir = None
@@ -197,6 +205,7 @@ if __name__ == "__main__":
             num_warmup=args.num_warmup,
             num_samples=args.num_samples,
             num_chains=args.num_chains,
+            thinning=args.thinning,
             nuts_params=dict(max_tree_depth=12),
             random_seed=114514,
             prior_config=dict(rise_model=args.model),
