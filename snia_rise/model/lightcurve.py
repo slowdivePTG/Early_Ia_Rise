@@ -439,6 +439,7 @@ class SNLightCurveLib(object):
         print("Number of objects:", n_obj)
         print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
         print("Number of filters:", n_filt)
+        print("Number of total observations:", len(self.phase))
         print("Light curves compiled...")
 
         self.inf_data = None
@@ -615,20 +616,21 @@ class SNLightCurveLib(object):
                 else:
                     self.t0_err = np.append(self.t0_err, lc.t0_err)
 
+            n_obj = len(np.unique(self.idx_obj))
+            n_fcqfid = len(np.unique(self.idx_fcqfid))
+            n_filt = len(np.unique(self.idx_filt))
+
+            assert n_obj == self.idx_obj.max() + 1, "Indexing error: idx_obj"
+            assert n_fcqfid == self.idx_fcqfid.max() + 1, "Indexing error: idx_fcqfid"
+            assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt"
+            print("Number of objects:", n_obj)
+            print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
+            print("Number of filters:", n_filt)
+            print("Number of total observations:", len(self.phase))
+            print("Light curves appended...")
+
         self.lc_library.extend(lc_lib.lc_library)
         self.ztfid_lib.extend(lc_lib.ztfid_lib)
-
-        n_obj = len(np.unique(self.idx_obj))
-        n_fcqfid = len(np.unique(self.idx_fcqfid))
-        n_filt = len(np.unique(self.idx_filt))
-
-        assert n_obj == self.idx_obj.max() + 1, "Indexing error: idx_obj"
-        assert n_fcqfid == self.idx_fcqfid.max() + 1, "Indexing error: idx_fcqfid"
-        assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt"
-        print("Number of objects:", n_obj)
-        print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
-        print("Number of filters:", n_filt)
-        print("Light curves appended...")
 
     def sampling(
         self,
@@ -727,7 +729,7 @@ class SNLightCurveLib(object):
         )
 
         platform = jax.default_backend()
-        chain_method = get_recommended_chain_method(platform)
+        chain_method = get_recommended_chain_method(platform, num_chains)
 
         coords, dims = extract_coords_dims_from_model(
             kernel,
@@ -749,6 +751,8 @@ class SNLightCurveLib(object):
             running_params_sa["t0_err"] = None
             num_sa = num_warmup // 4
             rng_key, sa_key = jax.random.split(rng_key)
+            # SA with adapt_state_size is incompatible with vectorized chain_method
+            # Always use sequential for SA warmup
             sampler_sa = infer.MCMC(
                 infer.SA(
                     kernel,
@@ -758,7 +762,7 @@ class SNLightCurveLib(object):
                 num_warmup=0,
                 num_samples=num_sa,
                 num_chains=num_chains,
-                chain_method=chain_method,
+                chain_method="sequential" if jax.device_count() == 1 else "parallel",
             )
             sampler_sa.run(
                 sa_key,

@@ -81,34 +81,69 @@ def set_best_platform(prefer_gpu=True) -> Literal["cpu", "gpu", "tpu"]:
     return platform
 
 
-def get_recommended_chain_method(platform=None, num_chains=4):
+def get_recommended_chain_method(platform=None, num_chains=4, num_devices=None):
     """
-    Get the recommended chain_method for MCMC based on the platform.
+    Get the recommended chain_method for MCMC based on the platform and number of devices.
 
-    Different platforms have different optimal strategies for running multiple chains:
-    - GPU/TPU: "parallel" - runs chains in parallel on the accelerator
-    - CPU with many cores: "vectorized" - vectorizes across chains for efficiency
-    - CPU with few cores: "sequential" - runs chains one after another
+    NumPyro supports three chain execution methods:
+    - "vectorized": Uses jax.vmap to batch all chains together (single device)
+    - "parallel": Uses jax.pmap for multi-device parallelism (multiple GPUs/TPUs)
+    - "sequential": Runs chains one after another (fallback)
+
+    For GPU/TPU:
+    - Single device: "vectorized" is most efficient (batches all chains together)
+    - Multiple devices: "parallel" distributes chains across devices
+
+    For CPU:
+    - Many cores (>= chains): "parallel" can help
+    - Few cores: "sequential" to avoid overhead
 
     Parameters
     ----------
     platform : str, optional
         The platform being used. If None, will auto-detect from JAX.
-        Options: "gpu", "METAL", "tpu", "cpu"
+        Options: "gpu", "cuda", "tpu", "cpu"
     num_chains : int, optional
         Number of chains to run (default: 4). Used to determine if vectorization
         is beneficial.
+    num_devices : int, optional
+        Number of available devices. If None, will query JAX for device count.
+        For multi-GPU setups, you may want to explicitly set this.
 
     Returns
     -------
     str
-        Recommended chain_method: "parallel", "vectorized", or "sequential"
+        Recommended chain_method: "vectorized", "parallel", or "sequential"
 
     Examples
     --------
     >>> from snia_rise._utils import get_recommended_chain_method
+    >>> # Auto-detect (recommended)
     >>> chain_method = get_recommended_chain_method()
     >>> print(f"Using chain_method: {chain_method}")
+
+    >>> # Explicit configuration for single GPU
+    >>> chain_method = get_recommended_chain_method(platform="gpu", num_chains=4)
+    >>> # Returns: "vectorized"
+
+    >>> # Multi-GPU setup
+    >>> chain_method = get_recommended_chain_method(platform="gpu", num_chains=4, num_devices=2)
+    >>> # Returns: "parallel"
+
+    Notes
+    -----
+    **GPU Performance:**
+    - "vectorized" is typically 2-3x faster than "sequential" on a single GPU
+    - "parallel" is only beneficial with multiple GPUs
+    - "vectorized" has better memory efficiency than "parallel" on single GPU
+
+    **CPU Performance:**
+    - "parallel" can provide speedup if num_chains <= num_cores
+    - "sequential" is safer for limited resources
+
+    See Also
+    --------
+    numpyro.infer.MCMC : Main MCMC interface with chain_method parameter
     """
     import os
 
@@ -130,20 +165,43 @@ def get_recommended_chain_method(platform=None, num_chains=4):
 
     platform = platform.upper()
 
-    # GPU/TPU platforms: use vectorized
-    if platform in ["GPU", "TPU", "CUDA"]:
-        return "parallel"
+    # Auto-detect number of devices if not provided
+    if num_devices is None:
+        try:
+            devices = jax.devices()
+            num_devices = len(devices)
+        except Exception:
+            num_devices = 1
 
-    # CPU: decide between vectorized and sequential based on available cores
-    # and number of chains
+    # GPU/TPU platforms
+    if platform in ["GPU", "TPU", "CUDA"]:
+        if num_devices > 1 and num_chains >= num_devices:
+            # Multiple devices available: use parallel to distribute chains
+            print(f"Using 'parallel' chain_method: {num_devices} devices available")
+            return "parallel"
+        else:
+            # Single device: use vectorized for better performance
+            print(
+                f"Using 'vectorized' chain_method: batching {num_chains} chains on single device"
+            )
+            return "vectorized"
+
+    # CPU: decide between parallel, vectorized, and sequential
     cpu_count = os.cpu_count() or 4
 
-    if num_chains <= cpu_count and num_chains > 1:
-        return "parallel"
-    elif num_chains == 1:
+    if num_chains == 1:
         return "sequential"
+    elif num_chains <= cpu_count:
+        # Can benefit from parallelization
+        # For CPU, both "parallel" and "vectorized" can work
+        # "parallel" with pmap might have overhead, so use vectorized
+        return "vectorized"
     else:
         # More chains than cores - sequential might be better to avoid overhead
+        print(
+            f"Warning: {num_chains} chains requested but only {cpu_count} CPU cores available"
+        )
+        print("Consider reducing num_chains or using sequential chain_method")
         return "sequential"
 
 

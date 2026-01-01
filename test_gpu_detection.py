@@ -84,10 +84,10 @@ def test_gpu_detection():
         print(f"✓ Recommended chain_method for {platform}: {chain_method}")
 
         if platform == "gpu":
-            assert chain_method == "parallel", (
-                f"GPU should use 'parallel', got '{chain_method}'"
+            assert chain_method == "vectorized", (
+                f"GPU should use 'vectorized', got '{chain_method}'"
             )
-            print("  ✓ Correct: GPU uses parallel chains")
+            print("  ✓ Correct: GPU uses vectorized chains (batching on single device)")
         elif platform == "cpu":
             print(f"  ✓ CPU uses '{chain_method}' chains")
 
@@ -138,6 +138,7 @@ def test_gpu_detection():
     if "gpu" in available or "cuda" in available:
         print("  ✓ NVIDIA GPU detected - cluster deployment ready!")
         print("  ✓ Supports float64 (x64) precision (always enabled)")
+        print("  ✓ Using 'vectorized' chain_method for optimal single-GPU performance")
         print("  ✓ Recommended: Use --platform auto (default)")
     else:
         print("  CPU only - no NVIDIA GPU detected")
