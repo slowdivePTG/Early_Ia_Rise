@@ -83,10 +83,7 @@ def sample_alpha_0(
 
     if prior_type == "miller":
         # Miller et al. (2020) prior
-        alpha_0 = numpyro.sample(
-            "alpha_0",
-            dist.TruncatedDistribution(dist.Exponential(jnp.log(10)), min=min_alpha_0),
-        )
+        alpha_0 = numpyro.sample("alpha_0", dist.Exponential(jnp.log(10)))
 
     elif prior_type == "uniform":
         # Uniform prior

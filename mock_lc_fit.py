@@ -170,7 +170,7 @@ if __name__ == "__main__":
                 "prior_type": args.prior_type.lower(),
             },
             num_warmup=args.num_warmup,
-            num_samples=args.num_samples * args.thinning,
+            num_samples=args.num_samples,
             num_chains=args.num_chains,
             thinning=args.thinning,
         )
