@@ -211,8 +211,6 @@ def _sample_mvn_hierarchical_params(
     sigma_xi,
     mean_alpha_0,
     sigma_alpha_0,
-    min_alpha_0,
-    max_alpha_0,
     sample_correlations=True,
 ):
     """
@@ -270,7 +268,7 @@ def _sample_mvn_hierarchical_params(
         alpha_0_raw = theta[..., 1 + n_filt :]
         alpha_0 = numpyro.deterministic(
             "alpha_0",
-            jnp.clip(alpha_0_raw, min_alpha_0, max_alpha_0),
+            jnp.clip(alpha_0_raw, 1 + EPS, None),
         )
 
     return t_rise, t_thresh, alpha_0
@@ -285,8 +283,6 @@ def _sample_trise_only_hierarchical_params(
     sigma_xi,
     mean_alpha_0,
     sigma_alpha_0,
-    min_alpha_0,
-    max_alpha_0,
 ):
     """Only t_rise hierarchical, alpha_0 sampled independently (like unpooled).
 
@@ -306,9 +302,7 @@ def _sample_trise_only_hierarchical_params(
             xi_raw = numpyro.sample("xi_raw", dist.Normal(mean_xi, sigma_xi))
             xi = numpyro.deterministic("xi", jnp.clip(xi_raw, 0, 1))
             t_thresh = numpyro.deterministic("t_thresh", t_rise[:, None] * xi)
-            alpha_0 = sample_alpha_0(
-                mean_alpha_0, sigma_alpha_0, min_alpha_0, max_alpha_0
-            )
+            alpha_0 = sample_alpha_0(mean_alpha_0, sigma_alpha_0, 1 + EPS, None)
 
     return t_rise, t_thresh, alpha_0
 
@@ -341,27 +335,29 @@ def sample_hierarchical_params(
     t_thresh : array, shape (n_obj, n_filt)
     alpha_0 : array, shape (n_obj, n_filt)
     """
-    min_alpha_0 = prior_config.get("min_alpha_0", 1)
-    max_alpha_0 = prior_config.get("max_alpha_0", 5)
+    min_t_rise = prior_config.get("min_t_rise", 10)
+    max_t_rise = prior_config.get("max_t_rise", 30)
+    min_alpha_0 = prior_config.get("min_alpha_0", 1.5)
+    max_alpha_0 = prior_config.get("max_alpha_0", 3.5)
     assert min_alpha_0 >= 0, "min_alpha_0 must be non-negative"
 
     # Sample t_rise hyperpriors (common to all structures)
-    mean_t_rise = numpyro.sample("mean_t_rise", dist.Uniform(0, 40))
-    sigma_t_rise = numpyro.sample("sigma_t_rise", dist.HalfCauchy(1.5))
+    mean_t_rise = numpyro.sample("mean_t_rise", dist.Uniform(min_t_rise, max_t_rise))
+    sigma_t_rise = numpyro.sample("sigma_t_rise", dist.HalfNormal(1.5))
 
     # Sample alpha_0 hyperpriors only for mvn and independent
     if correlation_structure in ["mvn", "independent"]:
         # mean_alpha_0 = numpyro.sample(
         # "mean_alpha_0_cm", dist.Uniform(min_alpha_0, max_alpha_0)
         # )
-        # sigma_alpha_0 = numpyro.sample("sigma_alpha_0_cm", dist.HalfCauchy(0.3))
+        # sigma_alpha_0 = numpyro.sample("sigma_alpha_0_cm", dist.HalfNormal(0.3))
         with numpyro.plate("filt", n_filt):
-            mean_xi = numpyro.sample("mean_xi", dist.Beta(1, 1))
-            sigma_xi = numpyro.sample("sigma_xi", dist.HalfCauchy(0.1))
+            mean_xi = numpyro.sample("mean_xi", dist.Beta(2, 2))
+            sigma_xi = numpyro.sample("sigma_xi", dist.HalfNormal(0.1))
             mean_alpha_0 = numpyro.sample(
                 "mean_alpha_0", dist.Uniform(min_alpha_0, max_alpha_0)
             )
-            sigma_alpha_0 = numpyro.sample("sigma_alpha_0", dist.HalfCauchy(0.3))
+            sigma_alpha_0 = numpyro.sample("sigma_alpha_0", dist.HalfNormal(0.3))
 
         if correlation_structure == "mvn":
             # Full MVN with correlations
@@ -374,8 +370,6 @@ def sample_hierarchical_params(
                 sigma_xi,
                 mean_alpha_0,
                 sigma_alpha_0,
-                min_alpha_0,
-                max_alpha_0,
                 sample_correlations=True,
             )
         else:  # independent
@@ -389,8 +383,6 @@ def sample_hierarchical_params(
                 sigma_xi,
                 mean_alpha_0,
                 sigma_alpha_0,
-                min_alpha_0,
-                max_alpha_0,
                 sample_correlations=False,
             )
 

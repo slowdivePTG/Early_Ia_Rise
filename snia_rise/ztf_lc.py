@@ -43,6 +43,7 @@ class ZTFDataProcessor:
         if flux_max is None:
             flux_max = np.max(f[np.abs(t) < 5])
 
+        # Below flux threshold
         below_threshold = (
             (f <= early_threshold * flux_max)
             if early_threshold < 1
@@ -71,6 +72,14 @@ class ZTFDataProcessor:
         idx_g = (filt == filtids[0]) & (phase < t_g_early)
         idx_r = (filt == filtids[1]) & (phase < t_r_early)
         idx = idx_rise & (idx_g | idx_r)
+
+        # Discard the fcqfID with few baseline points
+        idx_base = phase < -20
+        idx_fcqfid_few_base = []
+        for fcqfid_val in np.unique(fcqfid):
+            if np.sum((fcqfid == fcqfid_val) & idx_base) < 3:
+                idx_fcqfid_few_base.append(fcqfid_val)
+        idx &= ~np.isin(fcqfid, idx_fcqfid_few_base)
 
         lc_early = {
             "phase": phase[idx],
