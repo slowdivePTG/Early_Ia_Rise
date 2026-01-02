@@ -8,14 +8,17 @@ from numpyro import distributions as dist
 from .priors import (
     sample_alpha_0,
     sample_alpha_1,
+    sample_amp_from_t_thresh,
     sample_amp_prime,
     sample_fcqf_params,
     sample_hierarchical_params,
     sample_t_fl,
     sample_t_rise,
+    sample_t_thresh,
 )
 
 F_THRESH = 40  # 40% of the maximum flux
+EPS = 1e-10  # Small value to avoid division by zero
 
 ####################################################################################################
 ##                      Power-law rise function for SNe Ia light curves                           ##
@@ -30,7 +33,7 @@ def f_t(
     amp: float | ArrayLike,
     alpha_0: float | ArrayLike,
     alpha_1: float | ArrayLike = 0.0,
-    eps: float | ArrayLike = 1e-10,
+    eps: float | ArrayLike = EPS,
 ):
     """
     Calculate the flux with a power-law rise model.
@@ -64,7 +67,7 @@ def f_t(
 
 
 @jax.jit
-def df_t_dt_fl(t, t_fl, base, amp, alpha_0, alpha_1, eps=1e-10):
+def df_t_dt_fl(t, t_fl, base, amp, alpha_0, alpha_1, eps=EPS):
     """
     Calculate the derivative of f(t) with respect to t_fl in an analytic manner.
     """
@@ -192,10 +195,9 @@ def hierarchical_model(
         with numpyro.plate("obj", n_obj, dim=-2):
             # amp_prime = sample_amp_prime()
             # amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
-            eps = 1e-10
-            exponent = alpha_0 + alpha_1 * t_thresh
-            log_amp = jnp.log(F_THRESH) - exponent * jnp.log(jnp.maximum(eps, t_thresh))
-            amp = numpyro.deterministic("A", jnp.exp(log_amp))
+            amp = sample_amp_from_t_thresh(
+                alpha_0, alpha_1, t_thresh, f_thresh=F_THRESH, eps=EPS
+            )
 
     flux_err_obs = flux_err * beta[idx_fcqfid]
 
@@ -253,15 +255,14 @@ def unpooled_model(
     n_filt = len(np.unique(idx_filt))
     n_obj = len(np.unique(idx_obj))
 
+    prior_type = prior_config.get("prior_type", "uniform").lower()
+
     # base, beta: shape (n_fcqfid,)
     base, beta = sample_fcqf_params(n_fcqfid)
 
-    # alpha_0, amp: shape (n_obj, n_filt)
-    with numpyro.plate("filt", n_filt, dim=-1):
-        with numpyro.plate("obj", n_obj, dim=-2):
-            alpha_0 = sample_alpha_0(prior_config=prior_config)
-            amp_prime = sample_amp_prime()
-            amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
+    # t_rise: shape (n_obj,)
+    with numpyro.plate("obj", n_obj):
+        t_rise = sample_t_rise(prior_config)
 
     # alpha_1: shape (n_obj, n_filt)
     rise_model = prior_config.get("rise_model", "power_law")
@@ -272,9 +273,19 @@ def unpooled_model(
     else:
         alpha_1 = jnp.zeros((n_obj, n_filt))
 
-    # t_rise: shape (n_obj,)
-    with numpyro.plate("obj", n_obj):
-        t_rise = sample_t_rise(prior_config)
+    # alpha_0, amp: shape (n_obj, n_filt)
+    with numpyro.plate("filt", n_filt, dim=-1):
+        with numpyro.plate("obj", n_obj, dim=-2):
+            alpha_0 = sample_alpha_0(prior_config=prior_config)
+
+            if prior_type == "miller":
+                amp_prime = sample_amp_prime()
+                amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
+            else:
+                t_thresh = sample_t_thresh(t_rise)
+                amp = sample_amp_from_t_thresh(
+                    alpha_0, alpha_1, t_thresh, f_thresh=F_THRESH, eps=EPS
+                )
 
     # t_fl: shape (n_obj,)
     t_fl = sample_t_fl(n_obj, t_rise, t0_err)
@@ -331,17 +342,17 @@ def pooled_model(
     n_fcqfid = len(np.unique(idx_fcqfid))
     n_filt = len(np.unique(idx_filt))
 
+    prior_type = prior_config.get("prior_type", "uniform").lower()
+
     # base, beta: shape (n_fcqfid,)
     base, beta = sample_fcqf_params(n_fcqfid)
 
-    # alpha_0: shape (n_filt,)
-    # amp: shape (n_obj, n_filt)
-    with numpyro.plate("filt", n_filt, dim=-1):
-        alpha_0 = sample_alpha_0(prior_config=prior_config)
+    # t_rise: shape (n_obj,)
+    with numpyro.plate("obj", n_obj):
+        t_rise = sample_t_rise(prior_config)
 
-        with numpyro.plate("obj", n_obj, dim=-2):
-            amp_prime = sample_amp_prime()
-            amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
+    # t_fl: shape (n_obj,)
+    t_fl = sample_t_fl(n_obj, t_rise, t0_err)
 
     # alpha_1: shape (n_filt,)
     rise_model = prior_config.get("rise_model", "power_law")
@@ -351,12 +362,20 @@ def pooled_model(
     else:
         alpha_1 = jnp.zeros((n_filt,))
 
-    # t_rise: shape (n_obj,)
-    with numpyro.plate("obj", n_obj):
-        t_rise = sample_t_rise(prior_config)
+    # alpha_0: shape (n_filt,)
+    # amp: shape (n_obj, n_filt)
+    with numpyro.plate("filt", n_filt, dim=-1):
+        alpha_0 = sample_alpha_0(prior_config=prior_config)
 
-    # t_fl: shape (n_obj,)
-    t_fl = sample_t_fl(n_obj, t_rise, t0_err)
+        with numpyro.plate("obj", n_obj, dim=-2):
+            if prior_type == "miller":
+                amp_prime = sample_amp_prime()
+                amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
+            else:
+                t_thresh = sample_t_thresh(t_rise)
+                amp = sample_amp_from_t_thresh(
+                    alpha_0, alpha_1, t_thresh, f_thresh=F_THRESH, eps=EPS
+                )
 
     flux_err_obs = flux_err * beta[idx_fcqfid]
 

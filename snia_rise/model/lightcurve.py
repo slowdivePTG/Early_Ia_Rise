@@ -462,14 +462,24 @@ class SNLightCurveLib(object):
         """
 
         # Post-calculate population-level parameters if not sampled directly
-        if "obj" in sample["t_rise"].dims:
-            if "mean_t_rise" not in sample.keys():
-                sample["mean_t_rise"] = sample["t_rise"].mean(dim="obj")
-                sample["sigma_t_rise"] = sample["t_rise"].std(dim="obj", ddof=1)
+        if "mean_t_rise" not in sample:
+            sample["mean_t_rise"] = sample["t_rise"].mean(dim="obj")
+            sample["sigma_t_rise"] = sample["t_rise"].std(dim="obj", ddof=1)
+        if "xi" in sample:
+            if "mean_xi" not in sample:
+                sample["mean_xi"] = sample["xi"].mean(dim="obj")
+                sample["sigma_xi"] = sample["xi"].std(dim="obj", ddof=1)
+            n_filt = sample.sizes["filt"]
+            for j in range(n_filt):
+                sample[f"corr_t_rise_xi_flt{j + 1}"] = xr.corr(
+                    sample["t_rise"],
+                    sample["xi"][..., j],
+                    dim="obj",
+                )
 
         # Post-calculate differences between filters for mean_alpha_0 (color evolution)
         if "obj" in sample["alpha_0"].dims:
-            if "mean_alpha_0" not in sample.keys():
+            if "mean_alpha_0" not in sample:
                 sample["mean_alpha_0"] = sample["alpha_0"].mean(dim="obj")
                 sample["sigma_alpha_0"] = sample["alpha_0"].std(dim="obj", ddof=1)
 
@@ -480,6 +490,12 @@ class SNLightCurveLib(object):
                     sample["alpha_0"][..., j],
                     dim="obj",
                 )
+                if "xi" in sample:
+                    sample[f"corr_t_rise_xi_flt{j + 1}"] = xr.corr(
+                        sample["t_rise"],
+                        sample["xi"][..., j],
+                        dim="obj",
+                    )
                 for k in range(j + 1, n_filt):
                     sample[f"mean_alpha_flt{j + 1}-flt{k + 1}"] = (
                         sample["mean_alpha_0"][..., j] - sample["mean_alpha_0"][..., k]
@@ -781,9 +797,13 @@ class SNLightCurveLib(object):
             init_values_warmup = {
                 k: jnp.mean(v[-last_n:], axis=0) for k, v in samples_sa.items()
             }
+            for k, v in init_values_warmup.items():
+                if not jnp.all(jnp.isfinite(v)):
+                    raise ValueError(f"Non-finite value found in {k}")
             init_strategy_warmup = infer.init_to_value(values=init_values_warmup)
 
         else:
+            num_sa = 0
             init_strategy_warmup = init_to_median_with_alpha0(alpha_0_init=2.0)
 
         # Warmup without t0_err (if needed)
@@ -923,6 +943,36 @@ class SNLightCurveLib(object):
             if filename is None:
                 filename = self.ID
             plt.savefig(filename + "_corner.pdf", bbox_inches="tight")
+
+    def plot_trace(self):
+        """
+        Arviz plot_trace wrapper.
+        """
+
+        az.plot_trace(
+            self.post_sample,
+            sorted(
+                [var for var in self.post_sample if "mean" in var or "sigma" in var]
+            ),
+        )
+
+    def show_summary(self):
+        """
+        Arviz summary wrapper.
+        """
+
+        return az.summary(
+            self.post_sample,
+            sorted(
+                [
+                    var
+                    for var in self.post_sample
+                    if "mean" in var or "sigma" in var or "corr" in var
+                ]
+            ),
+            stat_focus="median",
+            hdi_prob=0.95,
+        )
 
     def compare_true_vs_fitted_params(self, band: str = "g"):
         """

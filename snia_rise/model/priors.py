@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
+from jax._src.interpreters.mlir import min_hlo
 
 EPS = 1e-5  # Small value to avoid division by zero
 
@@ -73,16 +74,19 @@ def sample_alpha_0(
     if mean_alpha_0 is None:
         mean_alpha_0 = prior_config.get("mean_alpha_0", 2)
     if sigma_alpha_0 is None:
-        sigma_alpha_0 = prior_config.get("sigma_alpha_0", None)
+        sigma_alpha_0 = prior_config.get("sigma_alpha_0", 0.3)
     if min_alpha_0 is None:
         min_alpha_0 = prior_config.get("min_alpha_0", 1)
     if max_alpha_0 is None:
-        max_alpha_0 = prior_config.get("max_alpha_0", 3)
+        max_alpha_0 = prior_config.get("max_alpha_0", 4)
     assert min_alpha_0 >= 0, "min_alpha_0 must be non-negative"
 
     if prior_type == "miller":
         # Miller et al. (2020) prior
-        alpha_0 = numpyro.sample("alpha_0", dist.Exponential(jnp.log(10)))
+        alpha_0 = numpyro.sample(
+            "alpha_0",
+            dist.TruncatedDistribution(dist.Exponential(jnp.log(10)), min=min_alpha_0),
+        )
 
     elif prior_type == "uniform":
         # Uniform prior
@@ -104,9 +108,7 @@ def sample_alpha_0(
     elif prior_type == "normal":
         alpha_0 = numpyro.sample(
             "alpha_0",
-            dist.TruncatedNormal(
-                mean_alpha_0, sigma_alpha_0, low=min_alpha_0, high=max_alpha_0
-            ),
+            dist.TruncatedNormal(mean_alpha_0, sigma_alpha_0, low=min_alpha_0),
         )
 
     else:
@@ -149,6 +151,22 @@ def sample_amp_prime():
     return amp_prime
 
 
+def sample_amp_from_t_thresh(alpha_0, alpha_1, t_thresh, f_thresh, eps):
+    """
+    Sample amplitude from t_thresh.
+
+    Returns
+    -------
+    amp : array
+        Amplitude normalization (before alpha_0 correction)
+    """
+    exponent = alpha_0 + alpha_1 * t_thresh
+    log_amp = jnp.log(f_thresh) - exponent * jnp.log(jnp.maximum(eps, t_thresh))
+    amp = numpyro.deterministic("A", jnp.exp(log_amp))
+
+    return amp
+
+
 def sample_t_rise(prior_config):
     """
     Sample t_rise parameters.
@@ -167,11 +185,30 @@ def sample_t_rise(prior_config):
     if prior_type in ["gaussian", "normal"]:
         mean_t_rise = prior_config.get("mean_t_rise", 18)
         sigma_t_rise = prior_config.get("sigma_t_rise", 1.5)
-        t_rise = numpyro.sample("t_rise", dist.Normal(mean_t_rise, sigma_t_rise))
+        t_rise = numpyro.sample(
+            "t_rise",
+            dist.TruncatedNormal(mean_t_rise, sigma_t_rise, EPS, None),
+        )
     else:
-        t_rise = numpyro.sample("t_rise", dist.Uniform(0, 40))
+        t_rise_min = prior_config.get("t_rise_min", 5)
+        t_rise_max = prior_config.get("t_rise_max", 40)
+        t_rise = numpyro.sample("t_rise", dist.Uniform(t_rise_min, t_rise_max))
 
     return t_rise
+
+
+def sample_t_thresh(t_rise):
+    """
+    Sample t_thresh parameters.
+
+    Returns
+    -------
+    t_thresh : array, shape ()
+    """
+    xi = numpyro.sample("xi", dist.Beta(2, 2))
+    t_thresh = numpyro.deterministic("t_thresh", t_rise[:, None] * xi)
+
+    return t_thresh
 
 
 def sample_t_fl(n_obj: int, t_rise: jnp.ndarray, t0_err: jnp.ndarray):
@@ -279,8 +316,6 @@ def _sample_trise_only_hierarchical_params(
     n_filt,
     mean_t_rise,
     sigma_t_rise,
-    mean_xi,
-    sigma_xi,
     mean_alpha_0,
     sigma_alpha_0,
 ):
@@ -295,13 +330,13 @@ def _sample_trise_only_hierarchical_params(
 
     # Sample t_rise hierarchically
     with numpyro.plate("obj", n_obj):
-        t_rise = numpyro.sample("t_rise", dist.Normal(mean_t_rise, sigma_t_rise))
+        t_rise = numpyro.sample(
+            "t_rise", dist.TruncatedNormal(mean_t_rise, sigma_t_rise, low=EPS)
+        )
 
-    with numpyro.plate("filt", n_filt):
-        with numpyro.plate("obj", n_obj):
-            xi_raw = numpyro.sample("xi_raw", dist.Normal(mean_xi, sigma_xi))
-            xi = numpyro.deterministic("xi", jnp.clip(xi_raw, 0, 1))
-            t_thresh = numpyro.deterministic("t_thresh", t_rise[:, None] * xi)
+    with numpyro.plate("filt", n_filt, dim=-1):
+        with numpyro.plate("obj", n_obj, dim=-2):
+            t_thresh = sample_t_thresh(t_rise)
             alpha_0 = sample_alpha_0(mean_alpha_0, sigma_alpha_0, 1 + EPS, None)
 
     return t_rise, t_thresh, alpha_0
@@ -335,14 +370,15 @@ def sample_hierarchical_params(
     t_thresh : array, shape (n_obj, n_filt)
     alpha_0 : array, shape (n_obj, n_filt)
     """
-    min_t_rise = prior_config.get("min_t_rise", 10)
-    max_t_rise = prior_config.get("max_t_rise", 30)
-    min_alpha_0 = prior_config.get("min_alpha_0", 1.5)
-    max_alpha_0 = prior_config.get("max_alpha_0", 3.5)
-    assert min_alpha_0 >= 0, "min_alpha_0 must be non-negative"
+    min_mean_t_rise = 10.0
+    max_mean_t_rise = 30.0
+    min_mean_alpha_0 = 1.5
+    max_mean_alpha_0 = 3.5
 
     # Sample t_rise hyperpriors (common to all structures)
-    mean_t_rise = numpyro.sample("mean_t_rise", dist.Uniform(min_t_rise, max_t_rise))
+    mean_t_rise = numpyro.sample(
+        "mean_t_rise", dist.Uniform(min_mean_t_rise, max_mean_t_rise)
+    )
     sigma_t_rise = numpyro.sample("sigma_t_rise", dist.HalfNormal(1.5))
 
     # Sample alpha_0 hyperpriors only for mvn and independent
@@ -355,7 +391,7 @@ def sample_hierarchical_params(
             mean_xi = numpyro.sample("mean_xi", dist.Beta(2, 2))
             sigma_xi = numpyro.sample("sigma_xi", dist.HalfNormal(0.1))
             mean_alpha_0 = numpyro.sample(
-                "mean_alpha_0", dist.Uniform(min_alpha_0, max_alpha_0)
+                "mean_alpha_0", dist.Uniform(min_mean_alpha_0, max_mean_alpha_0)
             )
             sigma_alpha_0 = numpyro.sample("sigma_alpha_0", dist.HalfNormal(0.3))
 
@@ -389,20 +425,9 @@ def sample_hierarchical_params(
     elif correlation_structure == "trise_only":
         # Only t_rise hierarchical, alpha_0 non-hierarchical
         mean_alpha_0 = prior_config.get("mean_alpha_0", 2)
-        sigma_alpha_0 = prior_config.get("sigma_alpha_0", None)
-        mean_xi = prior_config.get("mean_xi", 0.5)
-        sigma_xi = prior_config.get("sigma_xi", 0.1)
+        sigma_alpha_0 = prior_config.get("sigma_alpha_0", 0.3)
         return _sample_trise_only_hierarchical_params(
-            n_obj,
-            n_filt,
-            mean_t_rise,
-            sigma_t_rise,
-            mean_xi,
-            sigma_xi,
-            mean_alpha_0,
-            sigma_alpha_0,
-            min_alpha_0,
-            max_alpha_0,
+            n_obj, n_filt, mean_t_rise, sigma_t_rise, mean_alpha_0, sigma_alpha_0
         )
 
     else:
