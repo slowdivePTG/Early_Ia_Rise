@@ -15,6 +15,8 @@ from .priors import (
     sample_t_rise,
 )
 
+F_THRESH = 40  # 40% of the maximum flux
+
 ####################################################################################################
 ##                      Power-law rise function for SNe Ia light curves                           ##
 ####################################################################################################
@@ -166,7 +168,7 @@ def hierarchical_model(
     # Hierarchical structure for t_rise and alpha_0
     # t_rise:   shape (n_obj,)
     # alpha_0: shape (n_obj, n_filt)
-    t_rise, alpha_0 = sample_hierarchical_params(
+    t_rise, t_thresh, alpha_0 = sample_hierarchical_params(
         n_obj,
         n_filt,
         correlation_structure=correlation_structure,
@@ -188,8 +190,12 @@ def hierarchical_model(
 
     with numpyro.plate("filt", n_filt, dim=-1):
         with numpyro.plate("obj", n_obj, dim=-2):
-            amp_prime = sample_amp_prime()
-            amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
+            # amp_prime = sample_amp_prime()
+            # amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
+            eps = 1e-10
+            exponent = alpha_0 + alpha_1 * t_thresh
+            log_amp = jnp.log(F_THRESH) - exponent * jnp.log(jnp.maximum(eps, t_thresh))
+            amp = numpyro.deterministic("A", jnp.exp(log_amp))
 
     flux_err_obs = flux_err * beta[idx_fcqfid]
 

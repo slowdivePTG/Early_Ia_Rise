@@ -5,6 +5,8 @@ import numpy as np
 import numpyro
 import numpyro.distributions as dist
 
+EPS = 1e-5  # Small value to avoid division by zero
+
 
 def sample_fcqf_params(n_fcqfid, prior_config: dict = {}):
     """
@@ -205,6 +207,8 @@ def _sample_mvn_hierarchical_params(
     n_filt,
     mean_t_rise,
     sigma_t_rise,
+    mean_xi,
+    sigma_xi,
     mean_alpha_0,
     sigma_alpha_0,
     min_alpha_0,
@@ -214,50 +218,30 @@ def _sample_mvn_hierarchical_params(
     """
     Sample MVN hyperpriors and per-object parameters.
 
-    Parameters
-    ----------
-    n_obj : int
-        Number of objects
-    n_filt : int
-        Number of filters
-    mean_t_rise : float
-        Population mean for t_rise
-    sigma_t_rise : float
-        Population std for t_rise
-    mean_alpha_0 : float
-        Population mean for alpha_0 (assumed same for all filters)
-    sigma_alpha_0 : float
-        Population standard deviation for alpha_0 (assumed same for all filters)
-    min_alpha_0 : float
-        Minimum alpha value
-    max_alpha_0 : float
-        Maximum alpha value
-    sample_correlations : bool
-        If True, sample correlation matrix. If False, use identity (independent)
-
     Returns
     -------
     t_rise : array, shape (n_obj,)
+    t_thresh : array, shape (n_obj, n_filt)
     alpha_0 : array, shape (n_obj, n_filt)
     """
-    # Dimension is t_rise (1) + alpha_0 for each filter (n_filt)
-    n_mvn_dim = 1 + n_filt
+    # Dimension is t_rise (1), xi = t_thresh / t_rise (n_filt), alpha_0 for each filter (n_filt)
+    n_mvn_dim = 1 + 2 * n_filt
 
     # Mean and scale vectors for MVN
     # t_rise is index 0
-    # alpha_0 for filters are indices 1..n_filt
-    mu = jnp.concatenate([jnp.array([mean_t_rise]), mean_alpha_0])
-    sigma = jnp.concatenate([jnp.array([sigma_t_rise]), sigma_alpha_0])
+    # xi for filters are indices 1..n_filt
+    # alpha_0 for filters are indices n_filt+1..2*n_filt
+    mu = jnp.concatenate([jnp.array([mean_t_rise]), mean_xi, mean_alpha_0])
+    sigma = jnp.concatenate([jnp.array([sigma_t_rise]), sigma_xi, sigma_alpha_0])
 
     # Sample or fix correlation structure
     if sample_correlations:
         chol_corr = numpyro.sample(
             "chol_corr", dist.LKJCholesky(n_mvn_dim, concentration=1.0)
         )
+        L_Cholesky = jnp.matmul(jnp.diag(sigma), chol_corr)
     else:
-        chol_corr = jnp.eye(n_mvn_dim)
-
-    L_Cholesky = jnp.matmul(jnp.diag(sigma), chol_corr)
+        L_Cholesky = None
 
     if sample_correlations:
         # Store covariance and correlation for diagnostics
@@ -268,112 +252,28 @@ def _sample_mvn_hierarchical_params(
 
     with numpyro.plate("obj", n_obj):
         # Sample (t_rise, alpha_0_1, alpha_0_2, ...) from MVN
-        theta = numpyro.sample(
-            "theta", dist.MultivariateNormal(loc=mu, scale_tril=L_Cholesky)
+        # Non-centered sampling
+        theta_raw = numpyro.sample(
+            "theta_raw", dist.Normal(0, 1).expand([n_mvn_dim]).to_event(1)
         )
-        t_rise = numpyro.deterministic("t_rise", theta[..., 0])
+        if L_Cholesky is None:
+            theta = mu + sigma * theta_raw
+        else:
+            # (dim, dim) @ (n_obj, dim).T -> (n_obj, dim)
+            theta = mu + (L_Cholesky @ theta_raw.T).T
+
+        t_rise = numpyro.deterministic("t_rise", jnp.clip(theta[..., 0], EPS, None))
+        xi = numpyro.deterministic("xi", jnp.clip(theta[..., 1 : 1 + n_filt], EPS, 1))
+        t_thresh = numpyro.deterministic("t_thresh", t_rise[:, None] * xi)
 
         # Extract alpha_0s (indices 1 to end) and clip
-        alpha_0_raw = theta[..., 1:]
+        alpha_0_raw = theta[..., 1 + n_filt :]
         alpha_0 = numpyro.deterministic(
             "alpha_0",
             jnp.clip(alpha_0_raw, min_alpha_0, max_alpha_0),
         )
 
-    return t_rise, alpha_0
-
-
-def _sample_mvn_hierarchical_params_common_mode(
-    n_obj,
-    n_filt,
-    mean_t_rise,
-    sigma_t_rise,
-    mean_alpha_0,
-    sigma_alpha_0,
-    min_alpha_0,
-    max_alpha_0,
-    sample_correlations=True,
-):
-    """
-    Sample MVN hyperpriors and per-object parameters.
-
-    Parameters
-    ----------
-    n_obj : int
-        Number of objects
-    n_filt : int
-        Number of filters
-    mean_t_rise : float
-        Population mean for t_rise
-    sigma_t_rise : float
-        Population std for t_rise
-    mean_alpha_0 : float
-        Population mean for the common-mode alpha_0
-    sigma_alpha_0 : float
-        Population standard deviation for the common-mode alpha_0
-    min_alpha_0 : float
-        Minimum alpha value
-    max_alpha_0 : float
-        Maximum alpha value
-    sample_correlations : bool
-        If True, sample correlation matrix. If False, use identity (independent)
-
-    Returns
-    -------
-    t_rise : array, shape (n_obj,)
-    alpha_0 : array, shape (n_obj, n_filt)
-    """
-    n_mvn_dim = 2
-
-    # Mean and scale vectors for MVN
-    mu = jnp.array([mean_t_rise, mean_alpha_0])
-    sigma = jnp.array([sigma_t_rise, sigma_alpha_0])
-
-    # Sample or fix correlation structure
-    if sample_correlations:
-        chol_corr = numpyro.sample(
-            "chol_corr", dist.LKJCholesky(n_mvn_dim, concentration=2.0)
-        )
-    else:
-        chol_corr = jnp.eye(n_mvn_dim)
-
-    L_Cholesky = jnp.matmul(jnp.diag(sigma), chol_corr)
-
-    if sample_correlations:
-        # Store covariance and correlation for diagnostics
-        with numpyro.plate("mvn_dim_0", n_mvn_dim, dim=-2):
-            with numpyro.plate("mvn_dim_1", n_mvn_dim, dim=-1):
-                _ = numpyro.deterministic("Sigma", jnp.matmul(L_Cholesky, L_Cholesky.T))
-                _ = numpyro.deterministic("Corr", jnp.matmul(chol_corr, chol_corr.T))
-
-    # Sample filter-specific noise scales for ALL filters
-    with numpyro.plate("filt_delta", n_filt - 1):
-        sigma_delta = numpyro.sample("sigma_delta", dist.HalfCauchy(0.3))
-        with numpyro.plate("obj", n_obj):
-            delta_raw = numpyro.sample(
-                "delta_raw", dist.Normal(jnp.zeros(n_filt - 1), jnp.ones(n_filt - 1))
-            )
-            delta = delta_raw * sigma_delta[None, :]
-            delta_last = -jnp.sum(delta, axis=-1, keepdims=True)
-            delta_full = numpyro.deterministic(
-                "delta", jnp.concatenate([delta, delta_last], axis=-1)
-            )
-
-    with numpyro.plate("obj", n_obj):
-        # Sample (t_rise, alpha_0_cm) from MVN
-        theta = numpyro.sample(
-            "theta", dist.MultivariateNormal(loc=mu, scale_tril=L_Cholesky)
-        )
-        t_rise = numpyro.deterministic("t_rise", theta[..., 0])
-        alpha_0_cm = numpyro.deterministic("alpha_0_cm", theta[..., 1])
-
-        # Final alpha per filter:  common-mode + color deviation
-        alpha_0 = numpyro.deterministic(
-            "alpha_0",
-            jnp.clip(alpha_0_cm[:, None] + delta_full, min_alpha_0, max_alpha_0),
-        )
-
-    return t_rise, alpha_0
+    return t_rise, t_thresh, alpha_0
 
 
 def _sample_trise_only_hierarchical_params(
@@ -381,6 +281,8 @@ def _sample_trise_only_hierarchical_params(
     n_filt,
     mean_t_rise,
     sigma_t_rise,
+    mean_xi,
+    sigma_xi,
     mean_alpha_0,
     sigma_alpha_0,
     min_alpha_0,
@@ -388,24 +290,10 @@ def _sample_trise_only_hierarchical_params(
 ):
     """Only t_rise hierarchical, alpha_0 sampled independently (like unpooled).
 
-    Parameters
-    ----------
-    n_obj : int
-        Number of objects
-    n_filt : int
-        Number of filters
-    mean_t_rise : float
-        Population mean for t_rise
-    sigma_t_rise : float
-        Population std for t_rise
-    min_alpha_0 : float
-        Minimum alpha value
-    max_alpha_0 : float
-        Maximum alpha value
-
     Returns
     -------
     t_rise : array, shape (n_obj,)
+    t_thresh : array, shape (n_obj,)
     alpha_0 : array, shape (n_obj, n_filt)
     """
 
@@ -415,11 +303,14 @@ def _sample_trise_only_hierarchical_params(
 
     with numpyro.plate("filt", n_filt):
         with numpyro.plate("obj", n_obj):
+            xi_raw = numpyro.sample("xi_raw", dist.Normal(mean_xi, sigma_xi))
+            xi = numpyro.deterministic("xi", jnp.clip(xi_raw, 0, 1))
+            t_thresh = numpyro.deterministic("t_thresh", t_rise[:, None] * xi)
             alpha_0 = sample_alpha_0(
                 mean_alpha_0, sigma_alpha_0, min_alpha_0, max_alpha_0
             )
 
-    return t_rise, alpha_0
+    return t_rise, t_thresh, alpha_0
 
 
 def sample_hierarchical_params(
@@ -447,6 +338,7 @@ def sample_hierarchical_params(
     Returns
     -------
     t_rise : array, shape (n_obj,)
+    t_thresh : array, shape (n_obj, n_filt)
     alpha_0 : array, shape (n_obj, n_filt)
     """
     min_alpha_0 = prior_config.get("min_alpha_0", 1)
@@ -464,6 +356,8 @@ def sample_hierarchical_params(
         # )
         # sigma_alpha_0 = numpyro.sample("sigma_alpha_0_cm", dist.HalfCauchy(0.3))
         with numpyro.plate("filt", n_filt):
+            mean_xi = numpyro.sample("mean_xi", dist.Beta(1, 1))
+            sigma_xi = numpyro.sample("sigma_xi", dist.HalfCauchy(0.1))
             mean_alpha_0 = numpyro.sample(
                 "mean_alpha_0", dist.Uniform(min_alpha_0, max_alpha_0)
             )
@@ -476,6 +370,8 @@ def sample_hierarchical_params(
                 n_filt,
                 mean_t_rise,
                 sigma_t_rise,
+                mean_xi,
+                sigma_xi,
                 mean_alpha_0,
                 sigma_alpha_0,
                 min_alpha_0,
@@ -489,6 +385,8 @@ def sample_hierarchical_params(
                 n_filt,
                 mean_t_rise,
                 sigma_t_rise,
+                mean_xi,
+                sigma_xi,
                 mean_alpha_0,
                 sigma_alpha_0,
                 min_alpha_0,
@@ -500,11 +398,15 @@ def sample_hierarchical_params(
         # Only t_rise hierarchical, alpha_0 non-hierarchical
         mean_alpha_0 = prior_config.get("mean_alpha_0", 2)
         sigma_alpha_0 = prior_config.get("sigma_alpha_0", None)
+        mean_xi = prior_config.get("mean_xi", 0.5)
+        sigma_xi = prior_config.get("sigma_xi", 0.1)
         return _sample_trise_only_hierarchical_params(
             n_obj,
             n_filt,
             mean_t_rise,
             sigma_t_rise,
+            mean_xi,
+            sigma_xi,
             mean_alpha_0,
             sigma_alpha_0,
             min_alpha_0,

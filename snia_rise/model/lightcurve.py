@@ -862,8 +862,11 @@ class SNLightCurveLib(object):
             if matrix in self.inf_data.posterior:
                 n_filt = len(np.unique(self.idx_filt))
                 for i in range(n_filt):
-                    post_sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = (
+                    post_sample[f"{matrix.lower()}_t_rise_xi_flt{i + 1}"] = (
                         self.inf_data.posterior[matrix][..., i + 1, 0]
+                    )
+                    post_sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = (
+                        self.inf_data.posterior[matrix][..., i + n_filt + 1, 0]
                     )
                     for j in range(i + 1, n_filt):
                         post_sample[f"{matrix.lower()}_alpha_flt{i + 1}_flt{j + 1}"] = (
@@ -892,7 +895,11 @@ class SNLightCurveLib(object):
             # "sigma_alpha_0_cm",
         ]
         if sample is not None:
-            vars_to_remove = [var for var in NUISANCES if var in sample]
+            vars_to_remove = [
+                var
+                for var in sample
+                if var in NUISANCES or "raw" in var or var.startswith("_")
+            ]
             sample = sample.drop_vars(vars_to_remove)
         return sample
 
