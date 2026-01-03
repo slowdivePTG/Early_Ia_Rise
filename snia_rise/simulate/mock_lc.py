@@ -164,9 +164,13 @@ class RedbackLightCurveLib(SNLightCurveLib):
             params_sim["t_rise"] = np.random.normal(
                 params_true["mean_t_rise"], params_true["sigma_t_rise"], num_tot
             )
-            params_sim["alpha_0"] = np.clip(np.random.normal(
-                params_true["mean_alpha"], params_true["sigma_alpha"], num_tot
-            ), 1.05, 5.0)
+            params_sim["alpha_0"] = np.clip(
+                np.random.normal(
+                    params_true["mean_alpha"], params_true["sigma_alpha"], num_tot
+                ),
+                1.05,
+                5.0,
+            )
             params_sim["peak_luminosity"] = np.full(num_tot, PEAK_LUMINOSITY)
 
             if model in ["power_law", "curved_power_law"]:
@@ -438,7 +442,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
             end_transient_time=100,
             snr_threshold=3.0,
             add_source_noise=True,
-            source_noise=0.02,
+            source_noise=0.02
+            ** 2,  # a bug in redback - has to be noise**2 for redback < 1.12.1
             redback_compatible_model=True,
             model_kwargs={},
             obs_buffer=100,

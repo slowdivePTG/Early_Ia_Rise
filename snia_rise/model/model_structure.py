@@ -8,13 +8,12 @@ from numpyro import distributions as dist
 from .priors import (
     sample_alpha_0,
     sample_alpha_1,
-    sample_amp_from_t_thresh,
+    sample_amp,
     sample_amp_prime,
     sample_fcqf_params,
     sample_hierarchical_params,
     sample_t_fl,
     sample_t_rise,
-    sample_t_thresh,
 )
 
 F_THRESH = 40  # 40% of the maximum flux
@@ -168,10 +167,11 @@ def hierarchical_model(
     # Observation-level parameters (n_fcqfid,)
     base, beta = sample_fcqf_params(n_fcqfid)
 
-    # Hierarchical structure for t_rise and alpha_0
+    # Hierarchical structure for t_rise, amp and alpha_0
     # t_rise:   shape (n_obj,)
-    # alpha_0: shape (n_obj, n_filt)
-    t_rise, t_thresh, alpha_0 = sample_hierarchical_params(
+    # amp:      shape (n_obj, n_filt)
+    # alpha_0:  shape (n_obj, n_filt)
+    t_rise, amp, alpha_0 = sample_hierarchical_params(
         n_obj,
         n_filt,
         correlation_structure=correlation_structure,
@@ -191,13 +191,13 @@ def hierarchical_model(
     else:
         alpha_1 = jnp.zeros((n_obj, n_filt))
 
-    with numpyro.plate("filt", n_filt, dim=-1):
-        with numpyro.plate("obj", n_obj, dim=-2):
-            # amp_prime = sample_amp_prime()
-            # amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
-            amp = sample_amp_from_t_thresh(
-                alpha_0, alpha_1, t_thresh, f_thresh=F_THRESH, eps=EPS
-            )
+    # with numpyro.plate("filt", n_filt, dim=-1):
+    #     with numpyro.plate("obj", n_obj, dim=-2):
+    #         # amp_prime = sample_amp_prime()
+    #         # amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
+    #         amp = sample_amp_from_t_thresh(
+    #             alpha_0, alpha_1, t_thresh, f_thresh=F_THRESH, eps=EPS
+    #         )
 
     flux_err_obs = flux_err * beta[idx_fcqfid]
 
@@ -282,10 +282,7 @@ def unpooled_model(
                 amp_prime = sample_amp_prime()
                 amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
             else:
-                t_thresh = sample_t_thresh(t_rise)
-                amp = sample_amp_from_t_thresh(
-                    alpha_0, alpha_1, t_thresh, f_thresh=F_THRESH, eps=EPS
-                )
+                amp = sample_amp()
 
     # t_fl: shape (n_obj,)
     t_fl = sample_t_fl(n_obj, t_rise, t0_err)
@@ -372,10 +369,7 @@ def pooled_model(
                 amp_prime = sample_amp_prime()
                 amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
             else:
-                t_thresh = sample_t_thresh(t_rise)
-                amp = sample_amp_from_t_thresh(
-                    alpha_0, alpha_1, t_thresh, f_thresh=F_THRESH, eps=EPS
-                )
+                amp = sample_amp()
 
     flux_err_obs = flux_err * beta[idx_fcqfid]
 

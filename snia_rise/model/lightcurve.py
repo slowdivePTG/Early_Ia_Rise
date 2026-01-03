@@ -447,7 +447,7 @@ class SNLightCurveLib(object):
         self.prior_sample: xr.DataArray = None
 
     @staticmethod
-    def decode_sample(sample: xr.DataArray) -> xr.DataArray:
+    def decode_sample(sample: xr.DataArray, f_thresh=0.025) -> xr.DataArray:
         """
         Decode the posterior samples of each light curve from the packed hierarchical model.
 
@@ -465,17 +465,6 @@ class SNLightCurveLib(object):
         if "mean_t_rise" not in sample:
             sample["mean_t_rise"] = sample["t_rise"].mean(dim="obj")
             sample["sigma_t_rise"] = sample["t_rise"].std(dim="obj", ddof=1)
-        if "xi" in sample:
-            if "mean_xi" not in sample:
-                sample["mean_xi"] = sample["xi"].mean(dim="obj")
-                sample["sigma_xi"] = sample["xi"].std(dim="obj", ddof=1)
-            n_filt = sample.sizes["filt"]
-            for j in range(n_filt):
-                sample[f"corr_t_rise_xi_flt{j + 1}"] = xr.corr(
-                    sample["t_rise"],
-                    sample["xi"][..., j],
-                    dim="obj",
-                )
 
         # Post-calculate differences between filters for mean_alpha_0 (color evolution)
         if "obj" in sample["alpha_0"].dims:
@@ -510,6 +499,20 @@ class SNLightCurveLib(object):
                         sample["alpha_0"][..., j] - sample["alpha_0"][..., k],
                         dim="obj",
                     )
+
+        # Post-calculate t_thresh, xi_thresh and the related correlations
+        exponent = sample["alpha_0"]  # only for power-law model right now
+        log_t_thresh = (np.log10(f_thresh * 100) - np.log10(sample["A"])) / exponent
+        sample["t_thresh"] = 10**log_t_thresh
+        sample["xi"] = sample["t_thresh"] / sample["t_rise"]
+        n_filt = sample.sizes["filt"]
+        for j in range(n_filt):
+            sample[f"corr_t_rise_xi_flt{j + 1}"] = xr.corr(
+                sample["t_rise"],
+                sample["xi"][..., j],
+                dim="obj",
+            )
+
         return sample
 
     def decode_prior_sample(self):
@@ -560,7 +563,7 @@ class SNLightCurveLib(object):
 
             # A: (n_chains, n_samples, n_obj, n_filt)
             lc.post_sample["A"] = self.post_sample["A"][..., k, :]
-            lc.post_sample["Aprime"] = self.post_sample["A"][..., k, :]
+            # lc.post_sample["Aprime"] = self.post_sample["Aprime"][..., k, :]
 
             # t_fl: (n_chains, n_samples, n_obj)
             lc.post_sample["t_rise"] = self.post_sample["t_rise"][..., k]
@@ -882,7 +885,7 @@ class SNLightCurveLib(object):
             if matrix in self.inf_data.posterior:
                 n_filt = len(np.unique(self.idx_filt))
                 for i in range(n_filt):
-                    post_sample[f"{matrix.lower()}_t_rise_xi_flt{i + 1}"] = (
+                    post_sample[f"{matrix.lower()}_t_rise_log_amp_flt{i + 1}"] = (
                         self.inf_data.posterior[matrix][..., i + 1, 0]
                     )
                     post_sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = (

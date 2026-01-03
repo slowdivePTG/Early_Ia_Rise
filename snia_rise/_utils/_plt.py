@@ -144,7 +144,8 @@ def show_kde_posterior(
         alpha=0.25, lw=2, linestyle="--", color=kwargs.get("color", "0.5")
     )
 
-    sns.kdeplot(x=param_prior, ax=ax, bw_adjust=bw_adjust, **params_prior)
+    if show_prior:
+        sns.kdeplot(x=param_prior, ax=ax, bw_adjust=bw_adjust, **params_prior)
     # sns.histplot(
     #     x=param_prior,
     #     ax=ax,
