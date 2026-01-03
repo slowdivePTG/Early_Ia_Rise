@@ -164,9 +164,9 @@ class RedbackLightCurveLib(SNLightCurveLib):
             params_sim["t_rise"] = np.random.normal(
                 params_true["mean_t_rise"], params_true["sigma_t_rise"], num_tot
             )
-            params_sim["alpha_0"] = np.random.normal(
+            params_sim["alpha_0"] = np.clip(np.random.normal(
                 params_true["mean_alpha"], params_true["sigma_alpha"], num_tot
-            )
+            ), 1.05, 5.0)
             params_sim["peak_luminosity"] = np.full(num_tot, PEAK_LUMINOSITY)
 
             if model in ["power_law", "curved_power_law"]:
@@ -459,7 +459,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         idx_early = obs["phase"] < -10
         idx_rise = (obs["phase"] >= -10) & (obs["phase"] < 0)
         idx_fall = (obs["phase"] >= 0) & (obs["phase"] < 10)
-        idx_baseline = (obs["phase"] < -25) & (obs["phase"] > -100)
+        idx_baseline = (obs["phase"] < -25) & (obs["phase"] > -60)
 
         if (
             # >= 2 high-SNR points in either g or r band during early phase

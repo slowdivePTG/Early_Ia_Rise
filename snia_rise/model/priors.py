@@ -74,7 +74,7 @@ def sample_alpha_0(
     if mean_alpha_0 is None:
         mean_alpha_0 = prior_config.get("mean_alpha_0", 2)
     if sigma_alpha_0 is None:
-        sigma_alpha_0 = prior_config.get("sigma_alpha_0", 0.3)
+        sigma_alpha_0 = prior_config.get("sigma_alpha_0", None)
     if min_alpha_0 is None:
         min_alpha_0 = prior_config.get("min_alpha_0", 1)
     if max_alpha_0 is None:
@@ -422,7 +422,7 @@ def sample_hierarchical_params(
     elif correlation_structure == "trise_only":
         # Only t_rise hierarchical, alpha_0 non-hierarchical
         mean_alpha_0 = prior_config.get("mean_alpha_0", 2)
-        sigma_alpha_0 = prior_config.get("sigma_alpha_0", 0.3)
+        sigma_alpha_0 = prior_config.get("sigma_alpha_0", None)
         return _sample_trise_only_hierarchical_params(
             n_obj, n_filt, mean_t_rise, sigma_t_rise, mean_alpha_0, sigma_alpha_0
         )
