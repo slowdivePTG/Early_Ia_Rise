@@ -8,7 +8,6 @@ from numpyro import distributions as dist
 from .priors import (
     sample_alpha_0,
     sample_alpha_1,
-    sample_amp,
     sample_amp_prime,
     sample_fcqf_params,
     sample_hierarchical_params,
@@ -255,8 +254,6 @@ def unpooled_model(
     n_filt = len(np.unique(idx_filt))
     n_obj = len(np.unique(idx_obj))
 
-    prior_type = prior_config.get("prior_type", "uniform").lower()
-
     # base, beta: shape (n_fcqfid,)
     base, beta = sample_fcqf_params(n_fcqfid)
 
@@ -277,12 +274,8 @@ def unpooled_model(
     with numpyro.plate("filt", n_filt, dim=-1):
         with numpyro.plate("obj", n_obj, dim=-2):
             alpha_0 = sample_alpha_0(prior_config=prior_config)
-
-            if prior_type == "miller":
-                amp_prime = sample_amp_prime()
-                amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
-            else:
-                amp = sample_amp()
+            amp_prime = sample_amp_prime()
+            amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
 
     # t_fl: shape (n_obj,)
     t_fl = sample_t_fl(n_obj, t_rise, t0_err)
@@ -339,8 +332,6 @@ def pooled_model(
     n_fcqfid = len(np.unique(idx_fcqfid))
     n_filt = len(np.unique(idx_filt))
 
-    prior_type = prior_config.get("prior_type", "uniform").lower()
-
     # base, beta: shape (n_fcqfid,)
     base, beta = sample_fcqf_params(n_fcqfid)
 
@@ -365,11 +356,8 @@ def pooled_model(
         alpha_0 = sample_alpha_0(prior_config=prior_config)
 
         with numpyro.plate("obj", n_obj, dim=-2):
-            if prior_type == "miller":
-                amp_prime = sample_amp_prime()
-                amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
-            else:
-                amp = sample_amp()
+            amp_prime = sample_amp_prime()
+            amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
 
     flux_err_obs = flux_err * beta[idx_fcqfid]
 

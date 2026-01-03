@@ -474,31 +474,27 @@ class SNLightCurveLib(object):
 
             n_filt = sample.sizes["filt"]
             for j in range(n_filt):
-                sample[f"corr_t_rise_alpha_flt{j + 1}"] = xr.corr(
-                    sample["t_rise"],
-                    sample["alpha_0"][..., j],
-                    dim="obj",
-                )
-                if "xi" in sample:
-                    sample[f"corr_t_rise_xi_flt{j + 1}"] = xr.corr(
+                if f"corr_t_rise_alpha_flt{j + 1}" not in sample:
+                    sample[f"corr_t_rise_alpha_flt{j + 1}"] = xr.corr(
                         sample["t_rise"],
-                        sample["xi"][..., j],
+                        sample["alpha_0"][..., j],
                         dim="obj",
                     )
                 for k in range(j + 1, n_filt):
                     sample[f"mean_alpha_flt{j + 1}-flt{k + 1}"] = (
                         sample["mean_alpha_0"][..., j] - sample["mean_alpha_0"][..., k]
                     )
-                    sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"] = xr.corr(
-                        sample["alpha_0"][..., j],
-                        sample["alpha_0"][..., k],
-                        dim="obj",
-                    )
                     sample[f"corr_t_rise_alpha_flt{j + 1}-flt{k + 1}"] = xr.corr(
                         sample["t_rise"],
                         sample["alpha_0"][..., j] - sample["alpha_0"][..., k],
                         dim="obj",
                     )
+                    if f"corr_t_rise_alpha_flt{j + 1}_flt{k + 1}" not in sample:
+                        sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"] = xr.corr(
+                            sample["alpha_0"][..., j],
+                            sample["alpha_0"][..., k],
+                            dim="obj",
+                        )
 
         # Post-calculate t_thresh, xi_thresh and the related correlations
         exponent = sample["alpha_0"]  # only for power-law model right now
@@ -885,10 +881,10 @@ class SNLightCurveLib(object):
             if matrix in self.inf_data.posterior:
                 n_filt = len(np.unique(self.idx_filt))
                 for i in range(n_filt):
-                    post_sample[f"{matrix.lower()}_t_rise_log_amp_flt{i + 1}"] = (
+                    post_sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = (
                         self.inf_data.posterior[matrix][..., i + 1, 0]
                     )
-                    post_sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = (
+                    post_sample[f"{matrix.lower()}_t_rise_log_amp_prime_flt{i + 1}"] = (
                         self.inf_data.posterior[matrix][..., i + n_filt + 1, 0]
                     )
                     for j in range(i + 1, n_filt):

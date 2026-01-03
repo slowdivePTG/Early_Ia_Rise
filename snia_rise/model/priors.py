@@ -4,7 +4,6 @@ import jax.numpy as jnp
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
-from jax._src.interpreters.mlir import min_hlo
 
 EPS = 1e-5  # Small value to avoid division by zero
 
@@ -148,36 +147,6 @@ def sample_amp_prime():
     return amp_prime
 
 
-# def sample_amp_from_t_thresh(alpha_0, alpha_1, t_thresh, f_thresh, eps):
-#     """
-#     Sample amplitude from t_thresh.
-
-#     Returns
-#     -------
-#     amp : array
-#         Amplitude normalization (before alpha_0 correction)
-#     """
-#     exponent = alpha_0 + alpha_1 * t_thresh
-#     log_amp = jnp.log(f_thresh) - exponent * jnp.log(jnp.maximum(eps, t_thresh))
-#     amp = numpyro.deterministic("A", jnp.exp(log_amp))
-
-#     return amp
-
-
-def sample_amp():
-    """
-    Sample amplitude.
-
-    Returns
-    -------
-    amp : array
-        Amplitude normalization
-    """
-    amp = numpyro.sample("A", dist.LogUniform(1e-5, 1e5))
-
-    return amp
-
-
 def sample_t_rise(prior_config):
     """
     Sample t_rise parameters.
@@ -206,20 +175,6 @@ def sample_t_rise(prior_config):
         t_rise = numpyro.sample("t_rise", dist.Uniform(t_rise_min, t_rise_max))
 
     return t_rise
-
-
-# def sample_t_thresh(t_rise):
-#     """
-#     Sample t_thresh parameters.
-
-#     Returns
-#     -------
-#     t_thresh : array, shape ()
-#     """
-#     xi = numpyro.sample("xi", dist.Beta(2, 2))
-#     t_thresh = numpyro.deterministic("t_thresh", t_rise[:, None] * xi)
-
-#     return t_thresh
 
 
 def sample_t_fl(n_obj: int, t_rise: jnp.ndarray, t0_err: jnp.ndarray):
@@ -255,10 +210,10 @@ def _sample_mvn_hierarchical_params(
     n_filt,
     mean_t_rise,
     sigma_t_rise,
-    mean_log_amp,
-    sigma_log_amp,
     mean_alpha_0,
     sigma_alpha_0,
+    mean_log_amp_prime,
+    sigma_log_amp_prime,
     sample_correlations=True,
 ):
     """
@@ -275,10 +230,12 @@ def _sample_mvn_hierarchical_params(
 
     # Mean and scale vectors for MVN
     # t_rise is index 0
-    # xi for filters are indices 1..n_filt
     # alpha_0 for filters are indices n_filt+1..2*n_filt
-    mu = jnp.concatenate([jnp.array([mean_t_rise]), mean_log_amp, mean_alpha_0])
-    sigma = jnp.concatenate([jnp.array([sigma_t_rise]), sigma_log_amp, sigma_alpha_0])
+    # log A' for filters are indices 1..n_filt
+    mu = jnp.concatenate([jnp.array([mean_t_rise]), mean_alpha_0, mean_log_amp_prime])
+    sigma = jnp.concatenate(
+        [jnp.array([sigma_t_rise]), sigma_alpha_0, sigma_log_amp_prime]
+    )
 
     # Sample or fix correlation structure
     if sample_correlations:
@@ -311,16 +268,19 @@ def _sample_mvn_hierarchical_params(
         # Extract rise times (t_rise)
         t_rise = numpyro.deterministic("t_rise", jnp.clip(theta[..., 0], EPS, None))
 
-        # Extract amplitudes (A)
-        log_amp = jnp.clip(theta[..., 1 : 1 + n_filt])
-        amp = numpyro.deterministic("A", jnp.power(10, log_amp))
+    with numpyro.plate("obj", n_obj, dim=-2):
+        with numpyro.plate("filt", n_filt, dim=-1):
+            # Extract power-law indices (alpha_0) and clip
+            alpha_0_raw = theta[..., 1 : 1 + n_filt]
+            alpha_0 = numpyro.deterministic(
+                "alpha_0",
+                jnp.clip(alpha_0_raw, 1 + EPS, None),
+            )
 
-        # Extract power-law indices (alpha_0) and clip
-        alpha_0_raw = theta[..., 1 + n_filt :]
-        alpha_0 = numpyro.deterministic(
-            "alpha_0",
-            jnp.clip(alpha_0_raw, 1 + EPS, None),
-        )
+            # Extract amplitudes (A)
+            log_amp_prime = jnp.clip(theta[..., 1 + n_filt :])
+            _ = numpyro.deterministic("Aprime", jnp.power(10, log_amp_prime))
+            amp = numpyro.deterministic("A", jnp.power(10, log_amp_prime - alpha_0))
 
     return t_rise, amp, alpha_0
 
@@ -350,8 +310,9 @@ def _sample_trise_only_hierarchical_params(
 
     with numpyro.plate("filt", n_filt, dim=-1):
         with numpyro.plate("obj", n_obj, dim=-2):
-            amp = sample_amp()
             alpha_0 = sample_alpha_0(mean_alpha_0, sigma_alpha_0, 1 + EPS, None)
+            amp_prime = sample_amp_prime()
+            amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
 
     return t_rise, amp, alpha_0
 
@@ -402,8 +363,10 @@ def sample_hierarchical_params(
         # )
         # sigma_alpha_0 = numpyro.sample("sigma_alpha_0_cm", dist.HalfNormal(0.3))
         with numpyro.plate("filt", n_filt):
-            mean_log_amp = numpyro.sample("mean_log_A", dist.Uniform(-3, 3))
-            sigma_log_amp = numpyro.sample("sigma_log_A", dist.HalfNormal(0.5))
+            mean_log_amp_prime = numpyro.sample("mean_log_Aprime", dist.Uniform(-3, 3))
+            sigma_log_amp_prime = numpyro.sample(
+                "sigma_log_Aprime", dist.HalfNormal(0.5)
+            )
             mean_alpha_0 = numpyro.sample(
                 "mean_alpha_0", dist.Uniform(min_mean_alpha_0, max_mean_alpha_0)
             )
@@ -416,10 +379,10 @@ def sample_hierarchical_params(
                 n_filt,
                 mean_t_rise,
                 sigma_t_rise,
-                mean_log_amp,
-                sigma_log_amp,
                 mean_alpha_0,
                 sigma_alpha_0,
+                mean_log_amp_prime,
+                sigma_log_amp_prime,
                 sample_correlations=True,
             )
         else:  # independent
@@ -429,10 +392,10 @@ def sample_hierarchical_params(
                 n_filt,
                 mean_t_rise,
                 sigma_t_rise,
-                mean_log_amp,
-                sigma_log_amp,
                 mean_alpha_0,
                 sigma_alpha_0,
+                mean_log_amp_prime,
+                sigma_log_amp_prime,
                 sample_correlations=False,
             )
 
