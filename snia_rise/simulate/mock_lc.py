@@ -157,8 +157,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
             params_true = dict(
                 mean_alpha=params_mean.get("alpha", 2.0),
                 sigma_alpha=params_sigma.get("alpha", 0.3),
-                mean_t_rise=params_mean.get("t_rise", 18.5),
-                sigma_t_rise=params_sigma.get("t_rise", 1.5),
+                mean_t_rise=params_mean.get("t_rise", 20),
+                sigma_t_rise=params_sigma.get("t_rise", 2),
             )
 
             params_sim["t_rise"] = np.random.normal(
@@ -335,6 +335,17 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             params_valid_det.append(single_params)
 
+            if (idx_obs % 50 == 0) and (idx_obs > 0) and "power_law" in model:
+                params_valid_det_df = pd.DataFrame(params_valid_det).reset_index(
+                    drop=True
+                )
+                print(
+                    f"Current alpha = {np.mean(params_valid_det_df['alpha_0']):.2f} +/- {np.std(params_valid_det_df['alpha_0']):.2f}"
+                )
+                print(
+                    f"Current t_rise = {np.mean(params_valid_det_df['t_rise']):.1f} +/- {np.std(params_valid_det_df['t_rise']):.1f}"
+                )
+
         params_valid_det = pd.DataFrame(params_valid_det).reset_index(drop=True)
 
         params_valid_det.to_csv(
@@ -442,8 +453,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
             end_transient_time=100,
             snr_threshold=3.0,
             add_source_noise=True,
-            source_noise=0.02
-            ** 2,  # a bug in redback - has to be noise**2 for redback < 1.12.1
+            source_noise=0.02**2,  # a bug in redback < 1.12.1 - has to be noise**2
             redback_compatible_model=True,
             model_kwargs={},
             obs_buffer=100,
@@ -456,7 +466,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         idx_g = obs["band"] == "ztfg"
         idx_r = obs["band"] == "ztfr"
         obs = obs[idx_g | idx_r].reset_index(drop=True)
-        idx_snr = obs["flux(erg/cm2/s)"] / obs["flux_error"] > 5
+        idx_snr = obs["flux(erg/cm2/s)"] / obs["flux_error"] > 3
         obs["phase"] = (obs["time"] - params["t0_mjd_transient"]) / (
             1 + params["redshift"]
         ) - params["t_rise"]

@@ -844,7 +844,7 @@ class SNLightCurveLib(object):
             infer.NUTS(
                 kernel,
                 init_strategy=init_strategy_main,
-                target_accept_prob=0.9,
+                target_accept_prob=0.95,
                 **nuts_params,
             ),
             num_warmup=num_warmup - num_sa,

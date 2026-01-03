@@ -126,7 +126,7 @@ def sample_alpha_1():
     alpha_1 : array, shape ()
         Curvature parameter
     """
-    mean_neg = 1 / (18 * (1 + np.log(18)))
+    mean_neg = 1 / (20 * (1 + np.log(20)))
     neg_alpha_1 = numpyro.sample("-alpha_1", dist.Exponential(1 / mean_neg))
     alpha_1 = numpyro.deterministic("alpha_1", -neg_alpha_1)
 
