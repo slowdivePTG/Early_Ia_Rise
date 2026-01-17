@@ -12,6 +12,7 @@ from sklearn.preprocessing import LabelEncoder
 
 from .._utils import plt
 from .model_structure import (
+    T_PIVOT,
     f_t,
     hierarchical_model,
     pooled_model,
@@ -288,7 +289,7 @@ class SNLightCurve(object):
             ax.set_ylim(-offset * (max(n_color, 2) - 1), 100 + offset)
 
             if post_sample is not None:
-                amp_ = np.ravel(post_sample["A"][:, :, flt])
+                amp_prime_ = np.ravel(post_sample["Aprime"][:, :, flt])
                 alpha_0_ = np.ravel(post_sample["alpha_0"][:, :, flt])
                 if "alpha_1" in post_sample.keys():
                     alpha_1_ = np.ravel(post_sample["alpha_1"][:, :, flt])
@@ -298,7 +299,15 @@ class SNLightCurve(object):
                 for i in idx_post_check:
                     ax.plot(
                         t_pred,
-                        f_t(t_pred, t_fl[i], 0, amp_[i], alpha_0_[i], alpha_1_[i])
+                        f_t(
+                            t_pred,
+                            t_fl[i],
+                            0,
+                            amp_prime_[i],
+                            alpha_0_[i],
+                            alpha_1_[i],
+                            t_pivot=T_PIVOT,
+                        )
                         - (flt - 0.5 * (n_color - 1)) * offset,
                         color="0.2",
                         lw=0.1,
@@ -447,7 +456,9 @@ class SNLightCurveLib(object):
         self.prior_sample: xr.DataArray = None
 
     @staticmethod
-    def decode_sample(sample: xr.DataArray, f_thresh=0.025) -> xr.DataArray:
+    def decode_sample(
+        sample: xr.DataArray, f_thresh=0.025, t_pivot=7.0
+    ) -> xr.DataArray:
         """
         Decode the posterior samples of each light curve from the packed hierarchical model.
 
@@ -498,8 +509,10 @@ class SNLightCurveLib(object):
 
         # Post-calculate t_thresh, xi_thresh and the related correlations
         exponent = sample["alpha_0"]  # only for power-law model right now
-        log_t_thresh = (np.log10(f_thresh * 100) - np.log10(sample["A"])) / exponent
-        sample["t_thresh"] = 10**log_t_thresh
+        log_t_thresh = (
+            np.log10(f_thresh * 100) - np.log10(sample["Aprime"])
+        ) / exponent
+        sample["t_thresh"] = 10**log_t_thresh * t_pivot
         sample["xi"] = sample["t_thresh"] / sample["t_rise"]
         n_filt = sample.sizes["filt"]
         for j in range(n_filt):
@@ -558,8 +571,8 @@ class SNLightCurveLib(object):
             lc.post_sample["beta"] = self.post_sample["beta"][..., fcqfid_in_obj]
 
             # A: (n_chains, n_samples, n_obj, n_filt)
-            lc.post_sample["A"] = self.post_sample["A"][..., k, :]
-            # lc.post_sample["Aprime"] = self.post_sample["Aprime"][..., k, :]
+            lc.post_sample["Aprime"] = self.post_sample["Aprime"][..., k, :]
+            # lc.post_sample["A"] = self.post_sample["A"][..., k, :]
 
             # t_fl: (n_chains, n_samples, n_obj)
             lc.post_sample["t_rise"] = self.post_sample["t_rise"][..., k]
@@ -891,9 +904,6 @@ class SNLightCurveLib(object):
                         post_sample[f"{matrix.lower()}_alpha_flt{i + 1}_flt{j + 1}"] = (
                             self.inf_data.posterior[matrix][..., i + 1, j + 1]
                         )
-                # post_sample[f"{matrix.lower()}_t_rise_alpha"] = self.inf_data.posterior[
-                #     matrix
-                # ][..., 0, 1]
 
         # store the posterior samples
         self.post_sample = self.drop_nuisances(post_sample)

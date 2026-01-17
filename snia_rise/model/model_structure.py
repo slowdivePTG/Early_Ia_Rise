@@ -17,6 +17,7 @@ from .priors import (
 
 F_THRESH = 40  # 40% of the maximum flux
 EPS = 1e-10  # Small value to avoid division by zero
+T_PIVOT = 7.0  # Pivot time for the power-law rise (the typical time to reach 40% of the maximum flux)
 
 ####################################################################################################
 ##                      Power-law rise function for SNe Ia light curves                           ##
@@ -28,9 +29,10 @@ def f_t(
     t: float | ArrayLike,
     t_fl: float | ArrayLike,
     base: float | ArrayLike,
-    amp: float | ArrayLike,
+    amp_prime: float | ArrayLike,
     alpha_0: float | ArrayLike,
     alpha_1: float | ArrayLike = 0.0,
+    t_pivot: float | ArrayLike = T_PIVOT,
     eps: float | ArrayLike = EPS,
 ):
     """
@@ -44,12 +46,14 @@ def f_t(
         Time of the first light.
     base : float or array-like
         Baseline flux.
-    amp : float or array-like
+    amp_prime : float or array-like
         Proportionality factor.
     alpha_0 : float or array-like
         Rising power-law index.
     alpha_1 : float or array-like
         Correction factor for the power-law rise.
+    t_pivot : float or array-like
+        Pivot time for the power-law rise.
     eps : float, optional, default = 1e-10
         Small value to avoid numerical issues when t - t_fl is small and alpha_0 < 1
 
@@ -59,23 +63,26 @@ def f_t(
         The calculated value of f(t).
     """
     u = jnp.maximum(t - t_fl, eps)
-    exponent = alpha_0 * (1 + alpha_1 * u)
-    f = jnp.where(t < t_fl, 0, amp * jnp.power(u, exponent)) + base
+    ln_u_p = jnp.log(u / t_pivot)
+    exponent = alpha_0 * (1 + alpha_1 * u / t_pivot)
+    rise = amp_prime * jnp.exp(exponent * ln_u_p)
+    f = jnp.where(t < t_fl, base, rise + base)
     return f
 
 
 @jax.jit
-def df_t_dt_fl(t, t_fl, base, amp, alpha_0, alpha_1, eps=EPS):
+def df_t_dt_fl(t, t_fl, base, amp_prime, alpha_0, alpha_1, t_pivot=T_PIVOT, eps=EPS):
     """
     Calculate the derivative of f(t) with respect to t_fl in an analytic manner.
     """
     # Get f_t
     u = jnp.maximum(t - t_fl, eps)
-    exponent = alpha_0 * (1 + alpha_1 * u)
-    f = amp * jnp.power(u, exponent)
+    ln_u_p = jnp.log(u / t_pivot)
+    exponent = alpha_0 * (1 + alpha_1 * u / t_pivot)
+    f = amp_prime * jnp.exp(exponent * ln_u_p)
 
     term_power = exponent / u
-    term_log = (alpha_0 * alpha_1) * jnp.log(u)
+    term_log = (alpha_0 * alpha_1 / t_pivot) * ln_u_p
 
     # Total derivative w.r.t u
     df_du = f * (term_power + term_log)
@@ -170,7 +177,7 @@ def hierarchical_model(
     # t_rise:   shape (n_obj,)
     # amp:      shape (n_obj, n_filt)
     # alpha_0:  shape (n_obj, n_filt)
-    t_rise, amp, alpha_0 = sample_hierarchical_params(
+    t_rise, amp_prime, alpha_0 = sample_hierarchical_params(
         n_obj,
         n_filt,
         correlation_structure=correlation_structure,
@@ -193,37 +200,31 @@ def hierarchical_model(
     # with numpyro.plate("filt", n_filt, dim=-1):
     #     with numpyro.plate("obj", n_obj, dim=-2):
     #         # amp_prime = sample_amp_prime()
-    #         # amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
+    #         # amp = numpyro.deterministic("A", amp_prime / jnp.power(T_PIVOT,alpha_0))
     #         amp = sample_amp_from_t_thresh(
     #             alpha_0, alpha_1, t_thresh, f_thresh=F_THRESH, eps=EPS
     #         )
 
-    flux_err_obs = flux_err * beta[idx_fcqfid]
+    # shape: (n_obs,)
+    t_fl_obs = t_fl[idx_obj]
+    base_obs = base[idx_fcqfid]
+    beta_obs = beta[idx_fcqfid]
+    amp_prime_obs = amp_prime[idx_obj, idx_filt]
+    alpha_0_obs = alpha_0[idx_obj, idx_filt]
+    alpha_1_obs = alpha_1[idx_obj, idx_filt]
+    t0_err_obs = t0_err[idx_obj]
+    flux_err_obs = flux_err * beta_obs
 
     # Add extra uncertainty component from t0_err via error propagation
-    df_dtfl = df_t_dt_fl(
-        t,
-        t_fl[idx_obj],
-        base[idx_fcqfid],
-        amp[idx_obj, idx_filt],
-        alpha_0[idx_obj, idx_filt],
-        alpha_1[idx_obj, idx_filt],
-    )
-    flux_err_obs = jnp.sqrt(flux_err_obs**2 + (df_dtfl * t0_err[idx_obj]) ** 2)
+    df_dtfl = df_t_dt_fl(t, t_fl_obs, base_obs, amp_prime_obs, alpha_0_obs, alpha_1_obs)
+    flux_err_obs = jnp.sqrt(flux_err_obs**2 + (df_dtfl * t0_err_obs) ** 2)
 
     # Likelihood
     with numpyro.plate("data", len(t)):
         numpyro.sample(
             "flux",
             dist.Normal(
-                f_t(
-                    t,
-                    t_fl[idx_obj],
-                    base[idx_fcqfid],
-                    amp[idx_obj, idx_filt],
-                    alpha_0[idx_obj, idx_filt],
-                    alpha_1[idx_obj, idx_filt],
-                ),
+                f_t(t, t_fl_obs, base_obs, amp_prime_obs, alpha_0_obs, alpha_1_obs),
                 flux_err_obs,
             ),
             obs=flux,
@@ -275,37 +276,30 @@ def unpooled_model(
         with numpyro.plate("obj", n_obj, dim=-2):
             alpha_0 = sample_alpha_0(prior_config=prior_config)
             amp_prime = sample_amp_prime()
-            amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
 
     # t_fl: shape (n_obj,)
     t_fl = sample_t_fl(n_obj, t_rise, t0_err)
 
-    flux_err_obs = flux_err * beta[idx_fcqfid]
+    # shape: (n_obs,)
+    t_fl_obs = t_fl[idx_obj]
+    base_obs = base[idx_fcqfid]
+    beta_obs = beta[idx_fcqfid]
+    amp_prime_obs = amp_prime[idx_obj, idx_filt]
+    alpha_0_obs = alpha_0[idx_obj, idx_filt]
+    alpha_1_obs = alpha_1[idx_obj, idx_filt]
+    t0_err_obs = t0_err[idx_obj]
+    flux_err_obs = flux_err * beta_obs
 
     # Add extra uncertainty component from t0_err via error propagation
-    df_dtfl = df_t_dt_fl(
-        t,
-        t_fl[idx_obj],
-        base[idx_fcqfid],
-        amp[idx_obj, idx_filt],
-        alpha_0[idx_obj, idx_filt],
-        alpha_1[idx_obj, idx_filt],
-    )
-    flux_err_obs = jnp.sqrt(flux_err_obs**2 + (df_dtfl * t0_err[idx_obj]) ** 2)
+    df_dtfl = df_t_dt_fl(t, t_fl_obs, base_obs, amp_prime_obs, alpha_0_obs, alpha_1_obs)
+    flux_err_obs = jnp.sqrt(flux_err_obs**2 + (df_dtfl * t0_err_obs) ** 2)
 
     # Likelihood
     with numpyro.plate("data", len(t)):
         numpyro.sample(
             "flux",
             dist.Normal(
-                f_t(
-                    t,
-                    t_fl[idx_obj],
-                    base[idx_fcqfid],
-                    amp[idx_obj, idx_filt],
-                    alpha_0[idx_obj, idx_filt],
-                    alpha_1[idx_obj, idx_filt],
-                ),
+                f_t(t, t_fl_obs, base_obs, amp_prime_obs, alpha_0_obs, alpha_1_obs),
                 flux_err_obs,
             ),
             obs=flux,
@@ -357,34 +351,27 @@ def pooled_model(
 
         with numpyro.plate("obj", n_obj, dim=-2):
             amp_prime = sample_amp_prime()
-            amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
 
-    flux_err_obs = flux_err * beta[idx_fcqfid]
+    # shape: (n_obs,)
+    t_fl_obs = t_fl[idx_obj]
+    base_obs = base[idx_fcqfid]
+    beta_obs = beta[idx_fcqfid]
+    amp_prime_obs = amp_prime[idx_obj, idx_filt]
+    alpha_0_obs = alpha_0[idx_filt]
+    alpha_1_obs = alpha_1[idx_filt]
+    t0_err_obs = t0_err[idx_obj]
+    flux_err_obs = flux_err * beta_obs
 
     # Add extra uncertainty component from t0_err via error propagation
-    df_dtfl = df_t_dt_fl(
-        t,
-        t_fl[idx_obj],
-        base[idx_fcqfid],
-        amp[idx_obj, idx_filt],
-        alpha_0[idx_filt],
-        alpha_1[idx_filt],
-    )
-    flux_err_obs = jnp.sqrt(flux_err_obs**2 + (df_dtfl * t0_err[idx_obj]) ** 2)
+    df_dtfl = df_t_dt_fl(t, t_fl_obs, base_obs, amp_prime_obs, alpha_0_obs, alpha_1_obs)
+    flux_err_obs = jnp.sqrt(flux_err_obs**2 + (df_dtfl * t0_err_obs) ** 2)
 
     # Likelihood
     with numpyro.plate("data", len(t)):
         numpyro.sample(
             "flux",
             dist.Normal(
-                f_t(
-                    t,
-                    t_fl[idx_obj],
-                    base[idx_fcqfid],
-                    amp[idx_obj, idx_filt],
-                    alpha_0[idx_filt],
-                    alpha_1[idx_filt],
-                ),
+                f_t(t, t_fl_obs, base_obs, amp_prime_obs, alpha_0_obs, alpha_1_obs),
                 flux_err_obs,
             ),
             obs=flux,

@@ -64,9 +64,10 @@ class RedbackLightCurveLib(SNLightCurveLib):
             )
             idx_early = (
                 lc_peak["phase"]
-                <= lc_peak["phase"].values[
+                < lc_peak["phase"].values[
                     lc_peak["flux"].values < early_threshold * 100
                 ][-1]
+                + 0.5
             )
             lc_early_lib.append({key: item[idx_early] for key, item in lc_peak.items()})
 
@@ -122,18 +123,23 @@ class RedbackLightCurveLib(SNLightCurveLib):
         from scipy.optimize import brentq
 
         from .._utils._plt import set_plot_style
-        from .sed import broken_power_law_rise_flat_sed, power_law_rise_flat_sed
+        from .sed import (
+            broken_power_law_rise_flat_sed,
+            curved_power_law_rise_flat_sed,
+            power_law_rise_flat_sed,
+        )
 
         logging.getLogger("redback").setLevel(logging.WARNING)
 
         # For the power-law rise models
         T0_MJD_TRANSIENT = 59050.0
         PEAK_LUMINOSITY = 2e28  # intrinsic peak luminosity (erg/s/Hz)
+        T_PIVOT = 7.0
 
         # Sample the population parameters using numpy.random
         num_tot = n_lc * 20  # oversample to account for non-detections
 
-        np.random.seed(n_lc * 114514 + 1919810)
+        np.random.seed(n_lc * 114514)
 
         if params_mean is None:
             params_mean = {}
@@ -157,8 +163,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
             params_true = dict(
                 mean_alpha=params_mean.get("alpha", 2.0),
                 sigma_alpha=params_sigma.get("alpha", 0.3),
-                mean_t_rise=params_mean.get("t_rise", 20),
-                sigma_t_rise=params_sigma.get("t_rise", 2),
+                mean_t_rise=params_mean.get("t_rise", 18),
+                sigma_t_rise=params_sigma.get("t_rise", 1.5),
             )
 
             params_sim["t_rise"] = np.random.normal(
@@ -173,10 +179,22 @@ class RedbackLightCurveLib(SNLightCurveLib):
             )
             params_sim["peak_luminosity"] = np.full(num_tot, PEAK_LUMINOSITY)
 
-            if model in ["power_law", "curved_power_law"]:
+            if model == "power_law":
+                params_true["mean_ln_Aprime"] = params_mean.get("ln_Aprime", np.log(40))
+                params_true["sigma_ln_Aprime"] = params_sigma.get("ln_Aprime", 0.2)
+                params_sim["amp_prime"] = np.exp(
+                    np.random.normal(
+                        params_true["mean_ln_Aprime"],
+                        params_true["sigma_ln_Aprime"],
+                        num_tot,
+                    )
+                )
+
+            if model == "curved_power_law":
                 # Compute alpha_1 based on other parameters
                 params_sim["alpha_1"] = -1 / (
-                    params_sim["t_rise"] * (1 + np.log(params_sim["t_rise"]))
+                    (params_sim["t_rise"] / T_PIVOT)
+                    * (1 + np.log(params_sim["t_rise"] / T_PIVOT))
                 )
 
             elif model == "broken_power_law":
@@ -285,10 +303,10 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 break
 
             if "power_law" in model:
-                single_params["force_power_law"] = model == "power_law"
-
-                if model in ["power_law", "curved_power_law"]:
+                if model == "power_law":
                     sed_model = power_law_rise_flat_sed
+                elif model == "curved_power_law":
+                    sed_model = curved_power_law_rise_flat_sed
                 elif model == "broken_power_law":
                     sed_model = broken_power_law_rise_flat_sed
 

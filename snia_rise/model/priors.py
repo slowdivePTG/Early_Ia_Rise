@@ -222,7 +222,7 @@ def _sample_mvn_hierarchical_params(
     Returns
     -------
     t_rise : array, shape (n_obj,)
-    log A : array, shape (n_obj, n_filt)
+    amp_prime : array, shape (n_obj, n_filt)
     alpha_0 : array, shape (n_obj, n_filt)
     """
     # Dimension is t_rise (1), ln A (n_filt), alpha_0 for each filter (n_filt)
@@ -262,27 +262,29 @@ def _sample_mvn_hierarchical_params(
         if L_Cholesky is None:
             theta = mu + sigma * theta_raw
         else:
-            # (dim, dim) @ (n_obj, dim).T -> (n_obj, dim)
-            theta = mu + (L_Cholesky @ theta_raw.T).T
+            # (n_obj, dim) @ (dim, dim).T -> (n_obj, dim)
+            theta = mu + (theta_raw @ L_Cholesky.T)
 
         # Extract rise times (t_rise)
         t_rise = numpyro.deterministic("t_rise", jnp.clip(theta[..., 0], EPS, None))
 
+    # Slicing
+    alpha_0_raw = theta[..., 1 : 1 + n_filt]
+    alpha_0_clipped = jnp.clip(alpha_0_raw, 1 + EPS, None)
+    log_amp_prime_raw = theta[..., 1 + n_filt :]
+    log_amp_prime_clipped = jnp.clip(log_amp_prime_raw, -5, 5)
+
     with numpyro.plate("obj", n_obj, dim=-2):
         with numpyro.plate("filt", n_filt, dim=-1):
             # Extract power-law indices (alpha_0) and clip
-            alpha_0_raw = theta[..., 1 : 1 + n_filt]
-            alpha_0 = numpyro.deterministic(
-                "alpha_0",
-                jnp.clip(alpha_0_raw, 1 + EPS, None),
-            )
+            alpha_0 = numpyro.deterministic("alpha_0", alpha_0_clipped)
 
             # Extract amplitudes (A)
-            log_amp_prime = jnp.clip(theta[..., 1 + n_filt :])
-            _ = numpyro.deterministic("Aprime", jnp.power(10, log_amp_prime))
-            amp = numpyro.deterministic("A", jnp.power(10, log_amp_prime - alpha_0))
+            amp_prime = numpyro.deterministic(
+                "Aprime", jnp.power(10, log_amp_prime_clipped)
+            )
 
-    return t_rise, amp, alpha_0
+    return t_rise, amp_prime, alpha_0
 
 
 def _sample_trise_only_hierarchical_params(
@@ -312,9 +314,9 @@ def _sample_trise_only_hierarchical_params(
         with numpyro.plate("obj", n_obj, dim=-2):
             alpha_0 = sample_alpha_0(mean_alpha_0, sigma_alpha_0, 1 + EPS, None)
             amp_prime = sample_amp_prime()
-            amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
+            # amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
 
-    return t_rise, amp, alpha_0
+    return t_rise, amp_prime, alpha_0
 
 
 def sample_hierarchical_params(
@@ -342,7 +344,7 @@ def sample_hierarchical_params(
     Returns
     -------
     t_rise : array, shape (n_obj,)
-    amp : array, shape (n_obj, n_filt)
+    amp_prime : array, shape (n_obj, n_filt)
     alpha_0 : array, shape (n_obj, n_filt)
     """
     min_mean_t_rise = 10.0
@@ -354,23 +356,23 @@ def sample_hierarchical_params(
     mean_t_rise = numpyro.sample(
         "mean_t_rise", dist.Uniform(min_mean_t_rise, max_mean_t_rise)
     )
-    sigma_t_rise = numpyro.sample("sigma_t_rise", dist.HalfNormal(1.5))
+    sigma_t_rise = numpyro.sample("sigma_t_rise", dist.HalfCauchy(1.5))
 
     # Sample alpha_0 hyperpriors only for mvn and independent
     if correlation_structure in ["mvn", "independent"]:
         # mean_alpha_0 = numpyro.sample(
         # "mean_alpha_0_cm", dist.Uniform(min_alpha_0, max_alpha_0)
         # )
-        # sigma_alpha_0 = numpyro.sample("sigma_alpha_0_cm", dist.HalfNormal(0.3))
+        # sigma_alpha_0 = numpyro.sample("sigma_alpha_0_cm", dist.HalfCauchy(0.3))
         with numpyro.plate("filt", n_filt):
             mean_log_amp_prime = numpyro.sample("mean_log_Aprime", dist.Uniform(-3, 3))
             sigma_log_amp_prime = numpyro.sample(
-                "sigma_log_Aprime", dist.HalfNormal(0.5)
+                "sigma_log_Aprime", dist.HalfCauchy(0.5)
             )
             mean_alpha_0 = numpyro.sample(
                 "mean_alpha_0", dist.Uniform(min_mean_alpha_0, max_mean_alpha_0)
             )
-            sigma_alpha_0 = numpyro.sample("sigma_alpha_0", dist.HalfNormal(0.3))
+            sigma_alpha_0 = numpyro.sample("sigma_alpha_0", dist.HalfCauchy(0.3))
 
         if correlation_structure == "mvn":
             # Full MVN with correlations
