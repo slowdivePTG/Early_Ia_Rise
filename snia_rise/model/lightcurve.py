@@ -203,6 +203,7 @@ class SNLightCurve(object):
             infer.NUTS(
                 kernel,
                 init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
+                dense_mass=True,
                 target_accept_prob=0.95,
                 **nuts_params,
             ),
@@ -211,6 +212,7 @@ class SNLightCurve(object):
             num_chains=num_chains,
             thinning=thinning,
             progress_bar=True,
+            chain_method="vectorized",  # Forced
         )
 
         self.sampler.run(
@@ -739,6 +741,8 @@ class SNLightCurveLib(object):
         None
         """
 
+        from joblib import Parallel, delayed
+
         model_structure = self.model_structure
 
         assert model_structure in [
@@ -762,9 +766,30 @@ class SNLightCurveLib(object):
                 "prior_config": prior_config,
             }
 
-            # Update library with the fitted objects
-            for lc in self.lc_library:
-                lc.sampling(**run_params, nuts_params=nuts_params)
+            print(f"Parallelizing fits across {len(self.lc_library)} objects...")
+
+            def _run_fit(lc, seed_offset):
+                # Ensure each process gets a unique seed
+                local_params = run_params.copy()
+                local_params["random_seed"] += seed_offset
+
+                # Force vectorized to keep memory footprint small per process
+                lc.sampling(**local_params, nuts_params=nuts_params)
+
+                # Clear the heavy sampler object to allow clean pickling/return
+                lc.sampler = None
+                return lc
+
+            num_devices = jax.local_device_count()
+            results = Parallel(n_jobs=num_devices)(
+                delayed(_run_fit)(lc, i) for i, lc in enumerate(self.lc_library)
+            )
+
+            self.lc_library = results
+
+            # # Update library with the fitted objects
+            # for lc in self.lc_library:
+            #     lc.sampling(**run_params, nuts_params=nuts_params)
 
             # Stitch the results back together
             self.aggregate_samples()
@@ -836,40 +861,28 @@ class SNLightCurveLib(object):
             return
 
         if "hierarchical" in model_structure:
-            print("\nSimulated annealing warmup...")
+            print("\nVectorized Simulated Annealing warmup...")
             running_params_sa = running_params.copy()
             running_params_sa["t0_err"] = jnp.zeros_like(running_params["t"])
             num_sa = num_warmup // 4
+
             rng_key, sa_key = jax.random.split(rng_key)
-            # SA with adapt_state_size is incompatible with vectorized chain_method
-            # Always use sequential for SA warmup
-            sampler_sa = infer.MCMC(
-                infer.SA(
-                    kernel,
-                    init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
-                    adapt_state_size=num_chains,
-                ),
-                num_warmup=0,
-                num_samples=num_sa,
-                num_chains=1,
-                chain_method="sequential",
-            )
-            sampler_sa.run(
+
+            # 1. Run FAST Vectorized SA
+            # This returns (num_chains, ...) parameters
+            sa_last_params = run_vectorized_sa(
                 sa_key,
-                **running_params_sa,
-                prior_config=prior_config,
+                kernel,
+                model_args=(),
+                model_kwargs={**running_params_sa, "prior_config": prior_config},
+                num_chains=num_chains,
+                num_warmup=num_sa,
+                init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
             )
 
-            # Use mean of the last 10% of samples to initialize the NUTS warmup
-            samples_sa = sampler_sa.get_samples()
-            last_n = max(1, len(list(samples_sa.values())[0]) // 10)
-            init_values_warmup = {
-                k: jnp.mean(v[-last_n:], axis=0) for k, v in samples_sa.items()
-            }
-            for k, v in init_values_warmup.items():
-                if not jnp.all(jnp.isfinite(v)):
-                    raise ValueError(f"Non-finite value found in {k}")
-            init_strategy_warmup = infer.init_to_value(values=init_values_warmup)
+            # 2. Initialize NUTS with the result of SA
+            # NumPyro automatically handles the batch dimension
+            init_strategy_warmup = infer.init_to_value(values=sa_last_params)
 
         else:
             num_sa = 0
@@ -887,6 +900,7 @@ class SNLightCurveLib(object):
                 infer.NUTS(
                     kernel,
                     init_strategy=init_strategy_warmup,
+                    dense_mass=True,
                     target_accept_prob=0.8,
                     **nuts_params,
                 ),
@@ -914,6 +928,7 @@ class SNLightCurveLib(object):
             infer.NUTS(
                 kernel,
                 init_strategy=init_strategy_main,
+                dense_mass=True,
                 target_accept_prob=0.95,
                 **nuts_params,
             ),
@@ -1361,3 +1376,75 @@ def init_to_median_with_alpha0(site=None, alpha_0_init=2.0):
 
     # For all other parameters, use median initialization
     return init_to_median(site)
+
+
+def run_vectorized_sa(
+    rng_key, model, model_args, model_kwargs, num_chains, num_warmup, init_strategy
+):
+    """
+    Manually runs vectorized Simulated Annealing (SA) to bypass MCMC class limitations.
+    This runs entirely in a compiled XLA kernel (extremely fast).
+    """
+    from numpyro.infer import SA
+    from numpyro.infer.util import initialize_model
+
+    # 1. Initialize to get prototype parameters
+    init_info = initialize_model(
+        rng_key,
+        model,
+        model_args=model_args,
+        model_kwargs=model_kwargs,
+        init_strategy=init_strategy,
+    )
+
+    # --- FIX: Handle ModelInfo vs Tuple return types ---
+    if hasattr(init_info, "param_info"):
+        # Recent NumPyro versions return ModelInfo(param_info=ParamInfo(init_params=...), ...)
+        prototype_params = init_info.param_info.init_params
+    elif isinstance(init_info, tuple) and len(init_info) >= 1:
+        # Older versions return (init_params, potential_fn, ...)
+        prototype_params = init_info[0]
+    else:
+        # Fallback: assume the object itself is the params (unlikely but safe)
+        prototype_params = init_info
+    # ---------------------------------------------------
+
+    # 2. Jitter the initial parameters for EACH chain
+    # If we don't jitter, all chains start at the exact same median/value.
+    keys = jax.random.split(rng_key, num_chains)
+
+    def jitter_params(k, params):
+        flattened, tree_def = jax.tree_util.tree_flatten(params)
+        jittered = []
+        for leaf in flattened:
+            # Add small random noise (±5% + small epsilon) to break symmetry
+            noise = jax.random.uniform(k, shape=leaf.shape, minval=-0.05, maxval=0.05)
+            # Use 1e-4 epsilon to avoid zero-gradient issues at exact zero
+            jittered.append(leaf * (1.0 + noise) + noise * 1e-4)
+        return jax.tree_util.tree_unflatten(tree_def, jittered)
+
+    # Batch of initial parameters: shape (num_chains, ...)
+    init_params_batch = jax.vmap(jitter_params)(
+        keys, jax.tree_util.tree_map(lambda x: x, prototype_params)
+    )
+
+    # 3. Setup SA Kernel (adapt_state_size=None means independent chains)
+    sa_kernel = SA(model, adapt_state_size=None)
+
+    # 4. Initialize SA State (Vectorized)
+    def init_step(k, p):
+        return sa_kernel.init(k, num_warmup, p, model_args, model_kwargs)
+
+    sa_state_batch = jax.vmap(init_step)(keys, init_params_batch)
+
+    # 5. Run the SA Loop (Compiled Scan)
+    def step_fn(state, _):
+        state = sa_kernel.sample(state, model_args, model_kwargs)
+        return state, None
+
+    # Scan runs the loop efficiently on device
+    step_vmapped = jax.vmap(step_fn)
+    last_state, _ = jax.lax.scan(step_vmapped, sa_state_batch, jnp.arange(num_warmup))
+
+    # Return the final parameters z from all chains
+    return last_state.z
