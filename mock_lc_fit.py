@@ -26,12 +26,6 @@ if __name__ == "__main__":
         help="JAX platform to use (default: auto - detects NVIDIA GPU if available)",
     )
     parser.add_argument(
-        "--num-host-devices",
-        type=int,
-        default=4,
-        help="Number of CPU devices for parallel chains (e.g., 4)",
-    )
-    parser.add_argument(
         "--true_model",
         choices=[
             "power_law",
@@ -119,8 +113,7 @@ if __name__ == "__main__":
 
     # Set host device count (must be before platform selection)
     # Only useful if platform is CPU
-    if args.num_host_devices:
-        numpyro.set_host_device_count(args.num_host_devices)
+    numpyro.set_host_device_count(args.num_chains)
 
     # Set platform based on auto-detection or user preference
     if args.platform == "auto":
