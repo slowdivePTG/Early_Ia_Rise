@@ -122,39 +122,83 @@ class SNLightCurve(object):
     def sampling(
         self,
         num_samples: int = 1000,
-        num_warmup: int = 5000,
+        num_warmup: int = 3000,
         num_chains: int = 2,
+        thinning: int = 1,
         random_seed: int = 11,
+        sample_prior: bool = False,
         prior_pred_samples: int = 500,
         prior_config: dict = {},
         nuts_params: dict = {},
     ):
         """
         Perform MCMC sampling using NUTS algorithm.
-
-        Parameters
-        ----------
-        num_samples : int, optional
-            Number of samples to draw from the posterior distribution (default: 1000).
-        num_warmup : int, optional
-            Number of warmup samples to discard (default: 3000).
-        num_chains : int, optional
-            Number of chains to run (default: 2).
-        random_seed : int, optional
-            Random seed for reproducibility (default: 11).
-        prior_pred_samples : int, optional
-            Number of samples to draw from the prior predictive distribution (default: 500).
-        prior_config : dict, optional
-            Dictionary containing the prior information for the model.
-        nuts_params : dict, optional
-            Dictionary containing the parameters for infer.NUTS.
-
-        Returns
-        -------
-        None
         """
-
         kernel = unpooled_model
+
+        # Fix t0_err for unpooled model
+        if self.t0_err is None:
+            t0_err_model = np.array([0.0])
+        else:
+            t0_err_model = np.array([float(self.t0_err)])
+
+        # Prepare inputs as JAX arrays
+        running_params = {
+            "t": jnp.array(self.lc_early["phase"]),
+            "flux": jnp.array(self.lc_early["flux"]),
+            "flux_err": jnp.array(self.lc_early["flux_err"]),
+            "t0_err": jnp.array(t0_err_model),
+            "idx_obj": jnp.zeros_like(self.idx_fcqfid, dtype=int),
+            "idx_fcqfid": jnp.array(self.idx_fcqfid),
+            "idx_filt": jnp.array(self.idx_filt),
+        }
+
+        # --- DEFINE DIMENSIONS AND COORDINATES ---
+        # This ensures ArviZ names the dimensions correctly (obj, filt, fcqfid)
+        # instead of generic names like dim_0, dim_1.
+        dims = {
+            "t_rise": ["obj"],
+            "t_fl": ["obj"],
+            "alpha_0": ["obj", "filt"],
+            "Aprime": ["obj", "filt"],
+            "alpha_1": ["obj", "filt"],
+            "C": ["fcqfid"],
+            "beta": ["fcqfid"],
+            "t_thresh": ["obj"],
+        }
+
+        # Local coordinates for this specific object run
+        coords = {
+            "obj": [0],  # Single object, index 0
+            "filt": np.arange(len(np.unique(self.idx_filt))),
+            "fcqfid": np.arange(len(np.unique(self.idx_fcqfid))),
+        }
+
+        # ----------------------------------------
+        # SAMPLING LOGIC
+        # ----------------------------------------
+        rng_key = jax.random.PRNGKey(random_seed)
+        prior_pred = infer.Predictive(kernel, num_samples=num_samples * num_chains)(
+            rng_key, **running_params, prior_config=prior_config
+        )
+
+        reshaped_prior = {}
+        for k, v in prior_pred.items():
+            v = np.asarray(v)
+            if v.shape[0] == num_samples * num_chains:
+                new_shape = (num_chains, num_samples) + v.shape[1:]
+                reshaped_prior[k] = v.reshape(new_shape)
+            else:
+                reshaped_prior[k] = np.expand_dims(v, 0)
+
+        self.prior_sample = az.from_numpyro(
+            prior=prior_pred, coords=coords, dims=dims
+        ).prior.astype("float32")
+
+        if sample_prior:
+            return
+
+        # Standard MCMC
         self.sampler = infer.MCMC(
             infer.NUTS(
                 kernel,
@@ -163,26 +207,18 @@ class SNLightCurve(object):
                 **nuts_params,
             ),
             num_warmup=num_warmup,
-            num_samples=num_samples,
+            num_samples=num_samples * thinning,
             num_chains=num_chains,
+            thinning=thinning,
             progress_bar=True,
         )
-        running_params = {
-            "t": self.lc_early["phase"],
-            "flux": self.lc_early["flux"],
-            "flux_err": self.lc_early["flux_err"],
-            "t0_err": self.t0_err,
-            "idx_obj": np.zeros_like(self.idx_fcqfid, dtype=int),
-            "idx_fcqfid": self.idx_fcqfid,
-            "idx_filt": self.idx_filt,
-        }
+
         self.sampler.run(
             jax.random.PRNGKey(random_seed),
             **running_params,
             prior_config=prior_config,
         )
 
-        # prior and posterior predictive checks
         prior_pred = infer.Predictive(kernel, num_samples=prior_pred_samples)(
             jax.random.PRNGKey(1919810 + random_seed),
             **running_params,
@@ -193,12 +229,15 @@ class SNLightCurve(object):
             **running_params,
             prior_config=prior_config,
         )
-        # convert to arviz InferenceData
-        self.inf_data = az.from_numpyro(
-            self.sampler, prior=prior_pred, posterior_predictive=post_pred
-        )
 
-        # store the posterior samples
+        # PASS DIMS/COORDS TO ARVIZ
+        self.inf_data = az.from_numpyro(
+            self.sampler,
+            prior=prior_pred,
+            posterior_predictive=post_pred,
+            dims=dims,
+            coords=coords,
+        )
         self.post_sample = self.inf_data.posterior
 
     def plot_lc(
@@ -289,10 +328,10 @@ class SNLightCurve(object):
             ax.set_ylim(-offset * (max(n_color, 2) - 1), 100 + offset)
 
             if post_sample is not None:
-                amp_prime_ = np.ravel(post_sample["Aprime"][:, :, flt])
-                alpha_0_ = np.ravel(post_sample["alpha_0"][:, :, flt])
+                amp_prime_ = np.ravel(post_sample["Aprime"][..., flt])
+                alpha_0_ = np.ravel(post_sample["alpha_0"][..., flt])
                 if "alpha_1" in post_sample.keys():
-                    alpha_1_ = np.ravel(post_sample["alpha_1"][:, :, flt])
+                    alpha_1_ = np.ravel(post_sample["alpha_1"][..., flt])
                 else:
                     alpha_1_ = np.zeros_like(alpha_0_)
                 t_pred = jnp.linspace(ax.get_xlim()[0], ax.get_xlim()[1], 1000)
@@ -710,12 +749,30 @@ class SNLightCurveLib(object):
             "hierarchical_mvn",
         ], f"Invalid model structure: {model_structure}"
 
+        if model_structure == "unpooled":
+            print("Using unpooled model for sampling...")
+
+            run_params = {
+                "num_samples": num_samples,
+                "num_warmup": num_warmup,
+                "num_chains": num_chains,
+                "thinning": thinning,
+                "random_seed": random_seed,
+                "sample_prior": sample_prior,
+                "prior_config": prior_config,
+            }
+
+            # Update library with the fitted objects
+            for lc in self.lc_library:
+                lc.sampling(**run_params, nuts_params=nuts_params)
+
+            # Stitch the results back together
+            self.aggregate_samples()
+            return
+
         if model_structure == "pooled":
             print("Using pooled model for sampling...")
             kernel = pooled_model
-        elif model_structure == "unpooled":
-            print("Using unpooled model for sampling...")
-            kernel = unpooled_model
         elif model_structure == "hierarchical":
             print("Using hierarchical model for sampling...")
             prior_config["correlation_structure"] = "independent"
@@ -931,6 +988,131 @@ class SNLightCurveLib(object):
             ]
             sample = sample.drop_vars(vars_to_remove)
         return sample
+
+    def aggregate_samples(self):
+        """
+        Aggregate the prior and posterior samples from individual light curves into a single
+        xarray.Dataset, creating a data structure comparable to the hierarchical model output.
+        This method is intended for use with unpooled models where each light curve
+        is sampled independently.
+        """
+        # Identify nuisance parameters which are handled differently from physics parameters.
+        # Nuisance parameters are stacked along 'fcqfid', while physics parameters are stacked along 'obj'.
+        nuisance_vars = ["C", "beta"]
+        # Variables to exclude from aggregation
+        exclude_vars = ["flux"]
+
+        def _aggregate_samples(sample_attr: str):
+            """Helper function to aggregate either 'post_sample' or 'prior_sample'."""
+            # Filter for light curves that have the specified sample attribute
+            valid_lcs = [
+                lc
+                for lc in self.lc_library
+                if hasattr(lc, sample_attr) and getattr(lc, sample_attr) is not None
+            ]
+
+            if not valid_lcs:
+                print(f"No {sample_attr} found to aggregate.")
+                return None
+
+            # Get variable names from first valid light curve
+            all_vars = list(getattr(valid_lcs[0], sample_attr).data_vars)
+            # Filter out nuisance and excluded variables
+            physics_vars = [
+                v for v in all_vars if v not in nuisance_vars and v not in exclude_vars
+            ]
+
+            physics_datasets = []
+            nuisance_datasets = []
+
+            # Process each light curve's sample
+            for i, lc in enumerate(valid_lcs):
+                sample = getattr(lc, sample_attr)
+
+                # Extract physics parameters
+                ds_phys = sample[physics_vars]
+
+                # If obj dimension exists with size > 1, select only the first element (unpooled should have size 1)
+                if "obj" in ds_phys.dims and ds_phys.sizes["obj"] > 1:
+                    # This shouldn't happen for unpooled, but handle it just in case
+                    ds_phys = ds_phys.isel(obj=0)
+
+                # If obj dimension exists with size 1, squeeze it out
+                if "obj" in ds_phys.dims and ds_phys.sizes["obj"] == 1:
+                    ds_phys = ds_phys.squeeze("obj", drop=True)
+
+                # Now expand with a fresh obj dimension
+                ds_phys = ds_phys.expand_dims(dim={"obj": 1}).assign_coords(obj=[i])
+
+                physics_datasets.append(ds_phys)
+
+                # Extract nuisance parameters if they exist
+                lc_nuisance_vars = [
+                    v for v in nuisance_vars if v in sample and v not in exclude_vars
+                ]
+                if lc_nuisance_vars:
+                    nuisance_datasets.append(sample[lc_nuisance_vars])
+
+            # Concatenate all physics datasets along the 'obj' dimension
+            aggregated_physics = xr.concat(
+                physics_datasets,
+                dim="obj",
+                coords="all",
+                compat="override",
+                join="outer",
+            )
+
+            # Transpose each variable to put 'obj' in the correct position
+            transposed_vars = {}
+            for var in aggregated_physics.data_vars:
+                dims = list(aggregated_physics[var].dims)
+                if "obj" in dims:
+                    # Remove 'obj' from current position
+                    dims.remove("obj")
+
+                    # If variable has 'filt' dimension, obj should be second-to-last
+                    # Otherwise, obj should be last
+                    if "filt" in dims:
+                        # Insert 'obj' before 'filt' (second-to-last)
+                        filt_idx = dims.index("filt")
+                        dims.insert(filt_idx, "obj")
+                    else:
+                        # Append 'obj' as last dimension
+                        dims.append("obj")
+
+                    transposed_vars[var] = aggregated_physics[var].transpose(*dims)
+                else:
+                    transposed_vars[var] = aggregated_physics[var]
+
+            aggregated_physics = xr.Dataset(transposed_vars)
+
+            # If nuisance parameters were found, concatenate them and merge with physics parameters
+            if nuisance_datasets:
+                aggregated_nuisance = xr.concat(
+                    nuisance_datasets,
+                    dim="fcqfid",
+                    coords="all",
+                    compat="override",
+                    join="outer",
+                )
+                result = xr.merge([aggregated_physics, aggregated_nuisance])
+            else:
+                result = aggregated_physics
+
+            print(
+                f"{sample_attr} aggregation complete. Final Dimensions: {result.sizes}"
+            )
+            return result
+
+        # Aggregate posteriors
+        aggregated_post = _aggregate_samples("post_sample")
+        if aggregated_post is not None:
+            self.post_sample = self.decode_sample(aggregated_post)
+
+        # Aggregate priors
+        aggregated_prior = _aggregate_samples("prior_sample")
+        if aggregated_prior is not None:
+            self.prior_sample = self.decode_sample(aggregated_prior)
 
     def plot_corner(
         self,
