@@ -777,7 +777,12 @@ class SNLightCurveLib(object):
                 lc.sampling(**local_params, nuts_params=nuts_params)
 
                 # Clear the heavy sampler object to allow clean pickling/return
-                lc.sampler = None
+                if hasattr(lc, "sampler"):
+                    lc.sampler = None
+                # (We only need 'post_sample' for aggregation later)
+                if hasattr(lc, "inf_data"):
+                    lc.inf_data = None
+
                 return lc
 
             num_devices = jax.local_device_count()
@@ -860,6 +865,10 @@ class SNLightCurveLib(object):
             self.decode_prior_sample()
             return
 
+        # --- FIX: Use scalar-compatible strategy for model definition ---
+        init_strategy_generic = init_to_median_with_alpha0(alpha_0_init=2.0)
+        warmup_init_params = None
+
         if "hierarchical" in model_structure:
             print("\nVectorized Simulated Annealing warmup...")
             running_params_sa = running_params.copy()
@@ -877,16 +886,16 @@ class SNLightCurveLib(object):
                 model_kwargs={**running_params_sa, "prior_config": prior_config},
                 num_chains=num_chains,
                 num_warmup=num_sa,
-                init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
+                init_strategy=init_strategy_generic,
             )
 
-            # 2. Initialize NUTS with the result of SA
-            # NumPyro automatically handles the batch dimension
-            init_strategy_warmup = infer.init_to_value(values=sa_last_params)
+            # 2. Store for next step (do NOT use init_to_value here)
+            warmup_init_params = sa_last_params
 
         else:
             num_sa = 0
-            init_strategy_warmup = init_to_median_with_alpha0(alpha_0_init=2.0)
+
+        main_init_params = warmup_init_params
 
         # Warmup without t0_err (if needed)
         if self.t0_err is not None:
@@ -899,7 +908,7 @@ class SNLightCurveLib(object):
             sampler_no_to_err = infer.MCMC(
                 infer.NUTS(
                     kernel,
-                    init_strategy=init_strategy_warmup,
+                    init_strategy=init_strategy_generic,  # Use generic to preserve shapes
                     dense_mass=True,
                     target_accept_prob=0.8,
                     **nuts_params,
@@ -909,25 +918,25 @@ class SNLightCurveLib(object):
                 num_chains=num_chains,
                 chain_method=chain_method,
             )
+            # Pass init_params explicit argument
             sampler_no_to_err.run(
                 no_to_err_key,
                 **running_params_no_to_err,
                 prior_config=prior_config,
+                init_params=warmup_init_params,
             )
 
             # Use the last sample to initialize the main sampler
-            samples_warmup = sampler_no_to_err.get_samples()
-            init_values_no_t0 = {k: v[-1] for k, v in samples_warmup.items()}
-            init_strategy_main = infer.init_to_value(values=init_values_no_t0)
-        else:
-            init_strategy_main = init_strategy_warmup
+            # Group by chain to keep (num_chains, ...) shape
+            samples_warmup = sampler_no_to_err.get_samples(group_by_chain=True)
+            main_init_params = {k: v[:, -1] for k, v in samples_warmup.items()}
 
         print("\nMain sampling...")
         rng_key, main_key = jax.random.split(rng_key)
         self.sampler = infer.MCMC(
             infer.NUTS(
                 kernel,
-                init_strategy=init_strategy_main,
+                init_strategy=init_strategy_generic,  # Use generic here too
                 dense_mass=True,
                 target_accept_prob=0.95,
                 **nuts_params,
@@ -942,6 +951,7 @@ class SNLightCurveLib(object):
             main_key,
             **running_params,
             prior_config=prior_config,
+            init_params=main_init_params,
         )
 
         # Posterior predictive checks
@@ -1397,53 +1407,58 @@ def run_vectorized_sa(
         init_strategy=init_strategy,
     )
 
-    # --- FIX: Handle ModelInfo vs Tuple return types ---
+    # --- Handle different ModelInfo return structures (NumPyro versions) ---
     if hasattr(init_info, "param_info"):
-        # Recent NumPyro versions return ModelInfo(param_info=ParamInfo(init_params=...), ...)
-        prototype_params = init_info.param_info.init_params
+        if hasattr(init_info.param_info, "z"):
+            prototype_params = init_info.param_info.z
+        elif hasattr(init_info.param_info, "init_params"):
+            prototype_params = init_info.param_info.init_params
+        else:
+            prototype_params = init_info.param_info
     elif isinstance(init_info, tuple) and len(init_info) >= 1:
-        # Older versions return (init_params, potential_fn, ...)
         prototype_params = init_info[0]
     else:
-        # Fallback: assume the object itself is the params (unlikely but safe)
         prototype_params = init_info
-    # ---------------------------------------------------
+    # -----------------------------------------------------------------------
 
     # 2. Jitter the initial parameters for EACH chain
-    # If we don't jitter, all chains start at the exact same median/value.
     keys = jax.random.split(rng_key, num_chains)
 
     def jitter_params(k, params):
         flattened, tree_def = jax.tree_util.tree_flatten(params)
         jittered = []
         for leaf in flattened:
-            # Add small random noise (±5% + small epsilon) to break symmetry
+            # Add small random noise (±5% + small epsilon)
             noise = jax.random.uniform(k, shape=leaf.shape, minval=-0.05, maxval=0.05)
-            # Use 1e-4 epsilon to avoid zero-gradient issues at exact zero
             jittered.append(leaf * (1.0 + noise) + noise * 1e-4)
         return jax.tree_util.tree_unflatten(tree_def, jittered)
 
     # Batch of initial parameters: shape (num_chains, ...)
-    init_params_batch = jax.vmap(jitter_params)(
-        keys, jax.tree_util.tree_map(lambda x: x, prototype_params)
+    # FIX 1: use in_axes=(0, None) to broadcast prototype_params (which is not batched)
+    init_params_batch = jax.vmap(jitter_params, in_axes=(0, None))(
+        keys, prototype_params
     )
 
-    # 3. Setup SA Kernel (adapt_state_size=None means independent chains)
+    # 3. Setup SA Kernel
     sa_kernel = SA(model, adapt_state_size=None)
 
     # 4. Initialize SA State (Vectorized)
     def init_step(k, p):
         return sa_kernel.init(k, num_warmup, p, model_args, model_kwargs)
 
+    # Here both keys and params are batched, so default (0, 0) is correct
     sa_state_batch = jax.vmap(init_step)(keys, init_params_batch)
 
     # 5. Run the SA Loop (Compiled Scan)
     def step_fn(state, _):
+        # Capture model_args/kwargs from closure (standard JAX practice)
         state = sa_kernel.sample(state, model_args, model_kwargs)
         return state, None
 
+    # FIX 2: use in_axes=(0, None) because scan passes a scalar index for the second arg
+    step_vmapped = jax.vmap(step_fn, in_axes=(0, None))
+
     # Scan runs the loop efficiently on device
-    step_vmapped = jax.vmap(step_fn)
     last_state, _ = jax.lax.scan(step_vmapped, sa_state_batch, jnp.arange(num_warmup))
 
     # Return the final parameters z from all chains

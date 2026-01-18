@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from .._utils._plt import plt
+from .._utils import plt
 from ..model.lightcurve import SNLightCurveLib
 
 
@@ -62,13 +62,10 @@ class RedbackLightCurveLib(SNLightCurveLib):
                     filt=lc_peak["filt"].values.astype(np.int32),
                 )
             )
-            idx_early = (
-                lc_peak["phase"]
-                < lc_peak["phase"].values[
-                    lc_peak["flux"].values < early_threshold * 100
-                ][-1]
-                + 0.5
-            )
+            idx = lc_peak["flux"].values >= 5 * lc_peak["flux_err"].values
+            phase = lc_peak["phase"].values[idx]
+            flux = lc_peak["flux"].values[idx]
+            idx_early = lc_peak["phase"] < phase[flux < early_threshold * 100][-1] + 0.5
             lc_early_lib.append({key: item[idx_early] for key, item in lc_peak.items()})
 
         if not os.path.exists(post_sample_full_file):
