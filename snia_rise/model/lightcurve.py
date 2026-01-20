@@ -865,94 +865,101 @@ class SNLightCurveLib(object):
             self.decode_prior_sample()
             return
 
-        # --- FIX: Use scalar-compatible strategy for model definition ---
-        init_strategy_generic = init_to_median_with_alpha0(alpha_0_init=2.0)
-        warmup_init_params = None
-
         if "hierarchical" in model_structure:
-            print("\nVectorized Simulated Annealing warmup...")
+            print("\nSimulated Annealing warmup...")
             running_params_sa = running_params.copy()
             running_params_sa["t0_err"] = jnp.zeros_like(running_params["t"])
             num_sa = num_warmup // 4
 
             rng_key, sa_key = jax.random.split(rng_key)
 
-            # 1. Run FAST Vectorized SA
-            # This returns (num_chains, ...) parameters
-            sa_last_params = run_vectorized_sa(
+            # Always use sequential for SA warmup
+            sampler_sa = infer.MCMC(
+                infer.SA(
+                    kernel,
+                    init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
+                    adapt_state_size=num_chains,
+                ),
+                num_warmup=0,
+                num_samples=num_sa,
+                num_chains=1,
+                chain_method="sequential",
+            )
+            sampler_sa.run(
                 sa_key,
-                kernel,
-                model_args=(),
-                model_kwargs={**running_params_sa, "prior_config": prior_config},
-                num_chains=num_chains,
-                num_warmup=num_sa,
-                init_strategy=init_strategy_generic,
+                **running_params_sa,
+                prior_config=prior_config,
             )
 
-            # 2. Store for next step (do NOT use init_to_value here)
-            warmup_init_params = sa_last_params
+            # Use the last samples to initialize the next sampler
+            samples_sa = sampler_sa.get_samples()
+            init_values_warmup = {k: v[-1] for k, v in samples_sa.items()}
+            for k, v in init_values_warmup.items():
+                if not jnp.all(jnp.isfinite(v)):
+                    raise ValueError(f"Non-finite value found in {k}")
+            init_strategy_warmup = infer.init_to_value(values=init_values_warmup)
 
         else:
             num_sa = 0
+            init_strategy_warmup = init_to_median_with_alpha0(alpha_0_init=2.0)
 
-        main_init_params = warmup_init_params
+        if model_structure == "hierarchical_mvn":
+            dense_mass_site = [("chol_corr",)]
+        else:
+            dense_mass_site = []
 
         # Warmup without t0_err (if needed)
         if self.t0_err is not None:
             print("\nWarmup without t0_err...")
-            running_params_no_to_err = running_params.copy()
-            running_params_no_to_err["t0_err"] = jnp.zeros_like(running_params["t"])
+            running_params_no_t0_err = running_params.copy()
+            running_params_no_t0_err["t0_err"] = jnp.zeros_like(running_params["t"])
+            num_no_t0_err = num_warmup // 4
 
-            rng_key, no_to_err_key = jax.random.split(rng_key)
+            rng_key, no_t0_err_key = jax.random.split(rng_key)
 
-            sampler_no_to_err = infer.MCMC(
+            sampler_no_t0_err = infer.MCMC(
                 infer.NUTS(
                     kernel,
-                    init_strategy=init_strategy_generic,  # Use generic to preserve shapes
-                    dense_mass=True,
+                    init_strategy=init_strategy_warmup,
+                    dense_mass=dense_mass_site,
                     target_accept_prob=0.8,
                     **nuts_params,
                 ),
-                num_warmup=num_warmup // 10,
+                num_warmup=num_no_t0_err,
                 num_samples=1,
                 num_chains=num_chains,
                 chain_method=chain_method,
             )
             # Pass init_params explicit argument
-            sampler_no_to_err.run(
-                no_to_err_key,
-                **running_params_no_to_err,
-                prior_config=prior_config,
-                init_params=warmup_init_params,
+            sampler_no_t0_err.run(
+                no_t0_err_key, **running_params_no_t0_err, prior_config=prior_config
             )
 
             # Use the last sample to initialize the main sampler
-            # Group by chain to keep (num_chains, ...) shape
-            samples_warmup = sampler_no_to_err.get_samples(group_by_chain=True)
-            main_init_params = {k: v[:, -1] for k, v in samples_warmup.items()}
+            samples_warmup = sampler_no_t0_err.get_samples()
+            init_values_no_t0 = {k: v[-1] for k, v in samples_warmup.items()}
+            init_strategy_main = infer.init_to_value(values=init_values_no_t0)
+        else:
+            num_no_t0_err = 0
+            init_strategy_main = init_strategy_warmup
 
         print("\nMain sampling...")
         rng_key, main_key = jax.random.split(rng_key)
         self.sampler = infer.MCMC(
             infer.NUTS(
                 kernel,
-                init_strategy=init_strategy_generic,  # Use generic here too
-                dense_mass=True,
+                init_strategy=init_strategy_main,  # Use generic here too
+                dense_mass=dense_mass_site,
                 target_accept_prob=0.95,
                 **nuts_params,
             ),
-            num_warmup=num_warmup - num_sa,
+            num_warmup=num_warmup - num_sa - num_no_t0_err,
             num_samples=num_samples * thinning,
             thinning=thinning,
             num_chains=num_chains,
             chain_method=chain_method,
         )
-        self.sampler.run(
-            main_key,
-            **running_params,
-            prior_config=prior_config,
-            init_params=main_init_params,
-        )
+        self.sampler.run(main_key, **running_params, prior_config=prior_config)
 
         # Posterior predictive checks
         rng_key, post_key = jax.random.split(rng_key)

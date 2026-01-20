@@ -81,7 +81,7 @@ if __name__ == "__main__":
         "--num_samples",
         type=int,
         default=1000,
-        help="Number of samples (default: 2000)",
+        help="Number of samples (default: 1000)",
     )
     parser.add_argument(
         "--num_chains",
