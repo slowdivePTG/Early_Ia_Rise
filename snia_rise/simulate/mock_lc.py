@@ -136,7 +136,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         # Sample the population parameters using numpy.random
         num_tot = n_lc * 20  # oversample to account for non-detections
 
-        np.random.seed(n_lc * 114514)
+        np.random.seed(num_tot + 114514)
 
         if params_mean is None:
             params_mean = {}
@@ -154,14 +154,14 @@ class RedbackLightCurveLib(SNLightCurveLib):
             # This sets when each transient begins (in MJD)
             params_sim["t0_mjd_transient"] = np.full(num_tot, T0_MJD_TRANSIENT)
             params_sim["ra"] = np.random.uniform(0, 360, num_tot)
-            params_sim["dec"] = np.random.uniform(-20, 70, num_tot)
+            params_sim["dec"] = np.random.uniform(-10, 70, num_tot)
 
             # True hyper-parameters for the power-law rise model
             params_true = dict(
                 mean_alpha=params_mean.get("alpha", 2.0),
                 sigma_alpha=params_sigma.get("alpha", 0.3),
                 mean_t_rise=params_mean.get("t_rise", 18),
-                sigma_t_rise=params_sigma.get("t_rise", 1.5),
+                sigma_t_rise=params_sigma.get("t_rise", 1),
             )
 
             params_sim["t_rise"] = np.random.normal(
@@ -177,12 +177,14 @@ class RedbackLightCurveLib(SNLightCurveLib):
             params_sim["peak_luminosity"] = np.full(num_tot, PEAK_LUMINOSITY)
 
             if model == "power_law":
-                params_true["mean_ln_Aprime"] = params_mean.get("ln_Aprime", np.log(40))
-                params_true["sigma_ln_Aprime"] = params_sigma.get("ln_Aprime", 0.2)
+                params_true["mean_log_Aprime"] = params_mean.get(
+                    "log_Aprime", np.log(40)
+                )
+                params_true["sigma_log_Aprime"] = params_sigma.get("log_Aprime", 0.2)
                 params_sim["amp_prime"] = np.exp(
                     np.random.normal(
-                        params_true["mean_ln_Aprime"],
-                        params_true["sigma_ln_Aprime"],
+                        params_true["mean_log_Aprime"],
+                        params_true["sigma_log_Aprime"],
                         num_tot,
                     )
                 )
@@ -465,13 +467,13 @@ class RedbackLightCurveLib(SNLightCurveLib):
             model=sed_model,
             survey="ztf",
             parameters=params,
-            end_transient_time=100,
+            end_transient_time=50,
             snr_threshold=3.0,
             add_source_noise=True,
             source_noise=0.02**2,  # a bug in redback < 1.12.1 - has to be noise**2
             redback_compatible_model=True,
             model_kwargs={},
-            obs_buffer=100,
+            obs_buffer=50,
             seed=42,
         )
 
@@ -486,10 +488,10 @@ class RedbackLightCurveLib(SNLightCurveLib):
             1 + params["redshift"]
         ) - params["t_rise"]
 
-        idx_early = obs["phase"] < -10
+        idx_early = (obs["phase"] < -10) & (obs["phase"] > -25)
         idx_rise = (obs["phase"] >= -10) & (obs["phase"] < 0)
         idx_fall = (obs["phase"] >= 0) & (obs["phase"] < 10)
-        idx_baseline = (obs["phase"] < -25) & (obs["phase"] > -60)
+        idx_baseline = (obs["phase"] < -25) & (obs["phase"] > -50)
 
         if (
             # >= 2 high-SNR points in either g or r band during early phase
@@ -507,9 +509,9 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 np.sum(idx_snr & idx_rise & idx_r) < 2
                 or np.sum(idx_snr & idx_fall & idx_r) < 2
             )
-            # >= 3 baseline points in both bands
-            or (np.sum(idx_baseline & idx_g) < 3)
-            or (np.sum(idx_baseline & idx_r) < 3)
+            # >= 10 baseline points in both bands
+            or (np.sum(idx_baseline & idx_g) <= 5)
+            or (np.sum(idx_baseline & idx_r) <= 5)
         ):
             return None
 

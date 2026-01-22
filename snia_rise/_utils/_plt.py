@@ -138,7 +138,7 @@ def show_kde_posterior(
 
     bw_adjust = kwargs.pop("bw_adjust", None)
     if bw_adjust is None:
-        bw_adjust = (np.percentile(param_post, 95) - np.percentile(param_post, 5)) * 2
+        bw_adjust = (np.percentile(param_post, 97.5) - np.percentile(param_post, 2.5)) * 5
     params = dict(fill=True, alpha=0.25, lw=2, **kwargs)
     params_prior = dict(
         alpha=0.25, lw=2, linestyle="--", color=kwargs.get("color", "0.5")

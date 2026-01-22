@@ -8,32 +8,39 @@ import numpyro.distributions as dist
 EPS = 1e-5  # Small value to avoid division by zero
 
 
-def sample_fcqf_params(n_fcqfid, prior_config: dict = {}):
-    """
-    Sample Field/CCD/Quadrant/Filter-level parameters:  baseline and uncertainty scale.
+# def sample_fcqf_params(n_fcqfid, prior_config: dict = {}):
+#     """
+#     Sample Field/CCD/Quadrant/Filter-level parameters:  baseline and uncertainty scale.
 
-    Parameters
-    ----------
-    n_fcqfid : int
-        Number of unique fcqf IDs
-    prior_type : str
-        "Miller" uses different beta prior
+#     Parameters
+#     ----------
+#     n_fcqfid : int
+#         Number of unique fcqf IDs
+#     prior_type : str
+#         "Miller" uses different beta prior
 
-    Returns
-    -------
-    base, beta
-    """
-    prior_type = prior_config.get("prior_type", "uniform").lower()
+#     Returns
+#     -------
+#     base, beta
+#     """
+#     prior_type = prior_config.get("prior_type", "uniform").lower()
 
+#     with numpyro.plate("fcqfid", n_fcqfid):
+#         base = numpyro.sample("C", dist.Uniform(-50, 50))
+
+#         if prior_type == "miller":
+#             beta = numpyro.sample("beta", dist.LogUniform(0.7, 1.3))
+#         else:
+#             # beta = numpyro.sample("beta", dist.LogNormal(0, 0.1))
+#             beta = numpyro.deterministic("beta", jnp.ones(n_fcqfid))
+
+#     return base, beta
+
+
+def sample_base(n_fcqfid):
     with numpyro.plate("fcqfid", n_fcqfid):
         base = numpyro.sample("C", dist.Uniform(-50, 50))
-
-        if prior_type == "miller":
-            beta = numpyro.sample("beta", dist.LogUniform(0.7, 1.3))
-        else:
-            beta = numpyro.sample("beta", dist.LogNormal(0, 0.1))
-
-    return base, beta
+    return base
 
 
 def sample_alpha_0(
@@ -142,7 +149,7 @@ def sample_amp_prime():
     amp_prime : array
         Amplitude normalization (before alpha_0 correction: Miller et al. 2020)
     """
-    amp_prime = numpyro.sample("Aprime", dist.LogUniform(1e-5, 1e5))
+    amp_prime = numpyro.sample("Aprime", dist.LogUniform(1e0, 1e3))
 
     return amp_prime
 
@@ -170,7 +177,7 @@ def sample_t_rise(prior_config):
             dist.TruncatedNormal(mean_t_rise, sigma_t_rise, EPS, None),
         )
     else:
-        t_rise_min = prior_config.get("t_rise_min", 5)
+        t_rise_min = prior_config.get("t_rise_min", EPS)
         t_rise_max = prior_config.get("t_rise_max", 40)
         t_rise = numpyro.sample("t_rise", dist.Uniform(t_rise_min, t_rise_max))
 
@@ -272,7 +279,7 @@ def _sample_mvn_hierarchical_params(
     alpha_0_raw = theta[..., 1 : 1 + n_filt]
     alpha_0_clipped = jnp.clip(alpha_0_raw, 1 + EPS, None)
     log_amp_prime_raw = theta[..., 1 + n_filt :]
-    log_amp_prime_clipped = jnp.clip(log_amp_prime_raw, -5, 5)
+    log_amp_prime_clipped = jnp.clip(log_amp_prime_raw, 0, jnp.log(1e3))
 
     with numpyro.plate("obj", n_obj, dim=-2):
         with numpyro.plate("filt", n_filt, dim=-1):
@@ -280,9 +287,7 @@ def _sample_mvn_hierarchical_params(
             alpha_0 = numpyro.deterministic("alpha_0", alpha_0_clipped)
 
             # Extract amplitudes (A)
-            amp_prime = numpyro.deterministic(
-                "Aprime", jnp.power(10, log_amp_prime_clipped)
-            )
+            amp_prime = numpyro.deterministic("Aprime", jnp.exp(log_amp_prime_clipped))
 
     return t_rise, amp_prime, alpha_0
 
@@ -365,7 +370,9 @@ def sample_hierarchical_params(
         # )
         # sigma_alpha_0 = numpyro.sample("sigma_alpha_0_cm", dist.HalfCauchy(0.3))
         with numpyro.plate("filt", n_filt):
-            mean_log_amp_prime = numpyro.sample("mean_log_Aprime", dist.Uniform(-3, 3))
+            mean_log_amp_prime = numpyro.sample(
+                "mean_log_Aprime", dist.Uniform(0, jnp.log(1e3))
+            )
             sigma_log_amp_prime = numpyro.sample(
                 "sigma_log_Aprime", dist.HalfCauchy(0.5)
             )

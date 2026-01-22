@@ -63,18 +63,29 @@ class ZTFDataProcessor:
 
     @staticmethod
     def create_light_curve_data(
-        phase, flux, flux_err, fcqfid, filt, t_g_early, t_r_early, filtids=[1, 2]
+        phase,
+        flux,
+        flux_err,
+        fcqfid,
+        filt,
+        t_g_early,
+        t_r_early,
+        filtids=[1, 2],
+        beta=None,
     ):
         """Create early and peak light curve dictionaries."""
+        if beta is None:
+            beta = np.ones_like(phase)
+
         # Filter out observations < 40% of max flux
         idx_i = filt == 3
-        idx_rise = (phase < 0) & (phase > -60) & ~idx_i
+        idx_rise = (phase < 0) & (phase > -50) & ~idx_i
         idx_g = (filt == filtids[0]) & (phase < t_g_early)
         idx_r = (filt == filtids[1]) & (phase < t_r_early)
         idx = idx_rise & (idx_g | idx_r)
 
         # Discard the fcqfID with few baseline points
-        idx_base = phase < -20
+        idx_base = phase < -25
         idx_fcqfid_few_base = []
         for fcqfid_val in np.unique(fcqfid):
             if np.sum((fcqfid == fcqfid_val) & idx_base) < 3:
@@ -87,6 +98,7 @@ class ZTFDataProcessor:
             "flux_err": flux_err[idx],
             "fcqfid": fcqfid[idx],
             "filt": filt[idx],
+            "beta": beta[idx],
         }
 
         lc_peak = {
@@ -95,6 +107,7 @@ class ZTFDataProcessor:
             "flux_err": flux_err[idx_rise],
             "fcqfid": fcqfid[idx_rise],
             "filt": filt[idx_rise],
+            "beta": beta[idx_rise],
         }
 
         return lc_early, lc_peak
@@ -360,6 +373,7 @@ class ZTFIaDR2(SNLightCurve):
         flux = data["flux"].data.astype("<f4")
         flux_err = data["flux_err"].data.astype("<f4")
         phase = (data["mjd"].data - t0) / (1 + z)
+        beta = data["err_scale"].data
 
         fcqfid = data["fcqfid"].data
         filt = data["filter_id"].data
@@ -391,7 +405,7 @@ class ZTFIaDR2(SNLightCurve):
 
         # Create light curve data
         lc_early, lc_peak = ZTFDataProcessor.create_light_curve_data(
-            phase, flux, flux_err, fcqfid, filt, t_g_early, t_r_early
+            phase, flux, flux_err, fcqfid, filt, t_g_early, t_r_early, beta=beta
         )
 
         super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid, t0_err=t0_err)

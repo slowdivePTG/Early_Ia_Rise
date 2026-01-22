@@ -1,4 +1,5 @@
 import warnings
+from mimetypes import init
 
 import arviz as az
 import corner
@@ -66,7 +67,7 @@ class SNLightCurve(object):
             self.post_sample = None
         except:
             print(
-                f"Error initializing SNLightCurve for {ztfid}.Please check the input data."
+                f"Error initializing SNLightCurve for {ztfid}. Please check the input data."
             )
             raise
 
@@ -104,6 +105,11 @@ class SNLightCurve(object):
         assert len(phase) == len(flux) == len(flux_err), (
             "Lengths of the data columns do not match"
         )
+        if "beta" in lc.keys():
+            beta = lc["beta"]
+            assert len(beta) == len(phase), "Lengths of the data columns do not match"
+        else:
+            beta = np.ones_like(phase)
 
         fcqfid = lc.get("fcqfid", np.ones_like(phase, dtype=int))
         filt = lc.get("filt", np.zeros_like(phase, dtype=int))
@@ -116,8 +122,16 @@ class SNLightCurve(object):
             flux_err = flux_err[mask]
             fcqfid = fcqfid[mask]
             filt = filt[mask]
+            beta = beta[mask]
 
-        return dict(phase=phase, flux=flux, flux_err=flux_err, fcqfid=fcqfid, filt=filt)
+        return dict(
+            phase=phase,
+            flux=flux,
+            flux_err=flux_err,
+            fcqfid=fcqfid,
+            filt=filt,
+            beta=beta,
+        )
 
     def sampling(
         self,
@@ -147,6 +161,7 @@ class SNLightCurve(object):
             "t": jnp.array(self.lc_early["phase"]),
             "flux": jnp.array(self.lc_early["flux"]),
             "flux_err": jnp.array(self.lc_early["flux_err"]),
+            "beta": jnp.array(self.lc_early["beta"]),
             "t0_err": jnp.array(t0_err_model),
             "idx_obj": jnp.zeros_like(self.idx_fcqfid, dtype=int),
             "idx_fcqfid": jnp.array(self.idx_fcqfid),
@@ -203,7 +218,7 @@ class SNLightCurve(object):
             infer.NUTS(
                 kernel,
                 init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
-                dense_mass=True,
+                # dense_mass=True,
                 target_accept_prob=0.95,
                 **nuts_params,
             ),
@@ -284,7 +299,8 @@ class SNLightCurve(object):
             warnings.warn("No posterior samples available.")
         else:
             base_ = np.median(post_sample["C"][:, :, self.idx_fcqfid], axis=(0, 1))
-            beta_ = np.median(post_sample["beta"][:, :, self.idx_fcqfid], axis=(0, 1))
+            # beta_ = np.median(post_sample["beta"][:, :, self.idx_fcqfid], axis=(0, 1))
+            beta_ = self.lc_early["beta"]
             t_fl = np.ravel(post_sample["t_fl"])
 
             idx_post_check = np.random.choice(len(t_fl), post_pred_samples)
@@ -421,7 +437,7 @@ class SNLightCurveLib(object):
         self.ztfid_lib: list = ztfid_lib if ztfid_lib is not None else []
         self.model_structure = sampling_model
 
-        self.phase, self.flux, self.flux_err = [], [], []
+        self.phase, self.flux, self.flux_err, self.beta = [], [], [], []
         self.idx_filt = np.array([], dtype=int)
         self.idx_fcqfid = np.array([], dtype=int)
         self.idx_obj = np.array([], dtype=int)
@@ -480,6 +496,7 @@ class SNLightCurveLib(object):
             self.phase = np.append(self.phase, lc.lc_early["phase"])
             self.flux = np.append(self.flux, lc.lc_early["flux"])
             self.flux_err = np.append(self.flux_err, lc.lc_early["flux_err"])
+            self.beta = np.append(self.beta, lc.lc_early["beta"])
 
         n_obj = len(np.unique(self.idx_obj))
         n_fcqfid = len(np.unique(self.idx_fcqfid))
@@ -609,7 +626,7 @@ class SNLightCurveLib(object):
             # Parameters common to all unique fcqfid in this object
             fcqfid_in_obj = np.unique(self.idx_fcqfid[self.idx_obj == k])
             lc.post_sample["C"] = self.post_sample["C"][..., fcqfid_in_obj]
-            lc.post_sample["beta"] = self.post_sample["beta"][..., fcqfid_in_obj]
+            # lc.post_sample["beta"] = self.post_sample["beta"][..., fcqfid_in_obj]
 
             # A: (n_chains, n_samples, n_obj, n_filt)
             lc.post_sample["Aprime"] = self.post_sample["Aprime"][..., k, :]
@@ -661,6 +678,7 @@ class SNLightCurveLib(object):
             self.phase = lc_lib.phase
             self.flux = lc_lib.flux
             self.flux_err = lc_lib.flux_err
+            self.beta = lc_lib.beta
             self.t0_err = lc_lib.t0_err
 
         else:
@@ -677,6 +695,7 @@ class SNLightCurveLib(object):
                 self.phase = np.append(self.phase, lc.lc_early["phase"])
                 self.flux = np.append(self.flux, lc.lc_early["flux"])
                 self.flux_err = np.append(self.flux_err, lc.lc_early["flux_err"])
+                self.beta = np.append(self.beta, lc.lc_early["beta"])
                 assert (self.t0_err is None) == (lc.t0_err is None), (
                     "t0_err presence mismatch"
                 )
@@ -824,6 +843,7 @@ class SNLightCurveLib(object):
             "t": self.phase,
             "flux": self.flux,
             "flux_err": self.flux_err,
+            "beta": self.beta,
             "t0_err": self.t0_err
             if self.t0_err is not None
             else jnp.zeros_like(self.phase),
@@ -869,7 +889,7 @@ class SNLightCurveLib(object):
             print("\nSimulated Annealing warmup...")
             running_params_sa = running_params.copy()
             running_params_sa["t0_err"] = jnp.zeros_like(running_params["t"])
-            num_sa = num_warmup // 4
+            num_sa = int(num_warmup * 0.1)
 
             rng_key, sa_key = jax.random.split(rng_key)
 
@@ -878,7 +898,7 @@ class SNLightCurveLib(object):
                 infer.SA(
                     kernel,
                     init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
-                    adapt_state_size=num_chains,
+                    dense_mass=False,
                 ),
                 num_warmup=0,
                 num_samples=num_sa,
@@ -891,29 +911,37 @@ class SNLightCurveLib(object):
                 prior_config=prior_config,
             )
 
-            # Use the last samples to initialize the next sampler
+            # Use the *median of a late SA window* to initialize the next sampler
+            # (more robust than using the final/coldest SA state, which can be high-curvature)
             samples_sa = sampler_sa.get_samples()
-            init_values_warmup = {k: v[-1] for k, v in samples_sa.items()}
+
+            late_frac = (0.2, 0.1)  # last 20% and 10% of SA samples
+            start = int(jnp.floor((1.0 - late_frac[0]) * num_sa))
+            start = int(jnp.clip(start, 0, max(num_sa - 1, 0)))
+            end = int(jnp.floor((1.0 - late_frac[1]) * num_sa))
+            end = int(jnp.clip(end, 0, max(num_sa - 1, 0)))
+
+            init_values_warmup = {}
+            for k, v in samples_sa.items():
+                v_win = v[start:end]  # shape: (n_win, ...) in chain dimension
+                init_values_warmup[k] = jnp.median(v_win, axis=0)
+
             for k, v in init_values_warmup.items():
                 if not jnp.all(jnp.isfinite(v)):
                     raise ValueError(f"Non-finite value found in {k}")
+
             init_strategy_warmup = infer.init_to_value(values=init_values_warmup)
 
         else:
             num_sa = 0
             init_strategy_warmup = init_to_median_with_alpha0(alpha_0_init=2.0)
 
-        if model_structure == "hierarchical_mvn":
-            dense_mass_site = [("chol_corr",)]
-        else:
-            dense_mass_site = []
-
         # Warmup without t0_err (if needed)
         if self.t0_err is not None:
             print("\nWarmup without t0_err...")
             running_params_no_t0_err = running_params.copy()
             running_params_no_t0_err["t0_err"] = jnp.zeros_like(running_params["t"])
-            num_no_t0_err = num_warmup // 4
+            num_no_t0_err = int(num_warmup * 0.25)
 
             rng_key, no_t0_err_key = jax.random.split(rng_key)
 
@@ -921,12 +949,12 @@ class SNLightCurveLib(object):
                 infer.NUTS(
                     kernel,
                     init_strategy=init_strategy_warmup,
-                    dense_mass=dense_mass_site,
-                    target_accept_prob=0.8,
+                    # dense_mass=True,
+                    target_accept_prob=0.95,
                     **nuts_params,
                 ),
                 num_warmup=num_no_t0_err,
-                num_samples=1,
+                num_samples=max(int(num_no_t0_err * 0.1), 1),
                 num_chains=num_chains,
                 chain_method=chain_method,
             )
@@ -937,7 +965,9 @@ class SNLightCurveLib(object):
 
             # Use the last sample to initialize the main sampler
             samples_warmup = sampler_no_t0_err.get_samples()
-            init_values_no_t0 = {k: v[-1] for k, v in samples_warmup.items()}
+            init_values_no_t0 = {
+                k: jnp.median(v, axis=0) for k, v in samples_warmup.items()
+            }
             init_strategy_main = infer.init_to_value(values=init_values_no_t0)
         else:
             num_no_t0_err = 0
@@ -948,18 +978,62 @@ class SNLightCurveLib(object):
         self.sampler = infer.MCMC(
             infer.NUTS(
                 kernel,
-                init_strategy=init_strategy_main,  # Use generic here too
-                dense_mass=dense_mass_site,
+                init_strategy=init_strategy_main,
+                # dense_mass=True,
                 target_accept_prob=0.95,
                 **nuts_params,
             ),
-            num_warmup=num_warmup - num_sa - num_no_t0_err,
+            num_warmup=num_warmup - num_no_t0_err,
             num_samples=num_samples * thinning,
             thinning=thinning,
             num_chains=num_chains,
             chain_method=chain_method,
         )
-        self.sampler.run(main_key, **running_params, prior_config=prior_config)
+        self.sampler.run(
+            main_key,
+            **running_params,
+            prior_config=prior_config,
+            extra_fields=("num_steps", "energy", "accept_prob"),
+        )
+
+        # 1. Extract extra fields
+        extra = self.sampler.get_extra_fields()
+        num_steps = extra["num_steps"]
+        accept_probs = extra["accept_prob"]
+        energies = extra["energy"]
+
+        # 2. Check for Red Flags
+        print("\n--- Sampler Health Check ---")
+
+        # Flag A: Max Tree Depth (Truncation)
+        # Assuming default max_tree_depth = 10
+        max_steps_limit = 2 ** nuts_params.get("max_tree_depth", 10)
+        pct_at_limit = np.mean(num_steps >= max_steps_limit) * 100
+        if pct_at_limit > 5:
+            print(
+                f"⚠️  WARNING: {pct_at_limit:.1f}% of samples hit max_tree_depth ({max_steps_limit} steps)."
+            )
+            print(
+                "   The sampler is being truncated. Increase max_tree_depth or reparameterize."
+            )
+
+        # Flag C: E-BFMI (Energy Flow)
+        energy_diff = np.diff(energies)
+        ebfmi = np.var(energy_diff) / np.var(energies)
+        if ebfmi < 0.3:
+            print(f"⚠️  WARNING: Low E-BFMI ({ebfmi:.2f}).")
+            print(
+                "   The sampler is struggling to explore the tails. Check for high correlations."
+            )
+
+        # Flag D: Acceptance Rate
+        avg_accept = np.mean(accept_probs)
+        if avg_accept < 0.5:
+            print(f"⚠️  WARNING: Low average acceptance probability ({avg_accept:.2f}).")
+            print("   The sampler is 'stuck' or the step size is too large.")
+
+        if ebfmi >= 0.3 and pct_at_limit <= 5:
+            print("✅ All NUTS diagnostics look healthy.")
 
         # Posterior predictive checks
         rng_key, post_key = jax.random.split(rng_key)
@@ -1393,80 +1467,3 @@ def init_to_median_with_alpha0(site=None, alpha_0_init=2.0):
 
     # For all other parameters, use median initialization
     return init_to_median(site)
-
-
-def run_vectorized_sa(
-    rng_key, model, model_args, model_kwargs, num_chains, num_warmup, init_strategy
-):
-    """
-    Manually runs vectorized Simulated Annealing (SA) to bypass MCMC class limitations.
-    This runs entirely in a compiled XLA kernel (extremely fast).
-    """
-    from numpyro.infer import SA
-    from numpyro.infer.util import initialize_model
-
-    # 1. Initialize to get prototype parameters
-    init_info = initialize_model(
-        rng_key,
-        model,
-        model_args=model_args,
-        model_kwargs=model_kwargs,
-        init_strategy=init_strategy,
-    )
-
-    # --- Handle different ModelInfo return structures (NumPyro versions) ---
-    if hasattr(init_info, "param_info"):
-        if hasattr(init_info.param_info, "z"):
-            prototype_params = init_info.param_info.z
-        elif hasattr(init_info.param_info, "init_params"):
-            prototype_params = init_info.param_info.init_params
-        else:
-            prototype_params = init_info.param_info
-    elif isinstance(init_info, tuple) and len(init_info) >= 1:
-        prototype_params = init_info[0]
-    else:
-        prototype_params = init_info
-    # -----------------------------------------------------------------------
-
-    # 2. Jitter the initial parameters for EACH chain
-    keys = jax.random.split(rng_key, num_chains)
-
-    def jitter_params(k, params):
-        flattened, tree_def = jax.tree_util.tree_flatten(params)
-        jittered = []
-        for leaf in flattened:
-            # Add small random noise (±5% + small epsilon)
-            noise = jax.random.uniform(k, shape=leaf.shape, minval=-0.05, maxval=0.05)
-            jittered.append(leaf * (1.0 + noise) + noise * 1e-4)
-        return jax.tree_util.tree_unflatten(tree_def, jittered)
-
-    # Batch of initial parameters: shape (num_chains, ...)
-    # FIX 1: use in_axes=(0, None) to broadcast prototype_params (which is not batched)
-    init_params_batch = jax.vmap(jitter_params, in_axes=(0, None))(
-        keys, prototype_params
-    )
-
-    # 3. Setup SA Kernel
-    sa_kernel = SA(model, adapt_state_size=None)
-
-    # 4. Initialize SA State (Vectorized)
-    def init_step(k, p):
-        return sa_kernel.init(k, num_warmup, p, model_args, model_kwargs)
-
-    # Here both keys and params are batched, so default (0, 0) is correct
-    sa_state_batch = jax.vmap(init_step)(keys, init_params_batch)
-
-    # 5. Run the SA Loop (Compiled Scan)
-    def step_fn(state, _):
-        # Capture model_args/kwargs from closure (standard JAX practice)
-        state = sa_kernel.sample(state, model_args, model_kwargs)
-        return state, None
-
-    # FIX 2: use in_axes=(0, None) because scan passes a scalar index for the second arg
-    step_vmapped = jax.vmap(step_fn, in_axes=(0, None))
-
-    # Scan runs the loop efficiently on device
-    last_state, _ = jax.lax.scan(step_vmapped, sa_state_batch, jnp.arange(num_warmup))
-
-    # Return the final parameters z from all chains
-    return last_state.z

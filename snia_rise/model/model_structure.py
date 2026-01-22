@@ -9,7 +9,8 @@ from .priors import (
     sample_alpha_0,
     sample_alpha_1,
     sample_amp_prime,
-    sample_fcqf_params,
+    # sample_fcqf_params,
+    sample_base,
     sample_hierarchical_params,
     sample_t_fl,
     sample_t_rise,
@@ -103,6 +104,7 @@ def hierarchical_model(
     t: list,
     flux: list = None,
     flux_err: list = None,
+    beta: list = None,
     t0_err: list = None,
     idx_obj: list = None,
     idx_fcqfid: list = None,
@@ -143,6 +145,8 @@ def hierarchical_model(
         Flux values
     flux_err : list
         Flux uncertainties
+    beta : list
+        Uncertainty scale factor for each observation
     t0_err : list
         Uncertainties on t0 (0 for mocked data)
     idx_obj : list
@@ -171,7 +175,8 @@ def hierarchical_model(
     n_obj = len(np.unique(idx_obj))
 
     # Observation-level parameters (n_fcqfid,)
-    base, beta = sample_fcqf_params(n_fcqfid)
+    # base, beta = sample_fcqf_params(n_fcqfid)
+    base = sample_base(n_fcqfid)
 
     # Hierarchical structure for t_rise, amp and alpha_0
     # t_rise:   shape (n_obj,)
@@ -206,14 +211,17 @@ def hierarchical_model(
     #         )
 
     # shape: (n_obs,)
+    if beta is None:
+        beta = np.ones_like(flux)
+
     t_fl_obs = t_fl[idx_obj]
     base_obs = base[idx_fcqfid]
-    beta_obs = beta[idx_fcqfid]
+    # beta_obs = beta[idx_fcqfid]
     amp_prime_obs = amp_prime[idx_obj, idx_filt]
     alpha_0_obs = alpha_0[idx_obj, idx_filt]
     alpha_1_obs = alpha_1[idx_obj, idx_filt]
     t0_err_obs = t0_err[idx_obj]
-    flux_err_obs = flux_err * beta_obs
+    flux_err_obs = flux_err * beta
 
     # Add extra uncertainty component from t0_err via error propagation
     df_dtfl = df_t_dt_fl(t, t_fl_obs, base_obs, amp_prime_obs, alpha_0_obs, alpha_1_obs)
@@ -235,6 +243,7 @@ def unpooled_model(
     t: list,
     flux: list = None,
     flux_err: list = None,
+    beta: list = None,
     t0_err: list = None,
     idx_obj: list = None,
     idx_fcqfid: list = None,
@@ -256,7 +265,8 @@ def unpooled_model(
     n_obj = len(np.unique(idx_obj))
 
     # base, beta: shape (n_fcqfid,)
-    base, beta = sample_fcqf_params(n_fcqfid)
+    # base, beta = sample_fcqf_params(n_fcqfid)
+    base = sample_base(n_fcqfid)
 
     # t_rise: shape (n_obj,)
     with numpyro.plate("obj", n_obj):
@@ -281,14 +291,16 @@ def unpooled_model(
     t_fl = sample_t_fl(n_obj, t_rise, t0_err)
 
     # shape: (n_obs,)
+    if beta is None:
+        beta = np.ones_like(flux)
     t_fl_obs = t_fl[idx_obj]
     base_obs = base[idx_fcqfid]
-    beta_obs = beta[idx_fcqfid]
+    # beta_obs = beta[idx_fcqfid]
     amp_prime_obs = amp_prime[idx_obj, idx_filt]
     alpha_0_obs = alpha_0[idx_obj, idx_filt]
     alpha_1_obs = alpha_1[idx_obj, idx_filt]
     t0_err_obs = t0_err[idx_obj]
-    flux_err_obs = flux_err * beta_obs
+    flux_err_obs = flux_err * beta
 
     # Add extra uncertainty component from t0_err via error propagation
     df_dtfl = df_t_dt_fl(t, t_fl_obs, base_obs, amp_prime_obs, alpha_0_obs, alpha_1_obs)
@@ -310,6 +322,7 @@ def pooled_model(
     t: list,
     flux: list = None,
     flux_err: list = None,
+    beta: list = None,
     t0_err: list = None,
     idx_obj: list = None,
     idx_fcqfid: list = None,
@@ -327,7 +340,8 @@ def pooled_model(
     n_filt = len(np.unique(idx_filt))
 
     # base, beta: shape (n_fcqfid,)
-    base, beta = sample_fcqf_params(n_fcqfid)
+    # base, beta = sample_fcqf_params(n_fcqfid)
+    base = sample_base(n_fcqfid)
 
     # t_rise: shape (n_obj,)
     with numpyro.plate("obj", n_obj):
@@ -353,14 +367,16 @@ def pooled_model(
             amp_prime = sample_amp_prime()
 
     # shape: (n_obs,)
+    if beta is None:
+        beta = jnp.ones_like(flux)
     t_fl_obs = t_fl[idx_obj]
     base_obs = base[idx_fcqfid]
-    beta_obs = beta[idx_fcqfid]
+    # beta_obs = beta[idx_fcqfid]
     amp_prime_obs = amp_prime[idx_obj, idx_filt]
     alpha_0_obs = alpha_0[idx_filt]
     alpha_1_obs = alpha_1[idx_filt]
     t0_err_obs = t0_err[idx_obj]
-    flux_err_obs = flux_err * beta_obs
+    flux_err_obs = flux_err * beta
 
     # Add extra uncertainty component from t0_err via error propagation
     df_dtfl = df_t_dt_fl(t, t_fl_obs, base_obs, amp_prime_obs, alpha_0_obs, alpha_1_obs)
