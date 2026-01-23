@@ -149,7 +149,9 @@ def sample_amp_prime():
     amp_prime : array
         Amplitude normalization (before alpha_0 correction: Miller et al. 2020)
     """
-    amp_prime = numpyro.sample("Aprime", dist.LogUniform(1e0, 1e3))
+    # amp_prime = numpyro.sample("Aprime", dist.LogUniform(1e0, 1e3))
+    log_amp_prime = numpyro.sample("log_Aprime", dist.Uniform(0, np.log(1e3)))
+    amp_prime = numpyro.deterministic("Aprime", np.exp(log_amp_prime))
 
     return amp_prime
 
@@ -287,7 +289,8 @@ def _sample_mvn_hierarchical_params(
             alpha_0 = numpyro.deterministic("alpha_0", alpha_0_clipped)
 
             # Extract amplitudes (A)
-            amp_prime = numpyro.deterministic("Aprime", jnp.exp(log_amp_prime_clipped))
+            log_amp_prime = numpyro.deterministic("log_Aprime", log_amp_prime_clipped)
+            amp_prime = numpyro.deterministic("Aprime", jnp.exp(log_amp_prime))
 
     return t_rise, amp_prime, alpha_0
 

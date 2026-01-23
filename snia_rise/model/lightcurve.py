@@ -549,6 +549,11 @@ class SNLightCurveLib(object):
                         sample["alpha_0"][..., j],
                         dim="obj",
                     )
+                if f"corr_t_rise_log_Aprime_flt{j + 1}" not in sample:
+                    sample[f"corr_t_rise_log_Aprime_flt{j + 1}"] = xr.corr(
+                        sample["t_rise"],
+                        sample["log_Aprime"][..., j],
+                    )
                 for k in range(j + 1, n_filt):
                     sample[f"mean_alpha_flt{j + 1}-flt{k + 1}"] = (
                         sample["mean_alpha_0"][..., j] - sample["mean_alpha_0"][..., k]
@@ -930,6 +935,17 @@ class SNLightCurveLib(object):
                 if not jnp.all(jnp.isfinite(v)):
                     raise ValueError(f"Non-finite value found in {k}")
 
+            # fig, ax = plt.subplots(2, 1, figsize=(8, 4), constrained_layout=True)
+            # ax[0].plot(samples_sa["mean_alpha_0"])
+            # ax[1].plot(samples_sa["sigma_alpha_0"])
+            # ax[0].set_title("Mean alpha_0")
+            # ax[1].set_title("Sigma alpha_0")
+            # ax[0].axhline(init_values_warmup["mean_alpha_0"][0])
+            # ax[0].axhline(init_values_warmup["mean_alpha_0"][1])
+            # ax[1].axhline(init_values_warmup["sigma_alpha_0"][0])
+            # ax[1].axhline(init_values_warmup["sigma_alpha_0"][1])
+            # plt.show()
+
             init_strategy_warmup = infer.init_to_value(values=init_values_warmup)
 
         else:
@@ -974,12 +990,26 @@ class SNLightCurveLib(object):
             init_strategy_main = init_strategy_warmup
 
         print("\nMain sampling...")
+        if model_structure == "hierarchical_mvn":
+            dense_mass_site = [
+                (
+                    "mean_t_rise",
+                    "mean_alpha_0",
+                    "mean_log_Aprime",
+                    "sigma_t_rise",
+                    "sigma_alpha_0",
+                    "sigma_log_Aprime",
+                )
+            ]
+        else:
+            dense_mass_site = []
+
         rng_key, main_key = jax.random.split(rng_key)
         self.sampler = infer.MCMC(
             infer.NUTS(
                 kernel,
                 init_strategy=init_strategy_main,
-                # dense_mass=True,
+                dense_mass=dense_mass_site,
                 target_accept_prob=0.95,
                 **nuts_params,
             ),
@@ -1060,7 +1090,7 @@ class SNLightCurveLib(object):
                     post_sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = (
                         self.inf_data.posterior[matrix][..., i + 1, 0]
                     )
-                    post_sample[f"{matrix.lower()}_t_rise_log_amp_prime_flt{i + 1}"] = (
+                    post_sample[f"{matrix.lower()}_t_rise_log_Aprime_flt{i + 1}"] = (
                         self.inf_data.posterior[matrix][..., i + n_filt + 1, 0]
                     )
                     for j in range(i + 1, n_filt):
@@ -1079,7 +1109,6 @@ class SNLightCurveLib(object):
             "theta",
             "Corr",
             "Sigma",
-            "t0_offset",
             # "delta",
             # "delta_raw",
             # "alpha_0_cm",

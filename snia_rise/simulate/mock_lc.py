@@ -266,7 +266,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
                 params_sim["alpha_1"] = alpha_v_1 - alpha_v_2
 
-        elif model == "snf_2011fe":
+        elif model in ["2011fe", "2021aefx"]:
             params_sim["t_rise"] = np.full(num_tot, 0.0)
 
         else:
@@ -324,7 +324,19 @@ class RedbackLightCurveLib(SNLightCurveLib):
             elif "2011fe" in model:
                 sed_model = "snf-2011fe"
 
-                lc_peak = cls._simulate_single_light_curve_2011fe(params=single_params)
+                lc_peak = cls._simulate_single_light_curve_template(
+                    params=single_params, obj="2011fe"
+                )
+
+            elif "21aefx" in model:
+                sed_model = "salt-2021aefx"
+
+                lc_peak = cls._simulate_single_light_curve_template(
+                    params=single_params, obj="2021aefx"
+                )
+
+            else:
+                raise ValueError(f"Unknown model {model}")
 
             # plt.figure(figsize=(8, 3))
             # for band, color in zip([1, 2], ["tab:green", "tab:red"]):
@@ -553,7 +565,9 @@ class RedbackLightCurveLib(SNLightCurveLib):
         return lc_peak
 
     @classmethod
-    def _simulate_single_light_curve_2011fe(cls, params: dict) -> pd.DataFrame | None:
+    def _simulate_single_light_curve_template(
+        cls, params: dict, obj: str = "2011fe"
+    ) -> pd.DataFrame | None:
         """
         Simulate a single light curve using Pereira et al. (2013) SNIFS spectrophotometric time series.
         """
@@ -564,9 +578,14 @@ class RedbackLightCurveLib(SNLightCurveLib):
         import redback
         import sncosmo
         from astropy.cosmology import FlatLambdaCDM
+        from astropy.table import Table
+
+        assert obj in ["2011fe", "2021aefx"], "Invalid object name"
 
         Z_11FE = 0.000804
+        Z_21AEFX = 0.005017
         DIST_LUM_11FE = 7  # Mpc
+        DIST_LUM_21AEFX = 18  # Mpc
 
         ztf_path = os.path.join(
             os.path.dirname(redback.__file__), "tables", "ztf.tar.gz"
@@ -596,32 +615,55 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             return flux_err_sky
 
-        # Load SNIFS spectra from Pereira et al. (2013)
-        spec_files = sorted(glob.glob("./data/Pereira_2013/*.dat"))
-
         source_lst = []
         phase_det = []
 
-        for spec_file in spec_files:
-            with open(spec_file, "r") as f:
-                header = f.readlines()
-            for line in header:
-                if "TMAX" in line:
-                    phase = float(line.split("=")[1].strip().split()[0])
-                    break
-            if phase > 1.0:
-                break
-            spec = np.loadtxt(spec_file)
-            source = [
-                spec[:, 0] / (1 + Z_11FE),
-                spec[:, 1] * (1 + Z_11FE),
-                spec[:, 2] ** 0.5,
-            ]
-            source_lst.append(source)
-            phase_det.append(phase)
+        if obj == "2011fe":
+            # Load SNIFS spectra from Pereira et al. (2013)
+            spec_files = sorted(glob.glob("./data/Pereira_2013/*.dat"))
 
-        source_lst = np.array(source_lst)
-        phase_det = np.array(phase_det)
+            for spec_file in spec_files:
+                with open(spec_file, "r") as f:
+                    header = f.readlines()
+                for line in header:
+                    if "TMAX" in line:
+                        phase = float(line.split("=")[1].strip().split()[0])
+                        break
+                if phase > 1.0:
+                    break
+                spec = np.loadtxt(spec_file)
+                source = [
+                    spec[:, 0] / (1 + Z_11FE),
+                    spec[:, 1] * (1 + Z_11FE),
+                    spec[:, 2] ** 0.5,
+                ]
+                source_lst.append(source)
+                phase_det.append(phase)
+
+        elif obj == "2021aefx":
+            tab = Table.read(
+                "./data/Hosseinzadeh_2022/ReadMe_dbf2.txt",
+                format="ascii.fixed_width_two_line",
+                header_start=16,
+                position_line=17,
+                data_start=18,
+                data_end=64,
+            )
+            tab = tab[tab["Phase"] < 5]
+            # Load SALT spectra from Hosseinzadeh et al. (2022)
+            for k in range(len(tab)):
+                spec_file_fits = tab[k]["FITS Filename"]
+                spec_info = spec_file_fits.split(".")[0].split("_")
+                spec_file = glob.glob(
+                    f"./data/Hosseinzadeh_2022/*{spec_info[1]}*{spec_info[2]}*"
+                )
+                if len(spec_file) == 0:
+                    continue
+                spec = np.loadtxt(spec_file[0])
+                source = [spec[:, 0] / (1 + Z_21AEFX), spec[:, 1] * (1 + Z_21AEFX)]
+                phase = tab[k]["Phase"]
+                source_lst.append(source)
+                phase_det.append(phase)
 
         cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
 
@@ -633,26 +675,37 @@ class RedbackLightCurveLib(SNLightCurveLib):
         phase = []
         flux, flux_err = [], []
         for filt in ["ztfg", "ztfr"]:
+            ztf_trans = np.loadtxt(f"./data/{filt}.dat")
+            ztf_filt = sncosmo.Bandpass(ztf_trans[:, 0], ztf_trans[:, 1], name=filt)
+
             # Non-detections
-            phase_non_det = np.arange(-50.5, -16.5, 2)
+            phase_non_det = np.arange(-50, -18, 2) + 2
             flux_err_sky_non_det = get_flux_err_sky(filt, len(phase_non_det))
 
             flux_err_non_det = flux_err_sky_non_det
             flux_obs_non_det = np.random.randn(len(phase_non_det)) * flux_err_non_det
 
-            # Detections
-            flux_err_sky_det = get_flux_err_sky(filt, len(phase_det))
-            flux_ref = ztf_filters[ztf_filters["sncosmo_name"] == filt][
-                "reference_flux"
-            ].values[0]
             mag_src = []
+            if obj == "2011fe":
+                dist_lum_src = DIST_LUM_11FE
+            elif obj == "2021aefx":
+                dist_lum_src = DIST_LUM_21AEFX
             for source in source_lst:
                 src = sncosmo.Spectrum(
                     wave=source[0] * (1 + z),
-                    flux=source[1] / (1 + z) * (DIST_LUM_11FE / dist_lum) ** 2,
-                    fluxerr=source[2] / (1 + z) * (DIST_LUM_11FE / dist_lum) ** 2,
+                    flux=source[1] / (1 + z) * (dist_lum_src / dist_lum) ** 2,
                 )
-                mag_src.append(src.bandmag(filt, "ab"))
+                try:
+                    mag_src.append(src.bandmag(ztf_filt, "ab"))
+                except ValueError:
+                    mag_src.append(np.nan)
+
+            # Detections
+            flux_err_sky_det = get_flux_err_sky(filt, len(mag_src))
+            flux_ref = ztf_filters[ztf_filters["sncosmo_name"] == filt][
+                "reference_flux"
+            ].values[0]
+
             mag_src = np.array(mag_src)
             # True fluxes
             flux_src = flux_ref * 10 ** (-0.4 * mag_src)
@@ -660,13 +713,24 @@ class RedbackLightCurveLib(SNLightCurveLib):
             flux_err_phot = flux_src * 0.02  # 2% photometric error
             flux_err_det = (flux_err_sky_det**2 + flux_err_phot**2) ** 0.5
             flux_det = flux_src + np.random.randn(len(phase_det)) * flux_err_det
+            flux_peak = flux_src[-1] * (1 + 0.01 * np.abs(phase_det[-1]))
 
-            phase.append(np.concatenate([phase_non_det, phase_det]))
+            idx_det = np.where(np.isfinite(flux_det))[0]
+
+            phase.append(
+                np.concatenate([phase_non_det, [phase_det[idx] for idx in idx_det]])
+            )
             flux.append(
-                np.concatenate([flux_obs_non_det, flux_det]) / flux_src[-1] * 100
+                np.concatenate([flux_obs_non_det, [flux_det[idx] for idx in idx_det]])
+                / flux_peak
+                * 100
             )
             flux_err.append(
-                np.concatenate([flux_err_non_det, flux_err_det]) / flux_src[-1] * 100
+                np.concatenate(
+                    [flux_err_non_det, [flux_err_det[idx] for idx in idx_det]]
+                )
+                / flux_peak
+                * 100
             )
 
         filt = np.array([1] * len(phase[0]) + [2] * len(phase[1])).astype(np.int32)
