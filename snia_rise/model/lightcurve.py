@@ -802,6 +802,9 @@ class SNLightCurveLib(object):
         nuts_params: dict,
         rng_key,
         model_structure: str,
+        debug_save: bool,
+        debug_dir: str | None,
+        debug_basename: str | None,
     ):
         """Run warmup stages: SA warmup and/or warmup without t0_err."""
 
@@ -859,6 +862,12 @@ class SNLightCurveLib(object):
 
             rng_key, no_t0_err_key = jax.random.split(rng_key)
 
+            if chain_method == "vectorized":
+                print("Doubling the number of chains for exploration")
+                num_chains_warmup = num_chains * 2
+            else:
+                num_chains_warmup = num_chains
+
             sampler_no_t0_err = infer.MCMC(
                 infer.NUTS(
                     kernel,
@@ -868,13 +877,14 @@ class SNLightCurveLib(object):
                 ),
                 num_warmup=num_no_t0_err,
                 num_samples=max(int(num_no_t0_err * 0.1), 1),
-                num_chains=num_chains * 2  # use more chains to explore
-                if chain_method != "parallel"
-                else num_chains,
+                num_chains=num_chains_warmup,
                 chain_method=chain_method,
             )
             sampler_no_t0_err.run(
-                no_t0_err_key, **running_params_no_t0_err, prior_config=prior_config
+                no_t0_err_key,
+                **running_params_no_t0_err,
+                prior_config=prior_config,
+                extra_fields=("num_steps", "energy", "accept_prob"),
             )
 
             samples_no_t0_err = sampler_no_t0_err.get_samples()
@@ -882,6 +892,32 @@ class SNLightCurveLib(object):
                 k: jnp.median(v, axis=0) for k, v in samples_no_t0_err.items()
             }
             init_strategy_main = infer.init_to_value(values=init_values_no_t0_err)
+
+            # Optional: save only warmup posterior (xarray) via ArviZ
+            if debug_save:
+                from pathlib import Path
+
+                import arviz as az
+
+                save_dir = (
+                    Path(debug_dir)
+                    if debug_dir
+                    else Path(__file__).resolve().parent / "debug"
+                )
+                save_dir.mkdir(parents=True, exist_ok=True)
+                inf_data_warmup = az.from_numpyro(sampler_no_t0_err)
+                post_warmup = inf_data_warmup.posterior
+                post_warmup.to_netcdf(
+                    save_dir / f"{debug_basename}_warmup_no_t0_err.nc"
+                )
+
+                # Save extra fields (if available)
+                extra = sampler_no_t0_err.get_extra_fields()
+                if extra:
+                    np.savez_compressed(
+                        save_dir / f"{debug_basename}_extra_fields.npz",
+                        **{k: np.array(v) for k, v in extra.items()},
+                    )
 
             del sampler_no_t0_err, samples_no_t0_err
         else:
@@ -918,6 +954,7 @@ class SNLightCurveLib(object):
                     "sigma_t_rise",
                     "sigma_alpha_0",
                     "sigma_log_Aprime",
+                    "chol_corr",
                 )
             ]
         else:
@@ -1021,6 +1058,9 @@ class SNLightCurveLib(object):
         sample_prior: bool = False,
         prior_config: dict = {},
         nuts_params: dict = {},
+        debug_save: bool = False,
+        debug_dir: str = None,
+        debug_basename: str = None,
     ):
         """
         Perform MCMC sampling using NUTS algorithm.
@@ -1049,6 +1089,10 @@ class SNLightCurveLib(object):
         Returns
         -------
         None
+
+        Notes
+        -----
+        If `debug_save` is True, warmup sampler properties and posterior samples are saved under `debug_dir` (defaults to a subdirectory named "debug" next to this file if not provided).
         """
         from .._utils import (
             extract_coords_dims_from_model,
@@ -1150,6 +1194,9 @@ class SNLightCurveLib(object):
             nuts_params,
             rng_key,
             model_structure,
+            debug_save,
+            debug_dir,
+            debug_basename,
         )
 
         # Run main sampling

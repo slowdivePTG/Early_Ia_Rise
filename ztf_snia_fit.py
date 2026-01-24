@@ -192,6 +192,11 @@ if __name__ == "__main__":
         #     # Remove existing results to avoid conflicts
         #     shutil.rmtree(file_dir)
         os.makedirs(file_dir, exist_ok=True)
+        debug_basename = f"post_sample_{args.sampling_model}"
+        if args.volume_complete:
+            debug_basename += "_volume_complete"
+        if args.early_coverage:
+            debug_basename += "_early_coverage"
 
         ztflib.sampling(
             num_warmup=args.num_warmup,
@@ -201,6 +206,9 @@ if __name__ == "__main__":
             nuts_params=dict(max_tree_depth=12),
             random_seed=114514,
             prior_config=dict(rise_model=args.model),
+            debug_save=True,
+            debug_dir=str(file_dir),
+            debug_basename=debug_basename,
         )
 
         # Save the posterior for the hierarchical model
