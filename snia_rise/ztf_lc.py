@@ -592,7 +592,6 @@ class ZTFLib(SNLightCurveLib):
             sampling_model=sampling_model,
             **kwargs,
         )
-
         self.post_sample = post_sample
         self.decode_post_sample()
 

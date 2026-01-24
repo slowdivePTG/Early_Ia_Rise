@@ -133,7 +133,7 @@ def sample_alpha_1():
     alpha_1 : array, shape ()
         Curvature parameter
     """
-    mean_neg = 1 / (20 * (1 + np.log(20)))
+    mean_neg = 1 / (20 * (1 + jnp.log(20)))
     neg_alpha_1 = numpyro.sample("-alpha_1", dist.Exponential(1 / mean_neg))
     alpha_1 = numpyro.deterministic("alpha_1", -neg_alpha_1)
 
@@ -150,8 +150,8 @@ def sample_amp_prime():
         Amplitude normalization (before alpha_0 correction: Miller et al. 2020)
     """
     # amp_prime = numpyro.sample("Aprime", dist.LogUniform(1e0, 1e3))
-    log_amp_prime = numpyro.sample("log_Aprime", dist.Uniform(0, np.log(1e3)))
-    amp_prime = numpyro.deterministic("Aprime", np.exp(log_amp_prime))
+    log_amp_prime = numpyro.sample("log_Aprime", dist.Uniform(0, jnp.log(1e3)))
+    amp_prime = numpyro.deterministic("Aprime", jnp.exp(log_amp_prime))
 
     return amp_prime
 

@@ -202,14 +202,6 @@ def hierarchical_model(
     else:
         alpha_1 = jnp.zeros((n_obj, n_filt))
 
-    # with numpyro.plate("filt", n_filt, dim=-1):
-    #     with numpyro.plate("obj", n_obj, dim=-2):
-    #         # amp_prime = sample_amp_prime()
-    #         # amp = numpyro.deterministic("A", amp_prime / jnp.power(T_PIVOT,alpha_0))
-    #         amp = sample_amp_from_t_thresh(
-    #             alpha_0, alpha_1, t_thresh, f_thresh=F_THRESH, eps=EPS
-    #         )
-
     # shape: (n_obs,)
     if beta is None:
         beta = np.ones_like(flux)

@@ -1,5 +1,4 @@
 import warnings
-from mimetypes import init
 
 import arviz as az
 import corner
@@ -530,6 +529,24 @@ class SNLightCurveLib(object):
         None
         """
 
+        # Decode Corr, Variance matrices if present
+        for matrix in ["Corr", "Sigma"]:
+            if matrix in sample:
+                n_filt = sample.sizes.get("filt", 0)
+                if n_filt > 0:
+                    for i in range(n_filt):
+                        sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = sample[
+                            matrix
+                        ][..., i + 1, 0]
+                        sample[f"{matrix.lower()}_t_rise_log_Aprime_flt{i + 1}"] = (
+                            sample[matrix][..., i + n_filt + 1, 0]
+                        )
+                        for j in range(i + 1, n_filt):
+                            sample[f"{matrix.lower()}_alpha_flt{i + 1}_flt{j + 1}"] = (
+                                sample[matrix][..., i + 1, j + 1]
+                            )
+                sample.drop_vars(matrix)
+
         # Post-calculate population-level parameters if not sampled directly
         if "mean_t_rise" not in sample:
             sample["mean_t_rise"] = sample["t_rise"].mean(dim="obj")
@@ -725,6 +742,275 @@ class SNLightCurveLib(object):
         self.lc_library.extend(lc_lib.lc_library)
         self.ztfid_lib.extend(lc_lib.ztfid_lib)
 
+    def _sampling_unpooled(
+        self,
+        num_samples: int,
+        num_warmup: int,
+        num_chains: int,
+        thinning: int,
+        random_seed: int,
+        sample_prior: bool,
+        prior_config: dict,
+        nuts_params: dict,
+    ):
+        """Perform sampling for unpooled model using parallel processing."""
+        from joblib import Parallel, delayed
+
+        print("Using unpooled model for sampling...")
+
+        run_params = {
+            "num_samples": num_samples,
+            "num_warmup": num_warmup,
+            "num_chains": num_chains,
+            "thinning": thinning,
+            "random_seed": random_seed,
+            "sample_prior": sample_prior,
+            "prior_config": prior_config,
+        }
+
+        print(f"Parallelizing fits across {len(self.lc_library)} objects...")
+
+        def _run_fit(lc, seed_offset):
+            local_params = run_params.copy()
+            local_params["random_seed"] += seed_offset
+            lc.sampling(**local_params, nuts_params=nuts_params)
+
+            # Clear heavy objects for clean pickling
+            if hasattr(lc, "sampler"):
+                lc.sampler = None
+            if hasattr(lc, "inf_data"):
+                lc.inf_data = None
+
+            return lc
+
+        num_devices = jax.local_device_count()
+        results = Parallel(n_jobs=num_devices)(
+            delayed(_run_fit)(lc, i) for i, lc in enumerate(self.lc_library)
+        )
+
+        self.lc_library = results
+        self.aggregate_samples()
+
+    def _run_warmup(
+        self,
+        kernel,
+        running_params: dict,
+        prior_config: dict,
+        num_warmup: int,
+        num_chains: int,
+        chain_method: str,
+        nuts_params: dict,
+        rng_key,
+        model_structure: str,
+    ):
+        """Run warmup stages: SA warmup and/or warmup without t0_err."""
+
+        if "hierarchical" in model_structure:
+            print("\nSimulated Annealing warmup...")
+            running_params_sa = running_params.copy()
+            running_params_sa["t0_err"] = jnp.zeros_like(running_params["t"])
+            num_sa = int(num_warmup * 0.1)
+
+            rng_key, sa_key = jax.random.split(rng_key)
+
+            sampler_sa = infer.MCMC(
+                infer.SA(
+                    kernel,
+                    init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
+                    dense_mass=False,
+                ),
+                num_warmup=0,
+                num_samples=num_sa,
+                num_chains=1,
+                chain_method="sequential",
+            )
+            sampler_sa.run(sa_key, **running_params_sa, prior_config=prior_config)
+
+            # Use median of late SA window for initialization
+            samples_sa = sampler_sa.get_samples()
+            late_frac = (0.2, 0.1)
+            start = int(jnp.floor((1.0 - late_frac[0]) * num_sa))
+            start = int(jnp.clip(start, 0, max(num_sa - 1, 0)))
+            end = int(jnp.floor((1.0 - late_frac[1]) * num_sa))
+            end = int(jnp.clip(end, 0, max(num_sa - 1, 0)))
+
+            init_values_warmup = {}
+            for k, v in samples_sa.items():
+                v_win = v[start:end]
+                init_values_warmup[k] = jnp.median(v_win, axis=0)
+
+            for k, v in init_values_warmup.items():
+                if not jnp.all(jnp.isfinite(v)):
+                    raise ValueError(f"Non-finite value found in {k}")
+
+            init_strategy_warmup = infer.init_to_value(values=init_values_warmup)
+
+            del sampler_sa, samples_sa
+
+        else:
+            num_sa = 0
+            init_strategy_warmup = init_to_median_with_alpha0(alpha_0_init=2.0)
+
+        if self.t0_err is not None:
+            print("\nWarmup without t0_err...")
+            running_params_no_t0_err = running_params.copy()
+            running_params_no_t0_err["t0_err"] = jnp.zeros_like(running_params["t"])
+            num_no_t0_err = int(num_warmup * 0.25)
+
+            rng_key, no_t0_err_key = jax.random.split(rng_key)
+
+            sampler_no_t0_err = infer.MCMC(
+                infer.NUTS(
+                    kernel,
+                    init_strategy=init_strategy_warmup,
+                    target_accept_prob=0.95,
+                    **nuts_params,
+                ),
+                num_warmup=num_no_t0_err,
+                num_samples=max(int(num_no_t0_err * 0.1), 1),
+                num_chains=num_chains * 2  # use more chains to explore
+                if chain_method != "parallel"
+                else num_chains,
+                chain_method=chain_method,
+            )
+            sampler_no_t0_err.run(
+                no_t0_err_key, **running_params_no_t0_err, prior_config=prior_config
+            )
+
+            samples_no_t0_err = sampler_no_t0_err.get_samples()
+            init_values_no_t0_err = {
+                k: jnp.median(v, axis=0) for k, v in samples_no_t0_err.items()
+            }
+            init_strategy_main = infer.init_to_value(values=init_values_no_t0_err)
+
+            del sampler_no_t0_err, samples_no_t0_err
+        else:
+            num_no_t0_err = 0
+            init_strategy_main = init_strategy_warmup
+
+        return init_strategy_main, num_no_t0_err, rng_key
+
+    def _run_main_sampling(
+        self,
+        kernel,
+        running_params: dict,
+        prior_config: dict,
+        num_samples: int,
+        num_warmup: int,
+        num_chains: int,
+        thinning: int,
+        chain_method: str,
+        nuts_params: dict,
+        init_strategy_main,
+        effective_warmup: int,
+        model_structure: str,
+        rng_key,
+    ):
+        """Run the main NUTS sampling."""
+        print("\nMain sampling...")
+
+        if model_structure == "hierarchical_mvn":
+            dense_mass_site = [
+                (
+                    "mean_t_rise",
+                    "mean_alpha_0",
+                    "mean_log_Aprime",
+                    "sigma_t_rise",
+                    "sigma_alpha_0",
+                    "sigma_log_Aprime",
+                )
+            ]
+        else:
+            dense_mass_site = []
+
+        rng_key, main_key = jax.random.split(rng_key)
+
+        self.sampler = infer.MCMC(
+            infer.NUTS(
+                kernel,
+                init_strategy=init_strategy_main,
+                dense_mass=dense_mass_site,
+                target_accept_prob=0.95,
+                **nuts_params,
+            ),
+            num_warmup=effective_warmup,
+            num_samples=num_samples * thinning,
+            thinning=thinning,
+            num_chains=num_chains,
+            chain_method=chain_method,
+        )
+        self.sampler.run(
+            main_key,
+            **running_params,
+            prior_config=prior_config,
+            extra_fields=("num_steps", "energy", "accept_prob"),
+        )
+
+        return rng_key
+
+    def _check_sampler_health(self, nuts_params: dict):
+        """Check sampler diagnostics and report health status."""
+        extra = self.sampler.get_extra_fields()
+        num_steps = extra["num_steps"]
+        accept_probs = extra["accept_prob"]
+        energies = extra["energy"]
+
+        print("\n--- Sampler Health Check ---")
+
+        # Flag A: Max Tree Depth (Truncation)
+        max_steps_limit = 2 ** nuts_params.get("max_tree_depth", 10)
+        pct_at_limit = np.mean(num_steps >= max_steps_limit) * 100
+        print(f"   Maximum tree depth reached: {np.log2(np.max(num_steps)):.0f}")
+        if pct_at_limit > 5:
+            print(
+                f"⚠️  WARNING: {pct_at_limit:.1f}% of samples hit max_tree_depth ({max_steps_limit} steps)."
+            )
+            print(
+                "   The sampler is being truncated. Increase max_tree_depth or reparameterize."
+            )
+
+        # Flag B: E-BFMI (Energy Flow)
+        energy_diff = np.diff(energies)
+        ebfmi = np.var(energy_diff) / np.var(energies)
+        if ebfmi < 0.3:
+            print(f"⚠️  WARNING: Low E-BFMI ({ebfmi:.2f}).")
+            print(
+                "   The sampler is struggling to explore the tails. Check for high correlations."
+            )
+
+        # Flag C: Acceptance Rate
+        avg_accept = np.mean(accept_probs)
+        if avg_accept < 0.5:
+            print(f"⚠️  WARNING: Low average acceptance probability ({avg_accept:.2f}).")
+            print("   The sampler is 'stuck' or the step size is too large.")
+
+        # Flag D: R_hat (Convergence)
+        if self.post_sample is not None:
+            rhat_data = az.rhat(self.post_sample)
+            max_rhat = float(rhat_data.max())
+            if max_rhat > 1.01:
+                # Find variables with high R_hat
+                bad_vars = []
+                for var_name in rhat_data.data_vars:
+                    var_rhat = rhat_data[var_name]
+                    if var_rhat.ndim == 0:  # scalar variable
+                        if float(var_rhat) > 1.01:
+                            bad_vars.append(f"{var_name} ({float(var_rhat):.4f})")
+                    else:  # array variable
+                        bad_indices = np.where(var_rhat.values > 1.01)
+                        if len(bad_indices[0]) > 0:
+                            max_val = float(var_rhat.values[bad_indices].max())
+                            bad_vars.append(f"{var_name} ({max_val:.4f})")
+
+                print(f"⚠️  WARNING: High R_hat detected (max = {max_rhat:.4f}).")
+                print(f"   Variables with R_hat > 1.01: {', '.join(bad_vars)}")
+                print(
+                    "   Chains have not converged. Consider increasing num_warmup or num_samples."
+                )
+
+        if ebfmi >= 0.3 and pct_at_limit <= 5:
+            print("✅ All NUTS diagnostics look healthy.")
+
     def sampling(
         self,
         num_samples: int = 1000,
@@ -764,8 +1050,10 @@ class SNLightCurveLib(object):
         -------
         None
         """
-
-        from joblib import Parallel, delayed
+        from .._utils import (
+            extract_coords_dims_from_model,
+            get_recommended_chain_method,
+        )
 
         model_structure = self.model_structure
 
@@ -778,52 +1066,19 @@ class SNLightCurveLib(object):
         ], f"Invalid model structure: {model_structure}"
 
         if model_structure == "unpooled":
-            print("Using unpooled model for sampling...")
-
-            run_params = {
-                "num_samples": num_samples,
-                "num_warmup": num_warmup,
-                "num_chains": num_chains,
-                "thinning": thinning,
-                "random_seed": random_seed,
-                "sample_prior": sample_prior,
-                "prior_config": prior_config,
-            }
-
-            print(f"Parallelizing fits across {len(self.lc_library)} objects...")
-
-            def _run_fit(lc, seed_offset):
-                # Ensure each process gets a unique seed
-                local_params = run_params.copy()
-                local_params["random_seed"] += seed_offset
-
-                # Force vectorized to keep memory footprint small per process
-                lc.sampling(**local_params, nuts_params=nuts_params)
-
-                # Clear the heavy sampler object to allow clean pickling/return
-                if hasattr(lc, "sampler"):
-                    lc.sampler = None
-                # (We only need 'post_sample' for aggregation later)
-                if hasattr(lc, "inf_data"):
-                    lc.inf_data = None
-
-                return lc
-
-            num_devices = jax.local_device_count()
-            results = Parallel(n_jobs=num_devices)(
-                delayed(_run_fit)(lc, i) for i, lc in enumerate(self.lc_library)
+            self._sampling_unpooled(
+                num_samples,
+                num_warmup,
+                num_chains,
+                thinning,
+                random_seed,
+                sample_prior,
+                prior_config,
+                nuts_params,
             )
-
-            self.lc_library = results
-
-            # # Update library with the fitted objects
-            # for lc in self.lc_library:
-            #     lc.sampling(**run_params, nuts_params=nuts_params)
-
-            # Stitch the results back together
-            self.aggregate_samples()
             return
 
+        # Select model kernel
         if model_structure == "pooled":
             print("Using pooled model for sampling...")
             kernel = pooled_model
@@ -841,7 +1096,7 @@ class SNLightCurveLib(object):
             kernel = hierarchical_model
         else:
             raise ValueError(
-                "Invalid model structure.Options: 'pooled', 'unpooled', 'hierarchical' (as well as '_mvn' and '_trise')"
+                "Invalid model structure. Options: 'pooled', 'unpooled', 'hierarchical' (as well as '_mvn' and '_trise')"
             )
 
         running_params = {
@@ -859,262 +1114,72 @@ class SNLightCurveLib(object):
 
         rng_key = jax.random.PRNGKey(random_seed)
 
-        print("Sampling from prior...")
-        prior_pred = infer.Predictive(kernel, num_samples=num_samples * num_chains)(
-            rng_key,
-            **running_params,
-            prior_config=prior_config,
-        )
-
-        # Extract coordinate names and dimensions from the model
-        # Import here to avoid circular import with _utils
-        from .._utils import (
-            extract_coords_dims_from_model,
-            get_recommended_chain_method,
-        )
-
         platform = jax.default_backend()
         chain_method = get_recommended_chain_method(platform, num_chains)
 
-        coords, dims = extract_coords_dims_from_model(
-            kernel,
-            model_kwargs={**running_params, "prior_config": prior_config},
-            num_samples=1,
-        )
+        if self.prior_sample is None:
+            print("Sampling from prior...")
+            prior_pred = infer.Predictive(kernel, num_samples=num_samples * num_chains)(
+                rng_key,
+                **running_params,
+                prior_config=prior_config,
+            )
 
-        self.prior_sample = az.from_numpyro(
-            prior=prior_pred, coords=coords, dims=dims
-        ).prior.astype("float32")
+            coords, dims = extract_coords_dims_from_model(
+                kernel,
+                model_kwargs={**running_params, "prior_config": prior_config},
+                num_samples=1,
+            )
+
+            self.prior_sample = az.from_numpyro(
+                prior=prior_pred, coords=coords, dims=dims
+            ).prior.astype("float32")
 
         if sample_prior:
             self.decode_prior_sample()
             return
 
-        if "hierarchical" in model_structure:
-            print("\nSimulated Annealing warmup...")
-            running_params_sa = running_params.copy()
-            running_params_sa["t0_err"] = jnp.zeros_like(running_params["t"])
-            num_sa = int(num_warmup * 0.1)
-
-            rng_key, sa_key = jax.random.split(rng_key)
-
-            # Always use sequential for SA warmup
-            sampler_sa = infer.MCMC(
-                infer.SA(
-                    kernel,
-                    init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
-                    dense_mass=False,
-                ),
-                num_warmup=0,
-                num_samples=num_sa,
-                num_chains=1,
-                chain_method="sequential",
-            )
-            sampler_sa.run(
-                sa_key,
-                **running_params_sa,
-                prior_config=prior_config,
-            )
-
-            # Use the *median of a late SA window* to initialize the next sampler
-            # (more robust than using the final/coldest SA state, which can be high-curvature)
-            samples_sa = sampler_sa.get_samples()
-
-            late_frac = (0.2, 0.1)  # last 20% and 10% of SA samples
-            start = int(jnp.floor((1.0 - late_frac[0]) * num_sa))
-            start = int(jnp.clip(start, 0, max(num_sa - 1, 0)))
-            end = int(jnp.floor((1.0 - late_frac[1]) * num_sa))
-            end = int(jnp.clip(end, 0, max(num_sa - 1, 0)))
-
-            init_values_warmup = {}
-            for k, v in samples_sa.items():
-                v_win = v[start:end]  # shape: (n_win, ...) in chain dimension
-                init_values_warmup[k] = jnp.median(v_win, axis=0)
-
-            for k, v in init_values_warmup.items():
-                if not jnp.all(jnp.isfinite(v)):
-                    raise ValueError(f"Non-finite value found in {k}")
-
-            # fig, ax = plt.subplots(2, 1, figsize=(8, 4), constrained_layout=True)
-            # ax[0].plot(samples_sa["mean_alpha_0"])
-            # ax[1].plot(samples_sa["sigma_alpha_0"])
-            # ax[0].set_title("Mean alpha_0")
-            # ax[1].set_title("Sigma alpha_0")
-            # ax[0].axhline(init_values_warmup["mean_alpha_0"][0])
-            # ax[0].axhline(init_values_warmup["mean_alpha_0"][1])
-            # ax[1].axhline(init_values_warmup["sigma_alpha_0"][0])
-            # ax[1].axhline(init_values_warmup["sigma_alpha_0"][1])
-            # plt.show()
-
-            init_strategy_warmup = infer.init_to_value(values=init_values_warmup)
-
-        else:
-            num_sa = 0
-            init_strategy_warmup = init_to_median_with_alpha0(alpha_0_init=2.0)
-
-        # Warmup without t0_err (if needed)
-        if self.t0_err is not None:
-            print("\nWarmup without t0_err...")
-            running_params_no_t0_err = running_params.copy()
-            running_params_no_t0_err["t0_err"] = jnp.zeros_like(running_params["t"])
-            num_no_t0_err = int(num_warmup * 0.25)
-
-            rng_key, no_t0_err_key = jax.random.split(rng_key)
-
-            sampler_no_t0_err = infer.MCMC(
-                infer.NUTS(
-                    kernel,
-                    init_strategy=init_strategy_warmup,
-                    # dense_mass=True,
-                    target_accept_prob=0.95,
-                    **nuts_params,
-                ),
-                num_warmup=num_no_t0_err,
-                num_samples=max(int(num_no_t0_err * 0.1), 1),
-                num_chains=num_chains,
-                chain_method=chain_method,
-            )
-            # Pass init_params explicit argument
-            sampler_no_t0_err.run(
-                no_t0_err_key, **running_params_no_t0_err, prior_config=prior_config
-            )
-
-            # Use the last sample to initialize the main sampler
-            samples_warmup = sampler_no_t0_err.get_samples()
-            init_values_no_t0 = {
-                k: jnp.median(v, axis=0) for k, v in samples_warmup.items()
-            }
-            init_strategy_main = infer.init_to_value(values=init_values_no_t0)
-        else:
-            num_no_t0_err = 0
-            init_strategy_main = init_strategy_warmup
-
-        print("\nMain sampling...")
-        if model_structure == "hierarchical_mvn":
-            dense_mass_site = [
-                (
-                    "mean_t_rise",
-                    "mean_alpha_0",
-                    "mean_log_Aprime",
-                    "sigma_t_rise",
-                    "sigma_alpha_0",
-                    "sigma_log_Aprime",
-                )
-            ]
-        else:
-            dense_mass_site = []
-
-        rng_key, main_key = jax.random.split(rng_key)
-        self.sampler = infer.MCMC(
-            infer.NUTS(
-                kernel,
-                init_strategy=init_strategy_main,
-                dense_mass=dense_mass_site,
-                target_accept_prob=0.95,
-                **nuts_params,
-            ),
-            num_warmup=num_warmup - num_no_t0_err,
-            num_samples=num_samples * thinning,
-            thinning=thinning,
-            num_chains=num_chains,
-            chain_method=chain_method,
-        )
-        self.sampler.run(
-            main_key,
-            **running_params,
-            prior_config=prior_config,
-            extra_fields=("num_steps", "energy", "accept_prob"),
+        # Run warmup stages
+        init_strategy_main, num_no_t0_err, rng_key = self._run_warmup(
+            kernel,
+            running_params,
+            prior_config,
+            num_warmup,
+            num_chains,
+            chain_method,
+            nuts_params,
+            rng_key,
+            model_structure,
         )
 
-        # 1. Extract extra fields
-        extra = self.sampler.get_extra_fields()
-        num_steps = extra["num_steps"]
-        accept_probs = extra["accept_prob"]
-        energies = extra["energy"]
+        # Run main sampling
+        effective_warmup = num_warmup - num_no_t0_err
 
-        # 2. Check for Red Flags
-        print("\n--- Sampler Health Check ---")
-
-        # Flag A: Max Tree Depth (Truncation)
-        # Assuming default max_tree_depth = 10
-        max_steps_limit = 2 ** nuts_params.get("max_tree_depth", 10)
-        pct_at_limit = np.mean(num_steps >= max_steps_limit) * 100
-        if pct_at_limit > 5:
-            print(
-                f"⚠️  WARNING: {pct_at_limit:.1f}% of samples hit max_tree_depth ({max_steps_limit} steps)."
-            )
-            print(
-                "   The sampler is being truncated. Increase max_tree_depth or reparameterize."
-            )
-
-        # Flag C: E-BFMI (Energy Flow)
-        energy_diff = np.diff(energies)
-        ebfmi = np.var(energy_diff) / np.var(energies)
-        if ebfmi < 0.3:
-            print(f"⚠️  WARNING: Low E-BFMI ({ebfmi:.2f}).")
-            print(
-                "   The sampler is struggling to explore the tails. Check for high correlations."
-            )
-
-        # Flag D: Acceptance Rate
-        avg_accept = np.mean(accept_probs)
-        if avg_accept < 0.5:
-            print(f"⚠️  WARNING: Low average acceptance probability ({avg_accept:.2f}).")
-            print("   The sampler is 'stuck' or the step size is too large.")
-
-        if ebfmi >= 0.3 and pct_at_limit <= 5:
-            print("✅ All NUTS diagnostics look healthy.")
-
-        # Posterior predictive checks
-        rng_key, post_key = jax.random.split(rng_key)
-        post_pred = infer.Predictive(kernel, self.sampler.get_samples())(
-            post_key,
-            **running_params,
-            prior_config=prior_config,
-        )
-        # convert to arviz InferenceData
-        self.inf_data = az.from_numpyro(
-            self.sampler,
-            prior=prior_pred,
-            posterior_predictive=post_pred,
+        rng_key = self._run_main_sampling(
+            kernel,
+            running_params,
+            prior_config,
+            num_samples,
+            num_warmup,
+            num_chains,
+            thinning,
+            chain_method,
+            nuts_params,
+            init_strategy_main,
+            effective_warmup,
+            model_structure,
+            rng_key,
         )
 
-        # process the posterior samples
-        post_sample = self.inf_data.posterior.astype("float32")
+        # Check sampler health
+        self._check_sampler_health(nuts_params)
 
-        # decode Corr, Variance matrices if present
-        for matrix in ["Corr", "Sigma"]:
-            if matrix in self.inf_data.posterior:
-                n_filt = len(np.unique(self.idx_filt))
-                for i in range(n_filt):
-                    post_sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = (
-                        self.inf_data.posterior[matrix][..., i + 1, 0]
-                    )
-                    post_sample[f"{matrix.lower()}_t_rise_log_Aprime_flt{i + 1}"] = (
-                        self.inf_data.posterior[matrix][..., i + n_filt + 1, 0]
-                    )
-                    for j in range(i + 1, n_filt):
-                        post_sample[f"{matrix.lower()}_alpha_flt{i + 1}_flt{j + 1}"] = (
-                            self.inf_data.posterior[matrix][..., i + 1, j + 1]
-                        )
-
-        # store the posterior samples
-        self.post_sample = self.drop_nuisances(post_sample)
+        inf_data = az.from_numpyro(self.sampler)
+        self.post_sample = self.drop_nuisances(inf_data.posterior.astype("float32"))
 
     @staticmethod
     def drop_nuisances(sample: xr.DataArray | None):
-        NUISANCES = [
-            "alpha-",
-            "chol_corr",
-            "theta",
-            "Corr",
-            "Sigma",
-            # "delta",
-            # "delta_raw",
-            # "alpha_0_cm",
-            # "mean_alpha_0_cm",
-            # "sigma_alpha_0_cm",
-        ]
+        NUISANCES = ["alpha-", "theta", "chol_corr"]
         if sample is not None:
             vars_to_remove = [
                 var

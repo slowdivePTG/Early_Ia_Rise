@@ -18,9 +18,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "dr",
-        nargs="+",
         type=str,
-        default=["dr2"],
+        default="dr2",
         help="data release to use (default: dr2; options: dr2, edr, early_late)",
     )
     parser.add_argument(
@@ -95,9 +94,8 @@ if __name__ == "__main__":
         default=2,
         help="Thinning factor for samples (default: 2)",
     )
-
     args = parser.parse_args()
-    drs = [dr.lower() for dr in args.dr]
+    dr = args.dr.lower()
 
     # Configure JAX/NumPyro platform
     print("\n" + "=" * 70)
@@ -129,67 +127,62 @@ if __name__ == "__main__":
     dr_dir = None
 
     for early_threshold in args.early_threshold:
-        ztflib = ZTFLib(rise_model=args.model, sampling_model=args.sampling_model)
-
-        print(f"\nProcessing DRs: {drs} with early threshold: {early_threshold}")
+        print(f"\nProcessing DRs: {dr} with early threshold: {early_threshold}")
         print(
             f"Volume-complete: {args.volume_complete}, Early-coverage: {args.early_coverage}"
         )
         print(f"Model: {args.model}, Sampling model: {args.sampling_model}")
 
-        for dr in drs:
-            if dr == "dr2":
-                dr_dir = "ztf_snia_dr2"
-                tab_info = Table.read(
-                    "./data/ztf_snia_dr2/tables/snia_data_basic_normal.csv",
-                    format="ascii.csv",
-                )
-                # normal = tab_early_info["sn_type"] != "snia-pec"
-                idx = np.ones(len(tab_info), dtype=bool)
-                if args.volume_complete:
-                    idx &= tab_info["volume_limited"] == 1
-                if args.early_coverage:
-                    idx &= tab_info["early_coverage"] == 1
-                ztflib.append(
-                    ZTFLib(
-                        ztfid_lib=tab_info["ztfname"][idx],
-                        source="DR2",
-                        early_threshold=early_threshold,
-                    )
-                )
+        if dr == "dr2":
+            dr_dir = "ztf_snia_dr2"
+            tab_info = Table.read(
+                "./data/ztf_snia_dr2/tables/snia_data_basic_normal.csv",
+                format="ascii.csv",
+            )
+            # normal = tab_early_info["sn_type"] != "snia-pec"
+            idx = np.ones(len(tab_info), dtype=bool)
+            if args.volume_complete:
+                idx &= tab_info["volume_limited"] == 1
+            if args.early_coverage:
+                idx &= tab_info["early_coverage"] == 1
+            ztflib = ZTFLib(
+                ztfid_lib=tab_info["ztfname"][idx],
+                source="DR2",
+                early_threshold=early_threshold,
+                volume_complete=args.volume_complete,
+                early_coverage=args.early_coverage,
+            )
 
-            elif dr == "edr":
-                dr_dir = "ztf_snia_edr"
-                tab_info = Table.read(
-                    "./data/ztf_snia_edr/snia_data_basic_normal.csv", format="ascii.csv"
-                )
-                # normal = ~pd.array(tab_info["Ia subtype"]).isin(
-                #     ["Ia-CSM", "SC", "SC*", "86G-like", "02cx-like"]
-                # )
-                idx = np.ones(len(tab_info), dtype=bool)
-                if args.volume_complete:
-                    idx &= tab_info["volume_limited"] == 1
-                args.early_coverage = (
-                    True  # set to True for EDR since all have early data
-                )
-                ztflib.append(
-                    ZTFLib(
-                        ztfid_lib=tab_info["name"][idx],
-                        source="EDR",
-                        early_threshold=early_threshold,
-                    )
-                )
+        elif dr == "edr":
+            dr_dir = "ztf_snia_edr"
+            tab_info = Table.read(
+                "./data/ztf_snia_edr/snia_data_basic_normal.csv", format="ascii.csv"
+            )
+            # normal = ~pd.array(tab_info["Ia subtype"]).isin(
+            #     ["Ia-CSM", "SC", "SC*", "86G-like", "02cx-like"]
+            # )
+            idx = np.ones(len(tab_info), dtype=bool)
+            if args.volume_complete:
+                idx &= tab_info["volume_limited"] == 1
+            args.early_coverage = True  # set to True for EDR since all have early data
+            ztflib = ZTFLib(
+                ztfid_lib=tab_info["name"][idx],
+                source="EDR",
+                early_threshold=early_threshold,
+                volume_complete=args.volume_complete,
+                early_coverage=args.early_coverage,
+            )
 
-            elif dr == "early_late":
-                dr_dir = "ztf_early_late"
-                tab_early_info = Table.read("./data/ztf_early_late/ztf_early_Ia.csv")
-                ztflib.append(
-                    ZTFLib(
-                        tab_early_info[tab_early_info["not_obs"].mask]["ztfid"],
-                        source="early_late",
-                        early_threshold=early_threshold,
-                    )
-                )
+        elif dr == "early_late":
+            dr_dir = "ztf_early_late"
+            tab_early_info = Table.read("./data/ztf_early_late/ztf_early_Ia.csv")
+            ztflib = ZTFLib(
+                tab_early_info[tab_early_info["not_obs"].mask]["ztfid"],
+                source="early_late",
+                early_threshold=early_threshold,
+                volume_complete=args.volume_complete,
+                early_coverage=args.early_coverage,
+            )
 
         file_dir = Path(
             f"./data/{dr_dir}/results/frac{int(early_threshold * 100)}_{args.model}"
