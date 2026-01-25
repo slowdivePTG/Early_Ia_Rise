@@ -110,7 +110,7 @@ def show_kde_posterior(
     lib: "SNLightCurveLib",
     param: str,
     ax: plt.Axes | list[plt.Axes],
-    range=None,
+    x_range=None,
     show_prior=False,
     **kwargs,
 ):
@@ -123,22 +123,33 @@ def show_kde_posterior(
     for sample in [prior_sample, post_sample]:
         if sample is None:
             return
-        sample["mean_alpha_flt1"] = sample["mean_alpha_0"][..., 0]
-        sample["mean_alpha_flt2"] = sample["mean_alpha_0"][..., 1]
-        sample["sigma_alpha_flt1"] = sample["sigma_alpha_0"][..., 0]
-        sample["sigma_alpha_flt2"] = sample["sigma_alpha_0"][..., 1]
+
+        for k in range(len(np.unique(lib.idx_filt))):
+            sample[f"mean_alpha_flt{k + 1}"] = sample["mean_alpha_0"][..., k]
+            sample[f"sigma_alpha_flt{k + 1}"] = sample["sigma_alpha_0"][..., k]
+            sample[f"mean_log_Aprime_flt{k + 1}"] = sample["mean_log_Aprime"][..., k]
+            sample[f"sigma_log_Aprime_flt{k + 1}"] = sample["sigma_log_Aprime"][..., k]
 
     # Flatten the xarray DataArray to 1D array for seaborn
     param_post = post_sample[param].values.flatten()
     param_prior = prior_sample[param].values.flatten()
 
-    if range is not None:
-        param_post = param_post[(param_post >= range[0]) & (param_post <= range[1])]
-        param_prior = param_prior[(param_prior >= range[0]) & (param_prior <= range[1])]
+    if x_range is not None:
+        param_post = param_post[(param_post >= x_range[0]) & (param_post <= x_range[1])]
+        param_prior = param_prior[
+            (param_prior >= x_range[0]) & (param_prior <= x_range[1])
+        ]
+
+    # Check if param_post is empty after filtering
+    if len(param_post) == 0:
+        print(f"Warning: No data for parameter '{param}' in range {x_range}")
+        return
 
     bw_adjust = kwargs.pop("bw_adjust", None)
     if bw_adjust is None:
-        bw_adjust = (np.percentile(param_post, 97.5) - np.percentile(param_post, 2.5)) * 7.5
+        bw_adjust = (
+            np.percentile(param_post, 97.5) - np.percentile(param_post, 2.5)
+        ) * 7.5
     params = dict(fill=True, alpha=0.25, lw=2, **kwargs)
     params_prior = dict(
         alpha=0.25, lw=2, linestyle="--", color=kwargs.get("color", "0.5")
@@ -156,4 +167,4 @@ def show_kde_posterior(
     # )
 
     sns.kdeplot(x=param_post, ax=ax, bw_adjust=bw_adjust, **params)
-    ax.set_xlim(range)
+    ax.set_xlim(x_range)

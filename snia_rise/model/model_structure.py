@@ -5,6 +5,7 @@ import numpyro
 from numpy.typing import ArrayLike
 from numpyro import distributions as dist
 
+from ..constants import EPS, T_PIVOT
 from .priors import (
     sample_alpha_0,
     sample_alpha_1,
@@ -15,10 +16,6 @@ from .priors import (
     sample_t_fl,
     sample_t_rise,
 )
-
-F_THRESH = 40  # 40% of the maximum flux
-EPS = 1e-10  # Small value to avoid division by zero
-T_PIVOT = 7.0  # Pivot time for the power-law rise (the typical time to reach 40% of the maximum flux)
 
 ####################################################################################################
 ##                      Power-law rise function for SNe Ia light curves                           ##
@@ -55,7 +52,7 @@ def f_t(
         Correction factor for the power-law rise.
     t_pivot : float or array-like
         Pivot time for the power-law rise.
-    eps : float, optional, default = 1e-10
+    eps : float, optional, default = EPS
         Small value to avoid numerical issues when t - t_fl is small and alpha_0 < 1
 
     Returns:

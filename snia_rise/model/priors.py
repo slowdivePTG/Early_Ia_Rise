@@ -1,12 +1,10 @@
 """Helper functions for hierarchical Bayesian models of supernova light curves."""
 
 import jax.numpy as jnp
-import numpy as np
 import numpyro
 import numpyro.distributions as dist
 
-EPS = 1e-5  # Small value to avoid division by zero
-
+from ..constants import EPS
 
 # def sample_fcqf_params(n_fcqfid, prior_config: dict = {}):
 #     """

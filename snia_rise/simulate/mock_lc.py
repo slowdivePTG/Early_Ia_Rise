@@ -24,8 +24,12 @@ class RedbackLightCurveLib(SNLightCurveLib):
         true_model: str = "power_law",
         sampling_model: str = "hierarchical",
         prior_type: str = "uniform",
+        true_param_dependence: str | None = None,
     ) -> None:
-        file_dir = Path(f"./data/mock/{true_model}")
+        if (true_param_dependence is not None) and ("power_law" in true_model):
+            file_dir = Path(f"./data/mock/{true_model}_{true_param_dependence}")
+        else:
+            file_dir = Path(f"./data/mock/{true_model}")
 
         peak_files = sorted(glob.glob(str(Path(file_dir) / "lc_peak*.csv")))
         params_file = file_dir / "simulated_lc_params.csv"
@@ -102,8 +106,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
     def simulate_mock_light_curve(
         cls,
         n_lc: int = 10,
-        params_mean: dict = None,
-        params_sigma: dict = None,
+        param_dependence: str = "independent",
         model: str = "curved_power_law",
         min_dist_lum: float = 10,
         max_dist_lum: float = 270,
@@ -131,23 +134,16 @@ class RedbackLightCurveLib(SNLightCurveLib):
         # For the power-law rise models
         T0_MJD_TRANSIENT = 59050.0
         PEAK_LUMINOSITY = 2e28  # intrinsic peak luminosity (erg/s/Hz)
-        T_PIVOT = 7.0
+        from ..constants import T_PIVOT
 
         # Sample the population parameters using numpy.random
         num_tot = n_lc * 20  # oversample to account for non-detections
 
-        np.random.seed(num_tot + 114514)
+        np.random.seed(num_tot * 42 + 114514)
 
-        if params_mean is None:
-            params_mean = {}
-        if params_sigma is None:
-            params_sigma = {}
+        # Hyperparameters are fixed below; param_dependence controls independence vs correlation
 
-        params_sim = dict(
-            base=np.random.normal(
-                params_mean.get("base", 0.0), params_sigma.get("base", 0.1), num_tot
-            )
-        )
+        params_sim = dict(base=np.random.normal(0.0, 0.1, num_tot))
 
         if "power_law" in model:
             # Add the required t0_mjd_transient parameter
@@ -158,36 +154,106 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             # True hyper-parameters for the power-law rise model
             params_true = dict(
-                mean_alpha=params_mean.get("alpha", 2.0),
-                sigma_alpha=params_sigma.get("alpha", 0.3),
-                mean_t_rise=params_mean.get("t_rise", 18),
-                sigma_t_rise=params_sigma.get("t_rise", 1),
+                mean_alpha=2.0,
+                sigma_alpha=0.3,
+                mean_t_rise=18.0,
+                sigma_t_rise=1.0,
             )
 
-            params_sim["t_rise"] = np.random.normal(
-                params_true["mean_t_rise"], params_true["sigma_t_rise"], num_tot
-            )
-            params_sim["alpha_0"] = np.clip(
-                np.random.normal(
-                    params_true["mean_alpha"], params_true["sigma_alpha"], num_tot
-                ),
-                1.05,
-                5.0,
-            )
-            params_sim["peak_luminosity"] = np.full(num_tot, PEAK_LUMINOSITY)
-
-            if model == "power_law":
-                params_true["mean_log_Aprime"] = params_mean.get(
-                    "log_Aprime", np.log(40)
+            # Support independent or correlated sampling for (t_rise, alpha_0, log_Aprime)
+            # Correlated sampling is enabled when sampling_mode == "correlated"
+            # Fixed correlation matrix (order: [t_rise, alpha_0, log_Aprime]):
+            # corr(t_rise, alpha_0) = +0.5, corr(t_rise, log_Aprime) = -0.5, corr(alpha_0, log_Aprime) = 0.0
+            corr_matrix = (
+                None
+                if param_dependence == "independent"
+                else np.array(
+                    [
+                        [1.0, 0.5, -0.5],
+                        [0.5, 1.0, 0.0],
+                        [-0.5, 0.0, 1.0],
+                    ]
                 )
-                params_true["sigma_log_Aprime"] = params_sigma.get("log_Aprime", 0.2)
-                params_sim["amp_prime"] = np.exp(
+            )
+
+            if corr_matrix is None:
+                # Original independent sampling (default)
+                params_sim["t_rise"] = np.random.normal(
+                    params_true["mean_t_rise"], params_true["sigma_t_rise"], num_tot
+                )
+                params_sim["alpha_0"] = np.clip(
                     np.random.normal(
+                        params_true["mean_alpha"], params_true["sigma_alpha"], num_tot
+                    ),
+                    1.05,
+                    5.0,
+                )
+                params_sim["peak_luminosity"] = np.full(num_tot, PEAK_LUMINOSITY)
+
+                if model == "power_law":
+                    params_true["mean_log_Aprime"] = np.log(40)
+                    params_true["sigma_log_Aprime"] = 0.2
+                    params_sim["log_Aprime"] = np.random.normal(
                         params_true["mean_log_Aprime"],
                         params_true["sigma_log_Aprime"],
                         num_tot,
                     )
+                else:
+                    # For curved/broken models, set a placeholder for Aprime to keep downstream compatibility
+                    params_sim["log_Aprime"] = np.full(num_tot, np.nan)
+            else:
+                # Correlated sampling via multivariate normal
+                # Build mean vector and covariance matrix from provided means/sigmas and corr_matrix
+                # Validate corr_matrix dimensions (2x2 or 3x3)
+                corr_matrix = np.asarray(corr_matrix, dtype=float)
+                if corr_matrix.shape not in [(2, 2), (3, 3)]:
+                    raise ValueError(
+                        "corr_matrix must be 2x2 ([t_rise, alpha_0]) or 3x3 ([t_rise, alpha_0, log_Aprime])."
+                    )
+
+                # Means
+                mean_t = params_true["mean_t_rise"]
+                mean_alpha = params_true["mean_alpha"]
+                mean_log_Aprime = np.log(40)
+
+                # Sigmas
+                sig_t = params_true["sigma_t_rise"]
+                sig_alpha = params_true["sigma_alpha"]
+                sig_log_Aprime = 0.2
+
+                if corr_matrix.shape == (2, 2):
+                    mean_vec = np.array([mean_t, mean_alpha])
+                    scale_vec = np.array([sig_t, sig_alpha])
+                else:
+                    mean_vec = np.array([mean_t, mean_alpha, mean_log_Aprime])
+                    scale_vec = np.array([sig_t, sig_alpha, sig_log_Aprime])
+
+                # Convert correlation to covariance: Sigma = D * R * D, where D = diag(sigmas)
+                sigmas = np.diag(scale_vec)
+                cov = sigmas @ corr_matrix @ sigmas
+
+                # Sample
+                samples = np.random.multivariate_normal(
+                    mean=mean_vec, cov=cov, size=num_tot
                 )
+
+                # Assign sampled values
+                params_sim["t_rise"] = samples[:, 0]
+                params_sim["alpha_0"] = np.clip(samples[:, 1], 1.05, 5.0)
+                params_sim["peak_luminosity"] = np.full(num_tot, PEAK_LUMINOSITY)
+
+                if corr_matrix.shape == (3, 3):
+                    log_Aprime_vals = samples[:, 2]
+                else:
+                    log_Aprime_vals = np.random.normal(
+                        mean_log_Aprime, sig_log_Aprime, num_tot
+                    )
+
+                # Aprime only used for pure power-law model; set NaN otherwise for compatibility
+                if model == "power_law":
+                    params_sim["log_Aprime"] = log_Aprime_vals
+                else:
+                    params_sim["log_Aprime"] = np.full(num_tot, np.nan)
 
             if model == "curved_power_law":
                 # Compute alpha_1 based on other parameters
@@ -286,6 +352,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
         model_dir = (
             model if z_fixed is None else f"{model}_z_{z_fixed:.2f}".replace(".", "_")
         )
+        if "power_law" in model:
+            model_dir = f"{model_dir}_{param_dependence}"
 
         data_dir = Path("./data/mock") / model_dir
         if os.path.exists(data_dir):
@@ -364,16 +432,29 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             params_valid_det.append(single_params)
 
-            if (idx_obs % 50 == 0) and (idx_obs > 0) and "power_law" in model:
+            if ((idx_obs + 1) % 50 == 0) and "power_law" in model:
                 params_valid_det_df = pd.DataFrame(params_valid_det).reset_index(
                     drop=True
+                )
+                print(f"{'=' * 40}")
+                print(
+                    f"Current t_rise = {np.mean(params_valid_det_df['t_rise']):.1f} +/- {np.std(params_valid_det_df['t_rise']):.1f}"
                 )
                 print(
                     f"Current alpha = {np.mean(params_valid_det_df['alpha_0']):.2f} +/- {np.std(params_valid_det_df['alpha_0']):.2f}"
                 )
+                if model == "power_law":
+                    print(
+                        f"Current log_Aprime = {np.mean(params_valid_det_df['log_Aprime']):.2f} +/- {np.std(params_valid_det_df['log_Aprime']):.2f}"
+                    )
                 print(
-                    f"Current t_rise = {np.mean(params_valid_det_df['t_rise']):.1f} +/- {np.std(params_valid_det_df['t_rise']):.1f}"
+                    f"Current rho(t_rise, alpha) = {np.corrcoef(params_valid_det_df['t_rise'], params_valid_det_df['alpha_0'])[0, 1]:.2f}"
                 )
+                if model == "power_law":
+                    print(
+                        f"Current rho(t_rise, log_Aprime) = {np.corrcoef(params_valid_det_df['t_rise'], params_valid_det_df['log_Aprime'])[0, 1]:.2f}"
+                    )
+                print(f"{'=' * 40}")
 
         params_valid_det = pd.DataFrame(params_valid_det).reset_index(drop=True)
 
@@ -473,6 +554,13 @@ class RedbackLightCurveLib(SNLightCurveLib):
         Simulate a single light curve using Redback.
         """
         from redback.simulate_transients import SimulateOpticalTransient
+
+        if "Aprime" in params:
+            params["amp_prime"] = params["Aprime"]
+        if "log_Aprime" in params:
+            params["amp_prime"] = np.exp(params["log_Aprime"])
+        else:
+            raise ValueError("Either Aprime or log_Aprime must be provided")
 
         # Simulate single transient
         sim = SimulateOpticalTransient.simulate_transient_in_ztf(

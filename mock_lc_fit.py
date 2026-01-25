@@ -39,6 +39,12 @@ if __name__ == "__main__":
         help="Select the underlying true model: 'power_law' or 'curved_power_law'. Default is the same as the fitting model.",
     )
     parser.add_argument(
+        "--true_param_dependence",
+        choices=["independent", "correlated", None],
+        default=None,
+        help="Parameter dependence of the true simulation for power-law families: 'independent' or 'correlated' (default: None).",
+    )
+    parser.add_argument(
         "--sampling_model",
         choices=[
             "pooled",
@@ -150,10 +156,17 @@ if __name__ == "__main__":
             true_model=true_model,
             sampling_model=args.sampling_model,
             prior_type=args.prior_type.lower(),
+            true_param_dependence=args.true_param_dependence,
         )
 
+        # Align result directory with input directory structure that may include param dependence
+        suffix = (
+            f"_{args.true_param_dependence}"
+            if (args.true_param_dependence is not None and "power_law" in true_model)
+            else ""
+        )
         result_dir = Path(
-            f"./data/mock/{true_model}/{model}_frac{int(early_threshold * 100)}"
+            f"./data/mock/{true_model}{suffix}/{model}_frac{int(early_threshold * 100)}"
         )
         os.makedirs(result_dir, exist_ok=True)
 

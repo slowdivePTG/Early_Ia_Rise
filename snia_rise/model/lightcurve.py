@@ -11,8 +11,8 @@ from numpyro.infer.initialization import init_to_median
 from sklearn.preprocessing import LabelEncoder
 
 from .._utils import plt
+from ..constants import T_PIVOT
 from .model_structure import (
-    T_PIVOT,
     f_t,
     hierarchical_model,
     pooled_model,
@@ -514,7 +514,7 @@ class SNLightCurveLib(object):
 
     @staticmethod
     def decode_sample(
-        sample: xr.DataArray, f_thresh=0.025, t_pivot=7.0
+        sample: xr.DataArray, f_thresh=0.025, t_pivot=T_PIVOT
     ) -> xr.DataArray:
         """
         Decode the posterior samples of each light curve from the packed hierarchical model.
@@ -905,8 +905,9 @@ class SNLightCurveLib(object):
                     else Path(__file__).resolve().parent / "debug"
                 )
                 save_dir.mkdir(parents=True, exist_ok=True)
-                inf_data_warmup = az.from_numpyro(sampler_no_t0_err)
-                post_warmup = inf_data_warmup.posterior
+                post_warmup = az.from_numpyro(sampler_no_t0_err).posterior.astype(
+                    "float32"
+                )
                 post_warmup.to_netcdf(
                     save_dir / f"{debug_basename}_warmup_no_t0_err.nc"
                 )
@@ -1022,28 +1023,30 @@ class SNLightCurveLib(object):
             print("   The sampler is 'stuck' or the step size is too large.")
 
         # Flag D: R_hat (Convergence)
-        if self.post_sample is not None:
-            rhat_data = az.rhat(self.post_sample)
-            max_rhat = float(rhat_data.max())
-            if max_rhat > 1.01:
-                # Find variables with high R_hat
-                bad_vars = []
-                for var_name in rhat_data.data_vars:
-                    var_rhat = rhat_data[var_name]
-                    if var_rhat.ndim == 0:  # scalar variable
-                        if float(var_rhat) > 1.01:
-                            bad_vars.append(f"{var_name} ({float(var_rhat):.4f})")
-                    else:  # array variable
-                        bad_indices = np.where(var_rhat.values > 1.01)
-                        if len(bad_indices[0]) > 0:
-                            max_val = float(var_rhat.values[bad_indices].max())
-                            bad_vars.append(f"{var_name} ({max_val:.4f})")
+        rhat_data = az.rhat(self.post_sample)
+        # Compute numeric max across all variables, ignoring NaNs
+        max_rhat = np.nanmax(
+            [np.nanmax(rhat_data[var_name].values) for var_name in rhat_data.data_vars]
+        )
+        if max_rhat > 1.01:
+            # Find variables with high R_hat
+            bad_vars = []
+            for var_name in rhat_data.data_vars:
+                var_rhat = rhat_data[var_name]
+                if var_rhat.ndim == 0:  # scalar variable
+                    if float(var_rhat) > 1.01:
+                        bad_vars.append(f"{var_name} ({float(var_rhat):.4f})")
+                else:  # array variable
+                    bad_indices = np.where(var_rhat.values > 1.01)
+                    if len(bad_indices[0]) > 0:
+                        max_val = float(var_rhat.values[bad_indices].max())
+                        bad_vars.append(f"{var_name} ({max_val:.4f})")
 
-                print(f"⚠️  WARNING: High R_hat detected (max = {max_rhat:.4f}).")
-                print(f"   Variables with R_hat > 1.01: {', '.join(bad_vars)}")
-                print(
-                    "   Chains have not converged. Consider increasing num_warmup or num_samples."
-                )
+            print(f"⚠️  WARNING: High R_hat detected (max = {max_rhat:.4f}).")
+            print(f"   Variables with R_hat > 1.01: {', '.join(bad_vars)}")
+            print(
+                "   Chains have not converged. Consider increasing num_warmup or num_samples."
+            )
 
         if ebfmi >= 0.3 and pct_at_limit <= 5:
             print("✅ All NUTS diagnostics look healthy.")
@@ -1218,11 +1221,11 @@ class SNLightCurveLib(object):
             rng_key,
         )
 
-        # Check sampler health
-        self._check_sampler_health(nuts_params)
-
         inf_data = az.from_numpyro(self.sampler)
         self.post_sample = self.drop_nuisances(inf_data.posterior.astype("float32"))
+
+        # Check sampler health
+        self._check_sampler_health(nuts_params)
 
     @staticmethod
     def drop_nuisances(sample: xr.DataArray | None):

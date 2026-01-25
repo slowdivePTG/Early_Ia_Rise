@@ -1,9 +1,10 @@
-import astropy.units as u
 import numpy as np
 import pandas as pd
 import sncosmo
 from jax._src.typing import ArrayLike
 from redback.sed import RedbackTimeSeriesSource
+
+from ..constants import EPS, T_PIVOT
 
 MPC_TO_CM = 3.086e24
 SPEED_OF_LIGHT = 2.99792458e10  # cm/s
@@ -14,10 +15,10 @@ def f_t_norm(
     t_fl: float | ArrayLike,
     alpha_0: float | ArrayLike,
     alpha_1: float | ArrayLike = 0.0,
-    t_pivot: float | ArrayLike = 7.0,
+    t_pivot: float | ArrayLike = T_PIVOT,
     t_b: float = None,
     s: float = None,
-    eps: float = 1e-10,
+    eps: float = EPS,
 ):
     """
     Calculate the flux with a curved/broken power-law rise model.
@@ -38,7 +39,7 @@ def f_t_norm(
         Break time for the broken power-law rise.
     s : float or array-like, optional, default = None
         Slope parameter for the broken power-law rise.
-    eps : float, optional, default = 1e-10
+    eps : float, optional, default = EPS
         Small value to avoid numerical issues when t - t_fl is small and alpha_0 < 1
 
     Returns:
@@ -73,7 +74,7 @@ def power_law_rise_flat_sed(
     dist_lum: float,
     redshift: float,
     amp_prime: float = None,
-    t_pivot: float = 7.0,
+    t_pivot: float = T_PIVOT,
     **kwargs,
 ):
     """
@@ -156,7 +157,7 @@ def curved_power_law_rise_flat_sed(
     dist_lum: float,
     redshift: float,
     amp_prime: float = None,
-    t_pivot: float = 7.0,
+    t_pivot: float = T_PIVOT,
     **kwargs,
 ):
     """
