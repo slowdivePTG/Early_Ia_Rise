@@ -193,8 +193,8 @@ def hierarchical_model(
     # alpha_1, amp: shape (n_obj, n_filt)
     rise_model = prior_config.get("rise_model", "power_law")
     if rise_model == "curved_power_law":
-        with numpyro.plate("filt", n_filt, dim=-1):
-            with numpyro.plate("obj", n_obj, dim=-2):
+        with numpyro.plate("obj", n_obj, dim=-2):
+            with numpyro.plate("filt", n_filt, dim=-1):
                 alpha_1 = sample_alpha_1()
     else:
         alpha_1 = jnp.zeros((n_obj, n_filt))
@@ -271,8 +271,8 @@ def unpooled_model(
         alpha_1 = jnp.zeros((n_obj, n_filt))
 
     # alpha_0, amp: shape (n_obj, n_filt)
-    with numpyro.plate("filt", n_filt, dim=-1):
-        with numpyro.plate("obj", n_obj, dim=-2):
+    with numpyro.plate("obj", n_obj, dim=-2):
+        with numpyro.plate("filt", n_filt, dim=-1):
             alpha_0 = sample_alpha_0(prior_config=prior_config)
             amp_prime = sample_amp_prime()
 

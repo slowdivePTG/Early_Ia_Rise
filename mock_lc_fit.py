@@ -110,6 +110,12 @@ if __name__ == "__main__":
         default=2,
         help="Thinning factor for MCMC samples (default: 2)",
     )
+    parser.add_argument(
+        "--num_devices",
+        type=int,
+        default=4,
+        help="Number of devices for parallel processing (default: local device count)",
+    )
 
     args = parser.parse_args()
 
@@ -118,20 +124,15 @@ if __name__ == "__main__":
     print("PLATFORM CONFIGURATION")
     print("=" * 70)
 
-    # Set host device count (must be before platform selection)
-    # Only useful if platform is CPU
-    numpyro.set_host_device_count(args.num_chains)
-
     # Set platform based on auto-detection or user preference
     if args.platform == "auto":
         # Auto-detect: prefer GPU (NVIDIA CUDA) if available
         platform = set_best_platform(prefer_gpu=True)
     elif args.platform == "cpu":
+        numpyro.set_host_device_count(args.num_devices)
         platform = set_best_platform(prefer_gpu=False)
     elif args.platform == "gpu":
         # Force GPU (will use it if available, otherwise fall back to CPU)
-        platform = set_best_platform(prefer_gpu=True)
-    else:
         platform = set_best_platform(prefer_gpu=True)
 
     print(f"Using platform: {platform}")

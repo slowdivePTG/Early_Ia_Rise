@@ -3,7 +3,6 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 import matplotlib.pyplot as plt
 from numpy.typing import ArrayLike
-from pandas._libs.tslibs.offsets import BDay
 
 if TYPE_CHECKING:
     from ..model.lightcurve import SNLightCurveLib
@@ -145,11 +144,7 @@ def show_kde_posterior(
         print(f"Warning: No data for parameter '{param}' in range {x_range}")
         return
 
-    bw_adjust = kwargs.pop("bw_adjust", None)
-    if bw_adjust is None:
-        bw_adjust = (
-            np.percentile(param_post, 97.5) - np.percentile(param_post, 2.5)
-        ) * 7.5
+    bw_adjust = kwargs.get("bw_adjust", 1)
     params = dict(fill=True, alpha=0.25, lw=2, **kwargs)
     params_prior = dict(
         alpha=0.25, lw=2, linestyle="--", color=kwargs.get("color", "0.5")
@@ -157,14 +152,251 @@ def show_kde_posterior(
 
     if show_prior:
         sns.kdeplot(x=param_prior, ax=ax, bw_adjust=bw_adjust, **params_prior)
-    # sns.histplot(
-    #     x=param_prior,
-    #     ax=ax,
-    #     stat="density",
-    #     bins=30,
-    #     element="step",
-    #     **params_prior,
-    # )
 
     sns.kdeplot(x=param_post, ax=ax, bw_adjust=bw_adjust, **params)
     ax.set_xlim(x_range)
+    ax.set_ylabel("")
+
+
+def show_t_rise_value_comparison(mock_libs, colors, labels, truths=None, ax=None):
+    n_lib = len(mock_libs)
+
+    if ax is None:  # Create subplots if no axes are provided
+        fix, ax = plt.subplots(
+            1, 2, figsize=(12, 3), constrained_layout=True, sharey="col", sharex="col"
+        )
+
+    if truths is not None:
+        for j in range(len(ax)):
+            ax[j].axvline(
+                truths[j], color="0.5", linestyle=":", lw=5, alpha=0.5, zorder=-1
+            )
+
+    for k in range(n_lib):
+        mock_lib = mock_libs[k]
+        color = colors[k]
+        label = labels[k]
+        show_kde_posterior(
+            mock_lib,
+            param="mean_t_rise",
+            ax=ax[0],
+            x_range=(15, 25),
+            color=color,
+            label=label,
+        )
+        show_kde_posterior(
+            mock_lib,
+            param="sigma_t_rise",
+            ax=ax[1],
+            x_range=(0.5, 2.5),
+            color=color,
+            label=label,
+        )
+        for _ax in ax[1:]:
+            _ax.set_ylabel("")
+        for _ax in ax:
+            _ax.set_yticks([])
+
+    ax[0].set_xlabel(r"$\mu_{t_\mathrm{rise}}\ [\mathrm{day}]$")
+    ax[1].set_xlabel(r"$\sigma_{t_\mathrm{rise}}\ [\mathrm{day}]$")
+
+    return ax
+
+
+def show_alpha_value_comparison(mock_libs, colors, labels, truths=None, ax=None):
+    n_lib = len(mock_libs)
+
+    if ax is None:  # Create subplots if no axes are provided
+        fix, ax = plt.subplots(
+            1, 2, figsize=(12, 3), constrained_layout=True, sharey="col", sharex="col"
+        )
+
+    if truths is not None:
+        for j in range(len(ax)):
+            ax[j].axvline(
+                truths[j], color="0.5", linestyle=":", lw=5, alpha=0.5, zorder=-1
+            )
+
+    for k in range(n_lib):
+        mock_lib = mock_libs[k]
+        color = colors[k]
+        label = labels[k]
+        show_kde_posterior(
+            mock_lib,
+            param="mean_alpha_flt2",
+            ax=ax[0],
+            x_range=(1, 5),
+            color=color,
+            label=label,
+        )
+        show_kde_posterior(
+            mock_lib,
+            param="sigma_alpha_flt2",
+            ax=ax[1],
+            x_range=(0, 1),
+            color=color,
+            label=label,
+        )
+        for _ax in ax[1:]:
+            _ax.set_ylabel("")
+        for _ax in ax:
+            _ax.set_yticks([])
+
+    ax[0].set_xlabel(r"$\mu_{\alpha_r}$")
+    ax[1].set_xlabel(r"$\sigma_{\alpha_r}$")
+
+    return ax
+
+
+def show_log_Aprime_value_comparison(mock_libs, colors, labels, truths=None, ax=None):
+    n_lib = len(mock_libs)
+
+    if ax is None:  # Create subplots if no axes are provided
+        fix, ax = plt.subplots(
+            1, 2, figsize=(12, 3), constrained_layout=True, sharey="col", sharex="col"
+        )
+
+    if truths is not None:
+        for j in range(len(ax)):
+            ax[j].axvline(
+                truths[j], color="0.5", linestyle=":", lw=5, alpha=0.5, zorder=-1
+            )
+
+    for k in range(n_lib):
+        mock_lib = mock_libs[k]
+        color = colors[k]
+        label = labels[k]
+        show_kde_posterior(
+            mock_lib,
+            param="mean_log_Aprime_flt2",
+            ax=ax[0],
+            x_range=(3, 4.5),
+            color=color,
+            label=label,
+        )
+        show_kde_posterior(
+            mock_lib,
+            param="sigma_log_Aprime_flt2",
+            ax=ax[1],
+            x_range=(0, 1),
+            color=color,
+            label=label,
+        )
+        for _ax in ax[1:]:
+            _ax.set_ylabel("")
+        for _ax in ax:
+            _ax.set_yticks([])
+
+    ax[0].set_xlabel(r"$\mu_{\ln A_r}$")
+    ax[1].set_xlabel(r"$\sigma_{\ln A_r}$")
+
+    return ax
+
+
+def show_corr_prior_posterior(mock_libs, colors, labels, truths=None):
+    n_lib = len(mock_libs)
+
+    fix, ax = plt.subplots(
+        n_lib,
+        3,
+        figsize=(14, n_lib * 3 - (n_lib - 1) * 0.5),
+        constrained_layout=True,
+        sharey="col",
+        sharex="col",
+    )
+
+    if truths is not None:
+        for j in range(3):
+            if truths[j] is not None:
+                for k in range(n_lib):
+                    _ax = ax[k, j]
+                    _ax.axvline(
+                        truths[j],
+                        color="0.5",
+                        linestyle=":",
+                        lw=5,
+                        alpha=0.5,
+                        zorder=-1,
+                    )
+
+    params = [
+        "corr_t_rise_alpha_flt2",
+        "corr_t_rise_alpha_flt1-flt2",
+        "corr_t_rise_log_Aprime_flt2",
+    ]
+    for k in range(n_lib):
+        mock_lib = mock_libs[k]
+        color = colors[k]
+        label = labels[k]
+        for i, param in enumerate(params):
+            show_kde_posterior(
+                mock_lib,
+                param=param,
+                ax=ax[k, i],
+                x_range=(-1, 1),
+                color=color,
+                label=label,
+                show_prior=True,
+            )
+        for _ax in ax[k, 1:]:
+            _ax.set_ylabel("")
+        ax[k, 0].set_ylabel(r"$\mathrm{Density}$")
+        ax[k, 0].legend(frameon=False, loc="upper left")
+
+    ax[-1, 0].set_xlabel(r"$\rho({t_\mathrm{rise}, \alpha_r})$")
+    ax[-1, 1].set_xlabel(r"$\rho({t_\mathrm{rise}, \alpha_g - \alpha_r})$")
+    ax[-1, 2].set_xlabel(r"$\rho({t_\mathrm{rise}, \ln A_r})$")
+
+    return ax
+
+
+def show_t_rise_corr_comparison(mock_libs, colors, labels, truths=None, ax=None):
+    if ax is None:  # Create subplots if no axes are provided
+        fix, ax = plt.subplots(
+            1, 4, figsize=(14, 3), constrained_layout=True, sharey="col", sharex="col"
+        )
+    n_lib = len(mock_libs)
+
+    if truths is not None:
+        for j in range(len(ax)):
+            # if truths[j] is not None:
+            #     for k in range(n_lib):
+            #         _ax = ax[k, j]
+            ax[j].axvline(
+                truths[j], color="0.5", linestyle=":", lw=5, alpha=0.5, zorder=-1
+            )
+
+    params = [
+        "corr_t_rise_alpha_flt2",
+        "corr_t_rise_alpha_flt1-flt2",
+        "corr_alpha_flt1_flt2",
+        "corr_t_rise_log_Aprime_flt2",
+    ]
+    for k in range(n_lib):
+        mock_lib = mock_libs[k]
+        color = colors[k]
+        label = labels[k]
+        for i in range(len(ax)):
+            param = params[i]
+            show_kde_posterior(
+                mock_lib,
+                param=param,
+                ax=ax[i],
+                x_range=(-1, 1),
+                color=color,
+                label=label,
+            )
+        for _ax in ax[1:]:
+            _ax.set_ylabel("")
+        for _ax in ax:
+            _ax.set_yticks([])
+
+    try:
+        ax[0].set_xlabel(r"$\rho(t_\mathrm{rise}, \alpha_r)$")
+        ax[1].set_xlabel(r"$\rho(t_\mathrm{rise}, \alpha_g - \alpha_r)$")
+        ax[2].set_xlabel(r"$\rho(\alpha_g, \alpha_r)$")
+        ax[3].set_xlabel(r"$\rho(t_\mathrm{rise}, \ln A_r)$")
+    except IndexError:
+        pass
+
+    return ax

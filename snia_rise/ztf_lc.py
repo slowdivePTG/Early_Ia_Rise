@@ -510,6 +510,7 @@ class ZTFLib(SNLightCurveLib):
         sampling_model: str = "hierarchical_mvn",
         volume_complete: bool = False,
         early_coverage: bool = False,
+        no_t0_err: bool = False,
         **kwargs,
     ) -> None:
         """
@@ -575,6 +576,8 @@ class ZTFLib(SNLightCurveLib):
             filename += "_volume_complete"
         if early_coverage or source.lower() in ["early_late", "edr"]:
             filename += "_early_coverage"
+        if no_t0_err:
+            filename += "_no_t0_err"
         filename += ".nc"
         post_sample_file = post_sample_dir / filename
 
@@ -588,7 +591,7 @@ class ZTFLib(SNLightCurveLib):
             lc_early_lib=lc_early_lib,
             lc_peak_lib=lc_peak_lib,
             ztfid_lib=ztfid_lib_processed,
-            t0_err=t0_err_lib,
+            t0_err=None if no_t0_err else t0_err_lib,
             sampling_model=sampling_model,
             **kwargs,
         )

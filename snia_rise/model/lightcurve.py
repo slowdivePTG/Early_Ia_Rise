@@ -8,6 +8,7 @@ import numpy as np
 import xarray as xr
 from numpyro import infer
 from numpyro.infer.initialization import init_to_median
+from scipy.special import ker
 from sklearn.preprocessing import LabelEncoder
 
 from .._utils import plt
@@ -139,7 +140,6 @@ class SNLightCurve(object):
         num_chains: int = 2,
         thinning: int = 1,
         random_seed: int = 11,
-        sample_prior: bool = False,
         prior_pred_samples: int = 500,
         prior_config: dict = {},
         nuts_params: dict = {},
@@ -175,6 +175,7 @@ class SNLightCurve(object):
             "t_fl": ["obj"],
             "alpha_0": ["obj", "filt"],
             "Aprime": ["obj", "filt"],
+            "log_Aprime": ["obj", "filt"],
             "alpha_1": ["obj", "filt"],
             "C": ["fcqfid"],
             "beta": ["fcqfid"],
@@ -187,30 +188,6 @@ class SNLightCurve(object):
             "filt": np.arange(len(np.unique(self.idx_filt))),
             "fcqfid": np.arange(len(np.unique(self.idx_fcqfid))),
         }
-
-        # ----------------------------------------
-        # SAMPLING LOGIC
-        # ----------------------------------------
-        rng_key = jax.random.PRNGKey(random_seed)
-        prior_pred = infer.Predictive(kernel, num_samples=num_samples * num_chains)(
-            rng_key, **running_params, prior_config=prior_config
-        )
-
-        reshaped_prior = {}
-        for k, v in prior_pred.items():
-            v = np.asarray(v)
-            if v.shape[0] == num_samples * num_chains:
-                new_shape = (num_chains, num_samples) + v.shape[1:]
-                reshaped_prior[k] = v.reshape(new_shape)
-            else:
-                reshaped_prior[k] = np.expand_dims(v, 0)
-
-        self.prior_sample = az.from_numpyro(
-            prior=prior_pred, coords=coords, dims=dims
-        ).prior.astype("float32")
-
-        if sample_prior:
-            return
 
         # Standard MCMC
         self.sampler = infer.MCMC(
@@ -557,6 +534,9 @@ class SNLightCurveLib(object):
             if "mean_alpha_0" not in sample:
                 sample["mean_alpha_0"] = sample["alpha_0"].mean(dim="obj")
                 sample["sigma_alpha_0"] = sample["alpha_0"].std(dim="obj", ddof=1)
+            if "mean_log_Aprime" not in sample:
+                sample["mean_log_Aprime"] = sample["log_Aprime"].mean(dim="obj")
+                sample["sigma_log_Aprime"] = sample["log_Aprime"].std(dim="obj", ddof=1)
 
             n_filt = sample.sizes["filt"]
             for j in range(n_filt):
@@ -570,6 +550,7 @@ class SNLightCurveLib(object):
                     sample[f"corr_t_rise_log_Aprime_flt{j + 1}"] = xr.corr(
                         sample["t_rise"],
                         sample["log_Aprime"][..., j],
+                        dim="obj",
                     )
                 for k in range(j + 1, n_filt):
                     sample[f"mean_alpha_flt{j + 1}-flt{k + 1}"] = (
@@ -749,14 +730,11 @@ class SNLightCurveLib(object):
         num_chains: int,
         thinning: int,
         random_seed: int,
-        sample_prior: bool,
         prior_config: dict,
         nuts_params: dict,
     ):
         """Perform sampling for unpooled model using parallel processing."""
         from joblib import Parallel, delayed
-
-        print("Using unpooled model for sampling...")
 
         run_params = {
             "num_samples": num_samples,
@@ -764,7 +742,6 @@ class SNLightCurveLib(object):
             "num_chains": num_chains,
             "thinning": thinning,
             "random_seed": random_seed,
-            "sample_prior": sample_prior,
             "prior_config": prior_config,
         }
 
@@ -784,6 +761,7 @@ class SNLightCurveLib(object):
             return lc
 
         num_devices = jax.local_device_count()
+        print(f"Using {num_devices} devices for parallel processing.")
         results = Parallel(n_jobs=num_devices)(
             delayed(_run_fit)(lc, i) for i, lc in enumerate(self.lc_library)
         )
@@ -906,7 +884,7 @@ class SNLightCurveLib(object):
                 )
                 save_dir.mkdir(parents=True, exist_ok=True)
                 post_warmup = az.from_numpyro(sampler_no_t0_err).posterior.astype(
-                    "float32"
+                    "float16"
                 )
                 post_warmup.to_netcdf(
                     save_dir / f"{debug_basename}_warmup_no_t0_err.nc"
@@ -1113,20 +1091,9 @@ class SNLightCurveLib(object):
         ], f"Invalid model structure: {model_structure}"
 
         if model_structure == "unpooled":
-            self._sampling_unpooled(
-                num_samples,
-                num_warmup,
-                num_chains,
-                thinning,
-                random_seed,
-                sample_prior,
-                prior_config,
-                nuts_params,
-            )
-            return
-
-        # Select model kernel
-        if model_structure == "pooled":
+            print("Using unpooled model for sampling...")
+            kernel = unpooled_model
+        elif model_structure == "pooled":
             print("Using pooled model for sampling...")
             kernel = pooled_model
         elif model_structure == "hierarchical":
@@ -1186,6 +1153,18 @@ class SNLightCurveLib(object):
             self.decode_prior_sample()
             return
 
+        if model_structure == "unpooled":
+            self._sampling_unpooled(
+                num_samples,
+                num_warmup,
+                num_chains,
+                thinning,
+                random_seed,
+                prior_config,
+                nuts_params,
+            )
+            return
+
         # Run warmup stages
         init_strategy_main, num_no_t0_err, rng_key = self._run_warmup(
             kernel,
@@ -1238,6 +1217,161 @@ class SNLightCurveLib(object):
             ]
             sample = sample.drop_vars(vars_to_remove)
         return sample
+
+    def drop_bad_chains(
+        self,
+        n_thresh: int = 1,
+        sigma_thresh: float = 3.0,
+        iterative: bool = True,
+        max_iters: int = 5,
+        var_thresh: float = 1e-8,
+        stuck_percentile: float = 0.5,
+    ):
+        """
+        Identify and drop bad chains iteratively using:
+        (i) Z-score thresholding of parameter means; and
+        (ii) detection of chains with extremely low within-chain variance (stuck chains); and
+        (iii) a Gaussian z-test over per-chain dispersion across chains to reject variance outliers.
+
+        Parameters
+        ----------
+        n_thresh : int, optional
+            Minimum number of parameters that must flag a chain as bad for it to be dropped (default: 1).
+        sigma_thresh : float, optional
+            Z-score threshold for flagging bad chains (default: 3.0).
+        iterative : bool, optional
+            If True, repeat detection and removal until no new bad chains are found or max_iters is reached (default: True).
+        max_iters : int, optional
+            Maximum number of iterations when iterative=True (default: 5).
+        var_thresh : float, optional
+            Absolute variance threshold below which a chain is considered stuck (default: 1e-8).
+        stuck_percentile : float, optional
+            Additionally mark chains stuck if their median std across parameters is below this percentile (0-100) of all chains (default: 0.5).
+        """
+        import numpy as np
+        from astropy.stats import mad_std
+
+        # Candidate parameters to evaluate
+        params = [
+            k
+            for k in self.post_sample.data_vars.keys()
+            if "mean" in k or "sigma" in k or "corr" in k
+        ]
+
+        def find_bad_chains(ds):
+            bad_chains_accum = []
+
+            # (A) Mean-shift detection via robust Z-scores
+            for param in params:
+                dims_to_reduce = [d for d in ds[param].dims if d != "chain"]
+                means = ds[param].mean(dim=dims_to_reduce).values  # per-chain means
+                robust_scale = mad_std(means)
+                # Guard against zero scale
+                if robust_scale == 0 or not np.isfinite(robust_scale):
+                    # If no dispersion, treat large deviations from global mean cautiously
+                    z_scores = np.zeros_like(means)
+                else:
+                    z_scores = (means - np.mean(means)) / robust_scale
+
+                bad_chains = np.where(np.abs(z_scores) > sigma_thresh)[0]
+                if len(bad_chains) > 0:
+                    print(f"⚠️  WARNING: found {len(bad_chains)} bad chains for {param}")
+                    print(f"    Suspected bad chain indices: {bad_chains}")
+
+                bad_chains_accum = np.append(bad_chains_accum, bad_chains)
+
+            # (B) Stuck-chain detection via extremely low within-chain variance
+            # Compute per-chain std across draws for each param, then aggregate by median across params
+            per_param_std = []
+            for param in params:
+                # std over draws per chain -> (chain,)
+                dims_to_reduce = [d for d in ds[param].dims if d != "chain"]
+                stds = (
+                    ds[param].std(dim=dims_to_reduce).values
+                )  # per-chain std across all non-chain axes
+                per_param_std.append(stds)
+            if len(per_param_std) > 0:
+                per_param_std = np.vstack(per_param_std)  # (n_params, n_chains)
+                median_chain_std = np.median(per_param_std, axis=0)  # (n_chains,)
+
+                # Absolute threshold
+                stuck_abs = np.where(median_chain_std < np.sqrt(var_thresh))[0]
+
+                # Percentile-based threshold (guard against degenerate distribution)
+                finite_stds = median_chain_std[np.isfinite(median_chain_std)]
+                if finite_stds.size > 0:
+                    perc_val = np.percentile(finite_stds, stuck_percentile)
+                    stuck_pct = np.where(median_chain_std <= perc_val)[0]
+                else:
+                    stuck_pct = np.array([], dtype=int)
+
+                stuck_chains = np.unique(np.concatenate([stuck_abs, stuck_pct]))
+                if len(stuck_chains) > 0:
+                    print(
+                        f"⚠️  WARNING: found {len(stuck_chains)} stuck chains (low variance)"
+                    )
+                    print(f"    Suspected stuck chain indices: {stuck_chains}")
+
+                bad_chains_accum = np.append(bad_chains_accum, stuck_chains)
+
+            # (C) Gaussian z-test on per-chain dispersion across chains
+            if len(per_param_std) > 0:
+                # Use median std per chain across parameters as a dispersion metric
+                dispersion = median_chain_std
+                disp_scale = np.std(dispersion)
+                if disp_scale == 0 or not np.isfinite(disp_scale):
+                    z_var = np.zeros_like(dispersion)
+                else:
+                    z_var = (dispersion - np.mean(dispersion)) / disp_scale
+                var_outliers = np.where(np.abs(z_var) > sigma_thresh)[0]
+                if len(var_outliers) > 0:
+                    print(
+                        f"⚠️  WARNING: found {len(var_outliers)} variance outlier chains (z-test)"
+                    )
+                    print(
+                        f"    Suspected variance outlier chain indices: {var_outliers}"
+                    )
+                bad_chains_accum = np.append(bad_chains_accum, var_outliers)
+
+            # Consolidate by requiring a chain to be flagged more than n_thresh times
+            if len(bad_chains_accum) == 0:
+                return np.array([], dtype=int)
+
+            counts = np.bincount(bad_chains_accum.astype(int))
+            flagged = np.where(counts > n_thresh)[0]
+            return flagged.astype(int)
+
+        it = 0
+        total_removed = []
+        while True:
+            it += 1
+            ds = self.post_sample
+            flagged = find_bad_chains(ds)
+
+            # Stop if nothing to remove
+            if flagged.size == 0:
+                if it == 1:
+                    print("    No bad or stuck chains detected.")
+                else:
+                    print("    No additional bad or stuck chains detected.")
+                break
+
+            # Drop flagged chains
+            before = list(ds.chain.values)
+            to_keep = [c for c in before if c not in flagged]
+            self.post_sample = ds.sel(chain=to_keep)
+            total_removed.extend(flagged.tolist())
+            print(
+                f"    Iteration {it}: deleted {len(flagged)} bad/stuck chains -> remaining {len(to_keep)} chains"
+            )
+
+            # Stop if not iterative or reached max iterations
+            if not iterative or it >= max_iters:
+                break
+
+        if len(total_removed) > 0:
+            unique_removed = np.unique(np.array(total_removed, dtype=int))
+            print(f"    Total deleted {len(unique_removed)} chains: {unique_removed}")
 
     def aggregate_samples(self):
         """
@@ -1408,7 +1542,11 @@ class SNLightCurveLib(object):
                 [
                     var
                     for var in self.post_sample
-                    if "mean" in var or "sigma" in var or "corr" in var
+                    if (
+                        ("mean" in var or "sigma" in var or "corr" in var)
+                        and "chain" in self.post_sample[var].dims
+                        and "draw" in self.post_sample[var].dims
+                    )
                 ]
             ),
             stat_focus="median",

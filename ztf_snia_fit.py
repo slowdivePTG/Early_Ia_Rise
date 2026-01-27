@@ -94,6 +94,12 @@ if __name__ == "__main__":
         default=2,
         help="Thinning factor for samples (default: 2)",
     )
+    parser.add_argument(
+        "--no-t0-err",
+        default=False,
+        action="store_true",
+        help="Disable t0_err usage (force t0_err=None) and adjust auto-loaded filenames",
+    )
     args = parser.parse_args()
     dr = args.dr.lower()
 
@@ -151,6 +157,9 @@ if __name__ == "__main__":
                 early_threshold=early_threshold,
                 volume_complete=args.volume_complete,
                 early_coverage=args.early_coverage,
+                rise_model=args.model,
+                sampling_model=args.sampling_model,
+                no_t0_err=args.no_t0_err,
             )
 
         elif dr == "edr":
@@ -171,6 +180,9 @@ if __name__ == "__main__":
                 early_threshold=early_threshold,
                 volume_complete=args.volume_complete,
                 early_coverage=args.early_coverage,
+                rise_model=args.model,
+                sampling_model=args.sampling_model,
+                no_t0_err=args.no_t0_err,
             )
 
         elif dr == "early_late":
@@ -182,6 +194,9 @@ if __name__ == "__main__":
                 early_threshold=early_threshold,
                 volume_complete=args.volume_complete,
                 early_coverage=args.early_coverage,
+                rise_model=args.model,
+                sampling_model=args.sampling_model,
+                no_t0_err=args.no_t0_err,
             )
 
         file_dir = Path(
@@ -192,11 +207,15 @@ if __name__ == "__main__":
         #     # Remove existing results to avoid conflicts
         #     shutil.rmtree(file_dir)
         os.makedirs(file_dir, exist_ok=True)
-        debug_basename = f"post_sample_{args.sampling_model}"
-        if args.volume_complete:
-            debug_basename += "_volume_complete"
-        if args.early_coverage:
-            debug_basename += "_early_coverage"
+        if args.no_t0_err:
+            ztflib.t0_err = None
+        # debug_basename = f"post_sample_{args.sampling_model}"
+        # if args.volume_complete:
+        #     debug_basename += "_volume_complete"
+        # if args.early_coverage:
+        #     debug_basename += "_early_coverage"
+        # if args.no_t0_err:
+        #     debug_basename += "_no_t0_err"
 
         ztflib.sampling(
             num_warmup=args.num_warmup,
@@ -206,9 +225,9 @@ if __name__ == "__main__":
             nuts_params=dict(max_tree_depth=12),
             random_seed=114514,
             prior_config=dict(rise_model=args.model),
-            debug_save=True,
-            debug_dir=str(file_dir),
-            debug_basename=debug_basename,
+            debug_save=False,
+            # debug_dir=str(file_dir),
+            # debug_basename=debug_basename,
         )
 
         # Save the posterior for the hierarchical model
@@ -218,5 +237,6 @@ if __name__ == "__main__":
             outfile += "_volume_complete"
         if args.early_coverage:
             outfile += "_early_coverage"
+        # suffix handling delegated to ZTFLib
         outfile += ".nc"
         post_sample.to_netcdf(file_dir / outfile)

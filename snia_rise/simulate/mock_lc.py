@@ -139,7 +139,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         # Sample the population parameters using numpy.random
         num_tot = n_lc * 20  # oversample to account for non-detections
 
-        np.random.seed(num_tot * 42 + 114514)
+        np.random.seed(num_tot + 114514)
 
         # Hyperparameters are fixed below; param_dependence controls independence vs correlation
 
