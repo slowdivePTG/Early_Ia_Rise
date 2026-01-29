@@ -8,7 +8,6 @@ import numpy as np
 import xarray as xr
 from numpyro import infer
 from numpyro.infer.initialization import init_to_median
-from scipy.special import ker
 from sklearn.preprocessing import LabelEncoder
 
 from .._utils import plt
@@ -507,21 +506,36 @@ class SNLightCurveLib(object):
         """
 
         # Decode Corr, Variance matrices if present
-        for matrix in ["Corr", "Sigma"]:
-            if matrix in sample:
-                n_filt = sample.sizes.get("filt", 0)
-                if n_filt > 0:
-                    for i in range(n_filt):
-                        sample[f"{matrix.lower()}_t_rise_alpha_flt{i + 1}"] = sample[
-                            matrix
-                        ][..., i + 1, 0]
-                        sample[f"{matrix.lower()}_t_rise_log_Aprime_flt{i + 1}"] = (
-                            sample[matrix][..., i + n_filt + 1, 0]
-                        )
-                        for j in range(i + 1, n_filt):
-                            sample[f"{matrix.lower()}_alpha_flt{i + 1}_flt{j + 1}"] = (
-                                sample[matrix][..., i + 1, j + 1]
+        if ("Corr" in sample) and ("Sigma" in sample):
+            n_filt = sample.sizes.get("filt", 0)
+            if n_filt > 0:
+                for i in range(n_filt):
+                    sample[f"corr_t_rise_alpha_flt{i + 1}"] = sample["Corr"][
+                        ..., i + 1, 0
+                    ]
+                    sample[f"corr_t_rise_log_Aprime_flt{i + 1}"] = sample["Corr"][
+                        ..., i + n_filt + 1, 0
+                    ]
+                    sample[f"corr_alpha_log_Aprime_flt{i + 1}"] = sample["Corr"][
+                        ..., i + 1, i + n_filt + 1
+                    ]
+                    for j in range(i + 1, n_filt):
+                        sample[f"corr_alpha_flt{i + 1}_flt{j + 1}"] = sample["Corr"][
+                            ..., i + 1, j + 1
+                        ]
+                        sample[f"corr_t_rise_alpha_flt{i + 1}-flt{j + 1}"] = (
+                            sample["Sigma"][..., i + 1, 0]
+                            - sample["Sigma"][..., j + 1, 0]
+                        ) / (
+                            sample["Sigma"][..., 0, 0]
+                            * (
+                                sample["Sigma"][..., i + 1, i + 1]
+                                + sample["Sigma"][..., j + 1, j + 1]
+                                - 2 * sample["Sigma"][..., i + 1, j + 1]
                             )
+                        ) ** 0.5
+
+            for matrix in ["Corr", "Sigma"]:
                 sample.drop_vars(matrix)
 
         # Post-calculate population-level parameters if not sampled directly
@@ -552,15 +566,30 @@ class SNLightCurveLib(object):
                         sample["log_Aprime"][..., j],
                         dim="obj",
                     )
+                if f"corr_alpha_log_Aprime_flt{j + 1}" not in sample:
+                    sample[f"corr_alpha_log_Aprime_flt{j + 1}"] = xr.corr(
+                        sample["alpha_0"][..., j],
+                        sample["log_Aprime"][..., j],
+                        dim="obj",
+                    )
                 for k in range(j + 1, n_filt):
                     sample[f"mean_alpha_flt{j + 1}-flt{k + 1}"] = (
                         sample["mean_alpha_0"][..., j] - sample["mean_alpha_0"][..., k]
                     )
-                    sample[f"corr_t_rise_alpha_flt{j + 1}-flt{k + 1}"] = xr.corr(
-                        sample["t_rise"],
-                        sample["alpha_0"][..., j] - sample["alpha_0"][..., k],
-                        dim="obj",
+                    sample[f"sigma_alpha_flt{j + 1}-flt{k + 1}"] = (
+                        sample["sigma_alpha_0"][..., j] ** 2
+                        + sample["sigma_alpha_0"][..., k] ** 2
+                        - 2
+                        * sample["sigma_alpha_0"][..., j]
+                        * sample["sigma_alpha_0"][..., k]
+                        * sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"]
                     )
+                    if f"corr_t_rise_alpha_flt{j + 1}-flt{k + 1}" not in sample:
+                        sample[f"corr_t_rise_alpha_flt{j + 1}-flt{k + 1}"] = xr.corr(
+                            sample["t_rise"],
+                            sample["alpha_0"][..., j] - sample["alpha_0"][..., k],
+                            dim="obj",
+                        )
                     if f"corr_t_rise_alpha_flt{j + 1}_flt{k + 1}" not in sample:
                         sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"] = xr.corr(
                             sample["alpha_0"][..., j],
@@ -1264,7 +1293,7 @@ class SNLightCurveLib(object):
             # (A) Mean-shift detection via robust Z-scores
             for param in params:
                 dims_to_reduce = [d for d in ds[param].dims if d != "chain"]
-                means = ds[param].mean(dim=dims_to_reduce).values  # per-chain means
+                means = ds[param].median(dim=dims_to_reduce).values  # per-chain means
                 robust_scale = mad_std(means)
                 # Guard against zero scale
                 if robust_scale == 0 or not np.isfinite(robust_scale):
@@ -1372,6 +1401,12 @@ class SNLightCurveLib(object):
         if len(total_removed) > 0:
             unique_removed = np.unique(np.array(total_removed, dtype=int))
             print(f"    Total deleted {len(unique_removed)} chains: {unique_removed}")
+
+    def drop_chains(self, chain_ids):
+        """
+        Drop specified chains from the dataset.
+        """
+        self.post_sample = self.post_sample.drop_sel(chain=chain_ids)
 
     def aggregate_samples(self):
         """
