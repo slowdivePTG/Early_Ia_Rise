@@ -69,7 +69,11 @@ class RedbackLightCurveLib(SNLightCurveLib):
             idx = lc_peak["flux"].values >= 5 * lc_peak["flux_err"].values
             phase = lc_peak["phase"].values[idx]
             flux = lc_peak["flux"].values[idx]
-            idx_early = lc_peak["phase"] < phase[flux < early_threshold * 100][-1] + 0.5
+            early_cut = flux < early_threshold * 100
+            if np.sum(early_cut) > 0:
+                idx_early = lc_peak["phase"] < phase[early_cut][-1] + 0.5
+            else:
+                idx_early = lc_peak["phase"] < phase[-1]
             lc_early_lib.append({key: item[idx_early] for key, item in lc_peak.items()})
 
         if not os.path.exists(post_sample_full_file):
@@ -139,7 +143,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         # Sample the population parameters using numpy.random
         num_tot = n_lc * 20  # oversample to account for non-detections
 
-        np.random.seed(num_tot + 114514)
+        np.random.seed(num_tot + 114514 + len(model))
 
         # Hyperparameters are fixed below; param_dependence controls independence vs correlation
 
@@ -610,8 +614,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 or np.sum(idx_snr & idx_fall & idx_r) < 2
             )
             # >= 10 baseline points in both bands
-            or (np.sum(idx_baseline & idx_g) <= 5)
-            or (np.sum(idx_baseline & idx_r) <= 5)
+            or (np.sum(idx_baseline & idx_g) < 5)
+            or (np.sum(idx_baseline & idx_r) < 5)
         ):
             return None
 

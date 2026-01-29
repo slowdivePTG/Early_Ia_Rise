@@ -360,16 +360,28 @@ class ZTFIaDR2(SNLightCurve):
         )
 
         info = tab_info[tab_info["ztfname"] == ztfid]
-        # bad photometry: Rigault et al. 2025
-        bad_bitmask = [0, 1, 2, 3, 4]
-        mask = (
-            np.bitwise_and(tab_lc["flag"].data[:, None], bad_bitmask).sum(axis=1) == 0
-        )
-        data = tab_lc[mask]
-
         t0 = info["t0"].data[0]
         t0_err = info["t0_err"].data[0]
         z = info["z"].data[0]
+
+        # bad photometry: Rigault et al. 2025
+        bad_bitmask = [1, 2, 4, 8, 16]
+        mask = (
+            np.bitwise_and(tab_lc["flag"].data[:, None], bad_bitmask).sum(axis=1) == 0
+        )
+        # outliers in the baseline
+        mask &= ~(
+            (
+                np.abs(
+                    tab_lc["flux"].data.astype("<f4")
+                    / tab_lc["flux_err"].data.astype("<f4")
+                )
+                > 10
+            )
+            & ((tab_lc["mjd"].data - t0) / (1 + z) < -25)
+        )
+        data = tab_lc[mask]
+
         flux = data["flux"].data.astype("<f4")
         flux_err = data["flux_err"].data.astype("<f4")
         phase = (data["mjd"].data - t0) / (1 + z)
