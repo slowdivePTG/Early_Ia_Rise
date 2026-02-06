@@ -573,27 +573,35 @@ class SNLightCurveLib(object):
                         dim="obj",
                     )
                 for k in range(j + 1, n_filt):
-                    sample[f"mean_alpha_flt{j + 1}-flt{k + 1}"] = (
-                        sample["mean_alpha_0"][..., j] - sample["mean_alpha_0"][..., k]
-                    )
-                    sample[f"sigma_alpha_flt{j + 1}-flt{k + 1}"] = (
-                        sample["sigma_alpha_0"][..., j] ** 2
-                        + sample["sigma_alpha_0"][..., k] ** 2
-                        - 2
-                        * sample["sigma_alpha_0"][..., j]
-                        * sample["sigma_alpha_0"][..., k]
-                        * sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"]
-                    )
+                    if f"corr_alpha_flt{j + 1}_flt{k + 1}" not in sample:
+                        sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"] = xr.corr(
+                            sample["alpha_0"][..., j],
+                            sample["alpha_0"][..., k],
+                            dim="obj",
+                        )
+                        sample[f"mean_alpha_flt{j + 1}-flt{k + 1}"] = (
+                            sample["alpha_0"][..., j] - sample["alpha_0"][..., k]
+                        ).mean(dim="obj")
+                        sample[f"sigma_alpha_flt{j + 1}-flt{k + 1}"] = (
+                            sample["alpha_0"][..., j] - sample["alpha_0"][..., k]
+                        ).std(dim="obj", ddof=1)
+                    else:
+                        sample[f"mean_alpha_flt{j + 1}-flt{k + 1}"] = (
+                            sample["mean_alpha_0"][..., j]
+                            - sample["mean_alpha_0"][..., k]
+                        )
+                        sample[f"sigma_alpha_flt{j + 1}-flt{k + 1}"] = (
+                            sample["sigma_alpha_0"][..., j] ** 2
+                            + sample["sigma_alpha_0"][..., k] ** 2
+                            - 2
+                            * sample["sigma_alpha_0"][..., j]
+                            * sample["sigma_alpha_0"][..., k]
+                            * sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"]
+                        )
                     if f"corr_t_rise_alpha_flt{j + 1}-flt{k + 1}" not in sample:
                         sample[f"corr_t_rise_alpha_flt{j + 1}-flt{k + 1}"] = xr.corr(
                             sample["t_rise"],
                             sample["alpha_0"][..., j] - sample["alpha_0"][..., k],
-                            dim="obj",
-                        )
-                    if f"corr_t_rise_alpha_flt{j + 1}_flt{k + 1}" not in sample:
-                        sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"] = xr.corr(
-                            sample["alpha_0"][..., j],
-                            sample["alpha_0"][..., k],
                             dim="obj",
                         )
 

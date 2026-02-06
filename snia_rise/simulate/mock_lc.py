@@ -143,7 +143,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         # Sample the population parameters using numpy.random
         num_tot = n_lc * 20  # oversample to account for non-detections
 
-        np.random.seed(num_tot + 114514 + len(model))
+        np.random.seed(num_tot + np.sum([ord(c) for c in model]))
 
         # Hyperparameters are fixed below; param_dependence controls independence vs correlation
 
@@ -158,10 +158,10 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             # True hyper-parameters for the power-law rise model
             params_true = dict(
-                mean_alpha=2.0,
+                mean_alpha=2.1,
                 sigma_alpha=0.3,
-                mean_t_rise=18.0,
-                sigma_t_rise=1.0,
+                mean_t_rise=19.0,
+                sigma_t_rise=1.5,
             )
 
             # Support independent or correlated sampling for (t_rise, alpha_0, log_Aprime)
@@ -243,7 +243,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
                 # Assign sampled values
                 params_sim["t_rise"] = samples[:, 0]
-                params_sim["alpha_0"] = np.clip(samples[:, 1], 1.05, 5.0)
+                params_sim["alpha_0"] = samples[:, 1]
                 params_sim["peak_luminosity"] = np.full(num_tot, PEAK_LUMINOSITY)
 
                 if corr_matrix.shape == (3, 3):
@@ -268,9 +268,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             elif model == "broken_power_law":
                 # Compuate alpha_1 based on other parameters
-                params_sim["t_b"] = (
-                    np.random.uniform(-1, 1, num_tot) + params_sim["t_rise"]
-                )
+                params_sim["t_b"] = np.random.uniform(20, 25, num_tot)
                 params_sim["s"] = np.random.uniform(0.5, 1.5, num_tot)
 
                 alpha_v_1 = params_sim["alpha_0"] / 2 - 1
@@ -317,20 +315,24 @@ class RedbackLightCurveLib(SNLightCurveLib):
                         )
                     except ValueError:
                         # Fallback or wider search if root is not bracketed in standard decay range
-                        av2s = np.linspace(av1 - 5, -1.01, 1000)
-                        func_vals = [
-                            _peak_equation(av2, av1, s_val, ratio) for av2 in av2s
-                        ]
+                        # av2s = np.linspace(av1 - 5, -1.01, 1000)
+                        # func_vals = [
+                        #     _peak_equation(av2, av1, s_val, ratio) for av2 in av2s
+                        # ]
 
-                        plt.plot(av2s, func_vals)
-                        plt.axhline(0, color="k", ls=":")
-                        plt.title(f"Failed to bracket root for index {i}")
-                        plt.xlabel("alpha_v_2")
-                        plt.ylabel("Function Value")
-                        plt.show()
-                        raise RuntimeError(
-                            f"Failed to find root for alpha_v_2 at index {i}: av1={av1}, s={s_val}, ratio={ratio}"
+                        # plt.plot(av2s, func_vals)
+                        # plt.axhline(0, color="k", ls=":")
+                        # plt.title(f"Failed to bracket root for index {i}")
+                        # plt.xlabel("alpha_v_2")
+                        # plt.ylabel("Function Value")
+                        # plt.show()
+                        # raise RuntimeError(
+                        #     f"Failed to find root for alpha_v_2 at index {i}: av1={av1}, s={s_val}, ratio={ratio}"
+                        # )
+                        print(
+                            f"Warning: Failed to find root for alpha_v_2 at index {i}: av1={av1}, s={s_val}, ratio={ratio}"
                         )
+                        continue
 
                     alpha_v_2[i] = sol
 
@@ -367,6 +369,13 @@ class RedbackLightCurveLib(SNLightCurveLib):
         for i in range(num_tot):
             # Extract parameters for this single transient
             single_params = {key: val[i] for key, val in params_sim.items()}
+
+            if (
+                np.abs(single_params["alpha_0"] - params_true["mean_alpha"])
+                / params_true["sigma_alpha"]
+                > 3
+            ):
+                continue
 
             idx_obs = len(params_valid_det)
 
@@ -571,13 +580,13 @@ class RedbackLightCurveLib(SNLightCurveLib):
             model=sed_model,
             survey="ztf",
             parameters=params,
-            end_transient_time=50,
+            end_transient_time=100,
             snr_threshold=3.0,
             add_source_noise=True,
             source_noise=0.02**2,  # a bug in redback < 1.12.1 - has to be noise**2
             redback_compatible_model=True,
             model_kwargs={},
-            obs_buffer=50,
+            obs_buffer=100,
             seed=42,
         )
 
@@ -587,7 +596,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         idx_g = obs["band"] == "ztfg"
         idx_r = obs["band"] == "ztfr"
         obs = obs[idx_g | idx_r].reset_index(drop=True)
-        idx_snr = obs["flux(erg/cm2/s)"] / obs["flux_error"] > 3
+        idx_snr = obs["flux(erg/cm2/s)"] / obs["flux_error"] > 5
         obs["phase"] = (obs["time"] - params["t0_mjd_transient"]) / (
             1 + params["redshift"]
         ) - params["t_rise"]
@@ -595,10 +604,10 @@ class RedbackLightCurveLib(SNLightCurveLib):
         idx_early = (obs["phase"] < -10) & (obs["phase"] > -25)
         idx_rise = (obs["phase"] >= -10) & (obs["phase"] < 0)
         idx_fall = (obs["phase"] >= 0) & (obs["phase"] < 10)
-        idx_baseline = (obs["phase"] < -25) & (obs["phase"] > -50)
+        idx_baseline = (obs["phase"] < -25) & (obs["phase"] > -100)
 
         if (
-            # >= 2 high-SNR points in either g or r band during early phase
+            # >= 2 high-SNR points in both g and r band during early phase
             (
                 (np.sum(idx_snr & idx_early & idx_g) < 2)
                 or (np.sum(idx_snr & idx_early & idx_r) < 2)
@@ -614,8 +623,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 or np.sum(idx_snr & idx_fall & idx_r) < 2
             )
             # >= 10 baseline points in both bands
-            or (np.sum(idx_baseline & idx_g) < 5)
-            or (np.sum(idx_baseline & idx_r) < 5)
+            or (np.sum(idx_baseline & idx_g) < 10)
+            or (np.sum(idx_baseline & idx_r) < 10)
         ):
             return None
 

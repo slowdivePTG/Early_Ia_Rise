@@ -79,17 +79,19 @@ class ZTFDataProcessor:
 
         # Filter out observations < 40% of max flux
         idx_i = filt == 3
-        idx_rise = (phase < 0) & (phase > -50) & ~idx_i
+        idx_rise = (phase < 0) & (phase > -100) & ~idx_i
         idx_g = (filt == filtids[0]) & (phase < t_g_early)
         idx_r = (filt == filtids[1]) & (phase < t_r_early)
         idx = idx_rise & (idx_g | idx_r)
 
         # Discard the fcqfID with few baseline points
+        ## Already done in the preprocessing
         idx_base = phase < -25
         idx_fcqfid_few_base = []
         for fcqfid_val in np.unique(fcqfid):
-            if np.sum((fcqfid == fcqfid_val) & idx_base) < 3:
+            if np.sum((fcqfid == fcqfid_val) & idx_base) < 5:
                 idx_fcqfid_few_base.append(fcqfid_val)
+                print(f"Discarding fcqfid {fcqfid_val} with few baseline points")
         idx &= ~np.isin(fcqfid, idx_fcqfid_few_base)
 
         lc_early = {
@@ -322,7 +324,7 @@ class ZTFIaDR2(SNLightCurve):
 
     dr2_dir: str = "./data/ztf_snia_dr2/"
     tab_info_path: str = "tables/snia_data_basic_normal.csv"
-    tab_lc_path: str = "lightcurves/*LC.csv"
+    tab_lc_path: str = "lightcurves_preproc/*lc.csv"
 
     def __init__(self, ztfid: str, early_threshold: float = 0.4) -> None:
         """
@@ -338,26 +340,26 @@ class ZTFIaDR2(SNLightCurve):
         )
 
         # Prepare filter id and fcqf id
-        tab_lc.add_column(
-            np.select(
-                [
-                    tab_lc["filter"] == "ztfg",
-                    tab_lc["filter"] == "ztfr",
-                    tab_lc["filter"] == "ztfi",
-                ],
-                [1, 2, 3],
-                default=0,  # Or some other default value if needed
-            ),
-            name="filter_id",
-        )
+        # tab_lc.add_column(
+        #     np.select(
+        #         [
+        #             tab_lc["filter"] == "ztfg",
+        #             tab_lc["filter"] == "ztfr",
+        #             tab_lc["filter"] == "ztfi",
+        #         ],
+        #         [1, 2, 3],
+        #         default=0,  # Or some other default value if needed
+        #     ),
+        #     name="filter_id",
+        # )
         # RCID = 4(CCDID – 1) + QID – 1
-        tab_lc.add_column(
-            np.int64(tab_lc["field_id"]) * 10000
-            + np.int64(tab_lc["rcid"] // 4 + 1) * 100  # CCDID
-            + np.int64(tab_lc["rcid"] % 4 + 1) * 10  # QID
-            + np.int64(tab_lc["filter_id"]),
-            name="fcqfid",
-        )
+        # tab_lc.add_column(
+        #     np.int64(tab_lc["field_id"]) * 10000
+        #     + np.int64(tab_lc["rcid"] // 4 + 1) * 100  # CCDID
+        #     + np.int64(tab_lc["rcid"] % 4 + 1) * 10  # QID
+        #     + np.int64(tab_lc["filter_id"]),
+        #     name="fcqfid",
+        # )
 
         info = tab_info[tab_info["ztfname"] == ztfid]
         t0 = info["t0"].data[0]
@@ -370,6 +372,7 @@ class ZTFIaDR2(SNLightCurve):
             np.bitwise_and(tab_lc["flag"].data[:, None], bad_bitmask).sum(axis=1) == 0
         )
         # outliers in the baseline
+        idx_baseline = (tab_lc["mjd"].data - t0) / (1 + z) < -25
         mask &= ~(
             (
                 np.abs(
@@ -378,8 +381,20 @@ class ZTFIaDR2(SNLightCurve):
                 )
                 > 10
             )
-            & ((tab_lc["mjd"].data - t0) / (1 + z) < -25)
+            & idx_baseline
         )
+        for _fcqfid in np.unique(tab_lc["fcqfid"].data):
+            f_med = np.median(
+                tab_lc["flux"].data[(tab_lc["fcqfid"] == _fcqfid) & idx_baseline]
+            )
+            mask &= ~(
+                (
+                    np.abs(tab_lc["flux"].data.astype("<f4") - f_med)
+                    > 3 * tab_lc["flux_err"].data.astype("<f4")
+                )
+                & (tab_lc["fcqfid"] == _fcqfid)
+                & idx_baseline
+            )
         data = tab_lc[mask]
 
         flux = data["flux"].data.astype("<f4")
