@@ -41,6 +41,41 @@ def sample_base(n_fcqfid):
     return base
 
 
+def sample_beta(n_fcqfid, prior_config: dict = {}):
+    """
+    Sample uncertainty scale factor (beta) for each fcqfid.
+
+    Model: log(beta) ~ HalfNormal(0, scale)
+    This ensures beta >= 1 (support on [1, inf))
+
+    Parameters
+    ----------
+    n_fcqfid : int
+        Number of unique fcqf IDs
+    prior_config : dict
+        Configuration dictionary with keys:
+        - sample_beta : bool, default=False
+            Whether to sample beta as a free parameter (True) or fix it to 1 (False)
+
+    Returns
+    -------
+    beta : array, shape (n_fcqfid,)
+        Uncertainty scale factors (beta >= 1)
+    """
+    sample_beta_flag = prior_config.get("sample_beta", False)
+
+    with numpyro.plate("fcqfid", n_fcqfid):
+        if sample_beta_flag:
+            # log(beta) ~ HalfNormal(0, scale) ensures beta >= 1
+            log_beta = numpyro.sample("log_beta", dist.HalfNormal(0.1))
+            beta = numpyro.deterministic("beta", jnp.exp(log_beta))
+        else:
+            # Fixed at 1 (no uncertainty scaling)
+            beta = numpyro.deterministic("beta", jnp.ones(n_fcqfid))
+
+    return beta
+
+
 def sample_alpha_0(
     mean_alpha_0: float = None,
     sigma_alpha_0: float = None,

@@ -10,8 +10,8 @@ from .priors import (
     sample_alpha_0,
     sample_alpha_1,
     sample_amp_prime,
-    # sample_fcqf_params,
     sample_base,
+    sample_beta,
     sample_hierarchical_params,
     sample_t_fl,
     sample_t_rise,
@@ -142,16 +142,17 @@ def hierarchical_model(
         Flux values
     flux_err : list
         Flux uncertainties
-    beta : list
-        Uncertainty scale factor for each observation
+    beta : list, optional
+        Uncertainty scale factor for each observation. If None, defaults to 1.0.
+        If sample_beta=True in prior_config, this parameter is ignored and beta is sampled.
     t0_err : list
         Uncertainties on t0 (0 for mocked data)
     idx_obj : list
         Object index for each observation
     idx_fcqfid : list
         FCQF ID index for each observation
-    idx_filt_gr : list
-        Filter group index for each observation
+    idx_filt : list
+        Filter index for each observation
     prior_config : dict
         Configuration dictionary with keys:
         - correlation_structure :  str, default="mvn"
@@ -163,6 +164,10 @@ def hierarchical_model(
         - sigma_alpha_0 :  float or None, default=None (tfl_only)
         - min_alpha_0 :  float, default=1
         - max_alpha_0 :  float, default=5
+        - sample_beta : bool, default=False
+            Whether to sample beta as a free parameter (True) or fix it to 1 (False)
+        - beta_scale : float, default=0.2
+            Scale parameter for HalfNormal prior on log(beta), ensuring beta >= 1
     """
     # Setup
     correlation_structure = prior_config.get("correlation_structure", "mvn")
@@ -172,8 +177,18 @@ def hierarchical_model(
     n_obj = len(np.unique(idx_obj))
 
     # Observation-level parameters (n_fcqfid,)
-    # base, beta = sample_fcqf_params(n_fcqfid)
     base = sample_base(n_fcqfid)
+
+    # Handle beta: sample if requested, otherwise use provided values or default to 1.0
+    sample_beta_flag = prior_config.get("sample_beta", False)
+    if sample_beta_flag:
+        beta_fcqfid = sample_beta(n_fcqfid, prior_config)
+    else:
+        # Use provided beta values or default to ones
+        if beta is None:
+            beta = np.ones_like(flux)
+        # beta is per observation, no need to index by fcqfid
+        beta_obs_provided = beta
 
     # Hierarchical structure for t_rise, amp and alpha_0
     # t_rise:   shape (n_obj,)
@@ -200,17 +215,19 @@ def hierarchical_model(
         alpha_1 = jnp.zeros((n_obj, n_filt))
 
     # shape: (n_obs,)
-    if beta is None:
-        beta = np.ones_like(flux)
-
     t_fl_obs = t_fl[idx_obj]
     base_obs = base[idx_fcqfid]
-    # beta_obs = beta[idx_fcqfid]
     amp_prime_obs = amp_prime[idx_obj, idx_filt]
     alpha_0_obs = alpha_0[idx_obj, idx_filt]
     alpha_1_obs = alpha_1[idx_obj, idx_filt]
     t0_err_obs = t0_err[idx_obj]
-    flux_err_obs = flux_err * beta
+
+    # Apply beta scaling
+    if sample_beta_flag:
+        beta_obs = beta_fcqfid[idx_fcqfid]
+    else:
+        beta_obs = beta_obs_provided
+    flux_err_obs = flux_err * beta_obs
 
     # Add extra uncertainty component from t0_err via error propagation
     df_dtfl = df_t_dt_fl(t, t_fl_obs, base_obs, amp_prime_obs, alpha_0_obs, alpha_1_obs)
@@ -254,8 +271,16 @@ def unpooled_model(
     n_obj = len(np.unique(idx_obj))
 
     # base, beta: shape (n_fcqfid,)
-    # base, beta = sample_fcqf_params(n_fcqfid)
     base = sample_base(n_fcqfid)
+
+    # Handle beta: sample if requested, otherwise use provided values or default to 1.0
+    sample_beta_flag = prior_config.get("sample_beta", False)
+    if sample_beta_flag:
+        beta_fcqfid = sample_beta(n_fcqfid, prior_config)
+    else:
+        if beta is None:
+            beta = np.ones_like(flux)
+        beta_obs_provided = beta
 
     # t_rise: shape (n_obj,)
     with numpyro.plate("obj", n_obj):
@@ -280,16 +305,19 @@ def unpooled_model(
     t_fl = sample_t_fl(n_obj, t_rise, t0_err)
 
     # shape: (n_obs,)
-    if beta is None:
-        beta = np.ones_like(flux)
     t_fl_obs = t_fl[idx_obj]
     base_obs = base[idx_fcqfid]
-    # beta_obs = beta[idx_fcqfid]
     amp_prime_obs = amp_prime[idx_obj, idx_filt]
     alpha_0_obs = alpha_0[idx_obj, idx_filt]
     alpha_1_obs = alpha_1[idx_obj, idx_filt]
     t0_err_obs = t0_err[idx_obj]
-    flux_err_obs = flux_err * beta
+
+    # Apply beta scaling
+    if sample_beta_flag:
+        beta_obs = beta_fcqfid[idx_fcqfid]
+    else:
+        beta_obs = beta_obs_provided
+    flux_err_obs = flux_err * beta_obs
 
     # Add extra uncertainty component from t0_err via error propagation
     df_dtfl = df_t_dt_fl(t, t_fl_obs, base_obs, amp_prime_obs, alpha_0_obs, alpha_1_obs)
@@ -329,8 +357,16 @@ def pooled_model(
     n_filt = len(np.unique(idx_filt))
 
     # base, beta: shape (n_fcqfid,)
-    # base, beta = sample_fcqf_params(n_fcqfid)
     base = sample_base(n_fcqfid)
+
+    # Handle beta: sample if requested, otherwise use provided values or default to 1.0
+    sample_beta_flag = prior_config.get("sample_beta", False)
+    if sample_beta_flag:
+        beta_fcqfid = sample_beta(n_fcqfid, prior_config)
+    else:
+        if beta is None:
+            beta = np.ones_like(flux)
+        beta_obs_provided = beta
 
     # t_rise: shape (n_obj,)
     with numpyro.plate("obj", n_obj):
@@ -356,16 +392,19 @@ def pooled_model(
             amp_prime = sample_amp_prime()
 
     # shape: (n_obs,)
-    if beta is None:
-        beta = jnp.ones_like(flux)
     t_fl_obs = t_fl[idx_obj]
     base_obs = base[idx_fcqfid]
-    # beta_obs = beta[idx_fcqfid]
     amp_prime_obs = amp_prime[idx_obj, idx_filt]
     alpha_0_obs = alpha_0[idx_filt]
     alpha_1_obs = alpha_1[idx_filt]
     t0_err_obs = t0_err[idx_obj]
-    flux_err_obs = flux_err * beta
+
+    # Apply beta scaling
+    if sample_beta_flag:
+        beta_obs = beta_fcqfid[idx_fcqfid]
+    else:
+        beta_obs = beta_obs_provided
+    flux_err_obs = flux_err * beta_obs
 
     # Add extra uncertainty component from t0_err via error propagation
     df_dtfl = df_t_dt_fl(t, t_fl_obs, base_obs, amp_prime_obs, alpha_0_obs, alpha_1_obs)

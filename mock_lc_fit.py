@@ -181,7 +181,7 @@ if __name__ == "__main__":
             num_samples=args.num_samples,
             num_chains=args.num_chains,
             thinning=args.thinning,
-            nuts_params=dict(max_tree_depth=12),
+            nuts_params=dict(max_tree_depth=12, target_accept_prob=0.85),
         )
 
         # Save the posterior for the hierarchical model

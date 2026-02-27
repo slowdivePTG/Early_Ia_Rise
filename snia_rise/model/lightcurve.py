@@ -194,7 +194,6 @@ class SNLightCurve(object):
                 kernel,
                 init_strategy=init_to_median_with_alpha0(alpha_0_init=2.0),
                 # dense_mass=True,
-                target_accept_prob=0.95,
                 **nuts_params,
             ),
             num_warmup=num_warmup,
@@ -887,7 +886,6 @@ class SNLightCurveLib(object):
                 infer.NUTS(
                     kernel,
                     init_strategy=init_strategy_warmup,
-                    target_accept_prob=0.95,
                     **nuts_params,
                 ),
                 num_warmup=num_no_t0_err,
@@ -983,7 +981,6 @@ class SNLightCurveLib(object):
                 kernel,
                 init_strategy=init_strategy_main,
                 dense_mass=dense_mass_site,
-                target_accept_prob=0.95,
                 **nuts_params,
             ),
             num_warmup=effective_warmup,

@@ -100,6 +100,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable t0_err usage (force t0_err=None) and adjust auto-loaded filenames",
     )
+    parser.add_argument(
+        "--sample-beta",
+        default=False,
+        action="store_true",
+        help="Sample beta (uncertainty scaling) as a free parameter with log(beta) ~ HalfNormal (default: False, fixed at 1.0)",
+    )
     args = parser.parse_args()
     dr = args.dr.lower()
 
@@ -222,9 +228,12 @@ if __name__ == "__main__":
             num_samples=args.num_samples,
             num_chains=args.num_chains,
             thinning=args.thinning,
-            nuts_params=dict(max_tree_depth=12),
+            nuts_params=dict(max_tree_depth=12, target_accept_prob=0.85),
             random_seed=114514,
-            prior_config=dict(rise_model=args.model),
+            prior_config=dict(
+                rise_model=args.model,
+                sample_beta=args.sample_beta,
+            ),
             debug_save=False,
             # debug_dir=str(file_dir),
             # debug_basename=debug_basename,
