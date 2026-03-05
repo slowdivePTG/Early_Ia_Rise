@@ -538,6 +538,7 @@ class ZTFLib(SNLightCurveLib):
         volume_complete: bool = False,
         early_coverage: bool = False,
         no_t0_err: bool = False,
+        x1_subsample: str | None = None,
         **kwargs,
     ) -> None:
         """
@@ -553,6 +554,9 @@ class ZTFLib(SNLightCurveLib):
             Rise model: "power_law" or "curved_power_law".
         sampling_model : str
             Sampling model: "pooled", "unpooled", "hierarchical", "hierarchical_trise", or "hierarchical_mvn".
+        x1_subsample : str or None
+            Optional tag appended to the output filename to identify the x1
+            subsample, e.g. ``"x1lo"`` or ``"x1hi"`` (default: None, no tag).
 
         Returns
         -------
@@ -605,6 +609,8 @@ class ZTFLib(SNLightCurveLib):
             filename += "_early_coverage"
         if no_t0_err:
             filename += "_no_t0_err"
+        if x1_subsample is not None:
+            filename += f"_{x1_subsample}"
         filename += ".nc"
         post_sample_file = post_sample_dir / filename
 
