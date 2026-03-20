@@ -326,11 +326,13 @@ class ZTFIaDR2(SNLightCurve):
     tab_info_path: str = "tables/snia_data_basic_normal.csv"
     tab_lc_path: str = "lightcurves_preproc/*lc.csv"
 
-    def __init__(self, ztfid: str, early_threshold: float = 0.4) -> None:
+    def __init__(
+        self, ztfid: str, early_threshold: float = 0.4, sn_type: str = "normal"
+    ) -> None:
         """
         Initialize the class instance.
         """
-        tab_info = Table.read(self.dr2_dir + self.tab_info_path)
+        tab_info = Table.read(self.dr2_dir + self.tab_info_path.replace("normal", sn_type))
         lc_list = sorted(glob.glob(self.dr2_dir + self.tab_lc_path))
         ztfid_list = [lc.split("/")[-1].split("_")[0] for lc in lc_list]
         if ztfid not in ztfid_list:
@@ -539,6 +541,7 @@ class ZTFLib(SNLightCurveLib):
         early_coverage: bool = False,
         no_t0_err: bool = False,
         x1_subsample: str | None = None,
+        sn_type: str = "normal",
         **kwargs,
     ) -> None:
         """
@@ -557,6 +560,8 @@ class ZTFLib(SNLightCurveLib):
         x1_subsample : str or None
             Optional tag appended to the output filename to identify the x1
             subsample, e.g. ``"x1lo"`` or ``"x1hi"`` (default: None, no tag).
+        sn_type : str
+            SN type to fit (default: "normal"; options: "normal", "03fg"). Note: 03fg-like SNe are only available in DR2.
 
         Returns
         -------
@@ -582,7 +587,7 @@ class ZTFLib(SNLightCurveLib):
                 if source.lower() == "edr":
                     ztf_sn = ZTFIaEDR(ztfid=ztfid, early_threshold=early_threshold)
                 elif source.lower() == "dr2":
-                    ztf_sn = ZTFIaDR2(ztfid=ztfid, early_threshold=early_threshold)
+                    ztf_sn = ZTFIaDR2(ztfid=ztfid, early_threshold=early_threshold, sn_type=sn_type)
                 elif source.lower() == "early_late":
                     ztf_sn = ZTFIaEarlyLate(
                         ztfid=ztfid, early_threshold=early_threshold
@@ -611,7 +616,10 @@ class ZTFLib(SNLightCurveLib):
             filename += "_no_t0_err"
         if x1_subsample is not None:
             filename += f"_{x1_subsample}"
+        if sn_type != "normal":
+            filename += f"_{sn_type}"
         filename += ".nc"
+        print(filename)
         post_sample_file = post_sample_dir / filename
 
         if os.path.exists(post_sample_file):

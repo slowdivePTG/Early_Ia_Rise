@@ -115,6 +115,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         min_dist_lum: float = 10,
         max_dist_lum: float = 270,
         z_fixed: float = None,
+        turtls_model_name: str = "DPL_Ni0.4_KE0.50_P100",
     ) -> list[pd.DataFrame]:
         """
         Simulate light curves using Redback.
@@ -341,6 +342,25 @@ class RedbackLightCurveLib(SNLightCurveLib):
         elif model in ["2011fe", "2021aefx"]:
             params_sim["t_rise"] = np.full(num_tot, 0.0)
 
+        elif "turtls" in model.lower():
+            base_dir = (
+                Path(__file__).resolve().parent.parent.parent
+                / "data"
+                / "TURTLS-Light-curves"
+                / "56Ni_distributions"
+                / "LightCurves"
+            )
+            file_path = base_dir / f"{turtls_model_name}.dat"
+            if not file_path.exists():
+                raise FileNotFoundError(f"TURTLS model file not found: {file_path}")
+
+            df_turtls = pd.read_csv(file_path, delim_whitespace=True)
+            t_rise, b_peak = cls._find_peak_poly4(
+                df_turtls["Time"].values, df_turtls["B"].values
+            )
+            params_sim["t_rise"] = np.full(num_tot, t_rise)
+            params_sim["B_peak"] = np.full(num_tot, b_peak)
+
         else:
             raise ValueError(f"Model {model} not recognized.")
 
@@ -360,6 +380,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
         )
         if "power_law" in model:
             model_dir = f"{model_dir}_{param_dependence}"
+        elif "turtls" in model.lower():
+            model_dir = f"{model_dir}_{turtls_model_name}"
 
         data_dir = Path("./data/mock") / model_dir
         if os.path.exists(data_dir):
@@ -370,7 +392,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
             # Extract parameters for this single transient
             single_params = {key: val[i] for key, val in params_sim.items()}
 
-            if (
+            if "power_law" in model and (
                 np.abs(single_params["alpha_0"] - params_true["mean_alpha"])
                 / params_true["sigma_alpha"]
                 > 3
@@ -401,6 +423,14 @@ class RedbackLightCurveLib(SNLightCurveLib):
                     f"Simulating transient {idx_obs + 1}/{n_lc} ({i + 1} attempts)..."
                 )
                 print(f"  → {len(lc_peak['phase'])} detections before peak")
+
+            elif "turtls" in model.lower():
+                single_params["turtls_model_name"] = turtls_model_name
+                lc_peak = cls._simulate_single_light_curve_turtls(params=single_params)
+                single_params["turtls_model_name"] = turtls_model_name
+
+                if lc_peak is None:
+                    continue
 
             elif "2011fe" in model:
                 sed_model = "snf-2011fe"
@@ -848,5 +878,154 @@ class RedbackLightCurveLib(SNLightCurveLib):
         )
 
         lc_peak.reset_index(drop=True, inplace=True)
+
+        return lc_peak
+
+    @staticmethod
+    def _find_peak_poly4(time, magnitude):
+        from scipy.optimize import curve_fit, fsolve
+
+        def poly4(t, a, b, c, d, e):
+            return a * t**4 + b * t**3 + c * t**2 + d * t + e
+
+        idx_min = np.argmin(magnitude)
+        t_peak_guess = time[idx_min]
+
+        mask = np.abs(time - t_peak_guess) < 10
+        time_fit = time[mask]
+        mag_fit = magnitude[mask]
+
+        phase = time_fit - t_peak_guess
+        popt, _ = curve_fit(poly4, phase, mag_fit, p0=[1, -1, 0, 0, np.min(mag_fit)])
+
+        # Create polynomial and its derivative
+        poly_deriv_coeffs = [4 * popt[0], 3 * popt[1], 2 * popt[2], popt[3]]
+        poly_deriv = np.poly1d(poly_deriv_coeffs)
+
+        phase_peak = fsolve(poly_deriv, [0.0])[0]  # Time of peak in phase
+        mag_peak = poly4(phase_peak, *popt)  # Magnitude at the peak
+        return t_peak_guess + phase_peak, mag_peak
+
+    @classmethod
+    def _simulate_single_light_curve_turtls(cls, params: dict) -> pd.DataFrame | None:
+        """
+        Simulate a single light curve using TURTLS models, ignoring K-corrections.
+        """
+        import os
+        from pathlib import Path
+
+        import redback
+
+        model_name = params.get("turtls_model_name", "DPL_Ni0.4_KE0.50_P100")
+        base_dir = (
+            Path(__file__).resolve().parent.parent.parent
+            / "data"
+            / "TURTLS-Light-curves"
+            / "56Ni_distributions"
+            / "LightCurves"
+        )
+        file_path = base_dir / f"{model_name}.dat"
+        if not file_path.exists():
+            raise FileNotFoundError(f"TURTLS model file not found: {file_path}")
+
+        df = pd.read_csv(file_path, delim_whitespace=True)
+
+        ztf_path = os.path.join(
+            os.path.dirname(redback.__file__), "tables", "ztf.tar.gz"
+        )
+        filter_path = os.path.join(
+            os.path.dirname(redback.__file__), "tables", "filters.csv"
+        )
+        ztf_pointings = pd.read_csv(ztf_path, compression="gzip")
+        ztf_filters = pd.read_csv(filter_path)
+        ztf_filters = ztf_filters[ztf_filters["sncosmo_name"].isin(["ztfg", "ztfr"])]
+
+        def get_flux_err_sky(filt: str, num: int) -> np.ndarray:
+            depth = ztf_pointings.loc[
+                ztf_pointings["filter"] == filt, "fiveSigmaDepth"
+            ].values
+            skymaglim = np.random.choice(depth, size=num)
+            flux_ref = ztf_filters[ztf_filters["sncosmo_name"] == filt][
+                "reference_flux"
+            ].values[0]
+            skyfluxlim = flux_ref * 10 ** (-0.4 * skymaglim)
+            flux_err_sky = skyfluxlim / 5.0
+            return flux_err_sky
+
+        z = params["redshift"]
+        dist_lum = params["dist_lum"]
+
+        # Scale TURTLS rest-frame days to peak using gs band
+        peak_idx = df["gs"].idxmin()
+        t_peak_rest = df["Time"].iloc[peak_idx]
+        phase_rest = df["Time"].values - t_peak_rest
+        phase_obs = phase_rest * (1 + z)
+
+        dist_modulus = 5 * np.log10(dist_lum * 1e5)
+
+        phase = []
+        flux = []
+        flux_err = []
+
+        bands_mapping = {"ztfg": "gs", "ztfr": "rs"}
+
+        for filt in ["ztfg", "ztfr"]:
+            turtls_band = bands_mapping[filt]
+
+            # Non-detections up to explosion time (phase_rest = -t_peak_rest)
+            phase_non_det = np.arange(
+                phase_obs[0] - 30, phase_obs[0], 1
+            ) + np.random.normal(0, 0.5)
+            flux_err_sky_non_det = get_flux_err_sky(filt, len(phase_non_det))
+            flux_obs_non_det = (
+                np.random.randn(len(phase_non_det)) * flux_err_sky_non_det
+            )
+
+            # Detections
+            mag_abs = df[turtls_band].values
+            mag_app = mag_abs + dist_modulus
+
+            flux_ref = ztf_filters[ztf_filters["sncosmo_name"] == filt][
+                "reference_flux"
+            ].values[0]
+            # Convert AB to physical using ZTF reference flux
+            # Apparent mag m = -2.5 log10(F / F_ref)
+            flux_src = flux_ref * 10 ** (-0.4 * mag_app)
+
+            # Fix NaN fluxes if any
+            flux_src[np.isnan(flux_src)] = 0.0
+
+            flux_err_sky_det = get_flux_err_sky(filt, len(flux_src))
+            flux_err_phot = flux_src * 0.02
+            flux_err_det = (flux_err_sky_det**2 + flux_err_phot**2) ** 0.5
+
+            flux_det = flux_src + np.random.randn(len(flux_src)) * flux_err_det
+
+            # Normalize so that flux_peak is ~100
+            # Note: in templates, we normalize by peak_flux.
+            flux_peak = flux_src[peak_idx]
+
+            phase.append(np.concatenate([phase_non_det, phase_obs]))
+            flux.append(np.concatenate([flux_obs_non_det, flux_det]) / flux_peak * 100)
+            flux_err.append(
+                np.concatenate([flux_err_sky_non_det, flux_err_det]) / flux_peak * 100
+            )
+
+        filt = np.array([1] * len(phase[0]) + [2] * len(phase[1])).astype(np.int32)
+        fcqfid = filt.astype(np.int32)
+
+        lc_peak = pd.DataFrame(
+            dict(
+                phase=np.concatenate(phase),
+                flux=np.concatenate(flux) + params.get("base", 0.0),
+                flux_err=np.concatenate(flux_err),
+                fcqfid=fcqfid,
+                filt=filt,
+            )
+        )
+
+        # Only keep phase < 0 for the output format standard
+        idx_peak = lc_peak["phase"] < 0
+        lc_peak = lc_peak[idx_peak].reset_index(drop=True)
 
         return lc_peak

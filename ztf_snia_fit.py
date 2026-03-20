@@ -53,6 +53,12 @@ if __name__ == "__main__":
         help="Apply hierarchical model to two subsamples based on x1 cut (default: None, no cut; set to e.g., 0.5 to separate into x1 < 0.5 and x1 >= 0.5 subsamples)",
     )
     parser.add_argument(
+        "--sn_type",
+        choices=["normal", "03fg"],
+        default="normal",
+        help="Select SN type to fit (default: normal; options: normal, 03fg). Note: 03fg-like SNe are only available in DR2",
+    )
+    parser.add_argument(
         "--model",
         choices=["power_law", "curved_power_law"],
         help="Select model to fit the data: 'power_law' or 'curved_power_law'",
@@ -162,7 +168,7 @@ if __name__ == "__main__":
         if dr == "dr2":
             dr_dir = "ztf_snia_dr2"
             tab_info = Table.read(
-                "./data/ztf_snia_dr2/tables/snia_data_basic_normal.csv",
+                f"./data/ztf_snia_dr2/tables/snia_data_basic_{args.sn_type}.csv",
                 format="ascii.csv",
             )
             idx = np.ones(len(tab_info), dtype=bool)
@@ -242,6 +248,7 @@ if __name__ == "__main__":
                 sampling_model=args.sampling_model,
                 no_t0_err=args.no_t0_err,
                 x1_subsample=x1_subsample,
+                sn_type=args.sn_type,
             )
 
             if args.no_t0_err:
@@ -270,6 +277,8 @@ if __name__ == "__main__":
                 outfile += "_early_coverage"
             if x1_subsample is not None:
                 outfile += f"_{x1_subsample}"
+            if args.sn_type != "normal":
+                outfile += f"_{args.sn_type}"
             outfile += ".nc"
             post_sample.to_netcdf(file_dir / outfile)
             print(f"Saved posterior samples to: {file_dir / outfile}")
