@@ -149,6 +149,125 @@ def power_law_rise_flat_sed(
     return source
 
 
+def power_law_plus_gaussian_bump_flat_sed(
+    time: float | ArrayLike,
+    peak_luminosity: float,
+    alpha_0: float,
+    dist_lum: float,
+    redshift: float,
+    amp_prime: float = None,
+    t_cen: float = 2.0,
+    t_sigma: float = 0.5,
+    t_fwhm: float = None,
+    amp: float = 1.0,
+    t_pivot: float = T_PIVOT,
+    **kwargs,
+):
+    """
+    Observer-frame SED model for redback simulations: power-law rise with an
+    additive Gaussian bump in normalized flux space.
+
+    Parameters:
+    -----------
+    time : float or array-like
+        Time array in the OBSERVER frame (days since explosion in observer frame).
+    peak_luminosity : float
+        Peak luminosity in rest frame (erg/s).
+    alpha_0 : float
+        Rising power-law index.
+    dist_lum : float
+        Luminosity distance (Mpc).
+    redshift : float
+        Cosmological redshift.
+    amp_prime : float, optional
+        Baseline power-law normalization in normalized flux units (%).
+    t_cen : float, optional
+        Center of Gaussian bump in rest-frame days.
+    t_sigma : float, optional
+        Width of Gaussian bump in rest-frame days. Must be > 0.
+    t_fwhm : float, optional
+        Full-width at half-maximum of Gaussian bump in rest-frame days.
+        If provided, overrides t_sigma/t_cen via:
+        t_sigma = t_fwhm / (2 * sqrt(2 * ln 2)), t_cen = 2 * t_sigma.
+    amp : float, optional
+        Amplitude of Gaussian bump in normalized flux units where 100
+        corresponds to the baseline peak flux.
+    t_pivot : float, optional
+        Pivot time for power-law rise.
+    """
+
+    # Ensure time is 1D (observer frame from redback)
+    time_obs = np.atleast_1d(time)
+
+    # Convert to scalars
+    peak_luminosity = to_scalar(peak_luminosity)
+    alpha_0 = to_scalar(alpha_0)
+    dist_lum = to_scalar(dist_lum)
+    z = to_scalar(redshift)
+    t_cen = to_scalar(t_cen)
+    t_sigma = to_scalar(t_sigma)
+    amp = to_scalar(amp)
+
+    if t_fwhm is not None:
+        t_fwhm = to_scalar(t_fwhm)
+        if t_fwhm <= 0:
+            raise ValueError("t_fwhm must be positive for Gaussian bump.")
+        t_sigma = t_fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+        t_cen = 2.0 * t_sigma
+
+    if t_sigma <= 0:
+        raise ValueError("t_sigma must be positive for Gaussian bump.")
+
+    # Calculate luminosity distance
+    dist_lum_cm = dist_lum * MPC_TO_CM
+
+    # Calculate flux with proper cosmological dilution
+    # F = L / (4π D_L² (1+z))
+    flux_factor = 1.0 / (4.0 * np.pi * dist_lum_cm**2 * (1 + z))
+    flux_density_cgs = peak_luminosity * flux_factor  # erg/s/cm²
+    flux_density_jy = flux_density_cgs / 1e-23
+
+    # Evaluate light curve in REST FRAME
+    time_rest = time_obs / (1 + z)
+
+    # Baseline power-law component in normalized flux units
+    flux_at_times = f_t_norm(
+        t=time_rest,
+        t_fl=0,
+        alpha_0=alpha_0,
+        alpha_1=0.0,
+        t_pivot=t_pivot,
+    )
+    flux_norm_base = (amp_prime / 100) * flux_at_times
+
+    # Additive Gaussian bump in normalized flux units
+    bump_norm = (amp / 100) * np.exp(-0.5 * ((time_rest - t_cen) / t_sigma) ** 2)
+
+    # Total normalized flux, clipped to preserve existing normalization behavior
+    flux_norm = flux_norm_base + bump_norm
+    flux = np.where(flux_norm > 1, 1, flux_norm) * flux_density_jy
+
+    # Observer-frame wavelength grid that covers ZTF bandpasses
+    lambda_obs = np.linspace(3000, 10000, 300)  # Observer-frame wavelengths (Å)
+
+    # Flat SED in F_nu
+    flux_nu_2d = np.tile(flux[:, np.newaxis], (1, len(lambda_obs)))  # Jy
+
+    # Convert F_nu (Jy) to F_lambda (erg/s/cm²/Å) in OBSERVER frame
+    flux_lambda_cgs = (
+        flux_nu_2d * 1e-23 * SPEED_OF_LIGHT * 1e8 / (lambda_obs[np.newaxis, :] ** 2)
+    )
+
+    # Return RedbackTimeSeriesSource with OBSERVER-FRAME quantities
+    source = RedbackTimeSeriesSource(
+        phase=time_obs,  # Observer frame
+        wave=lambda_obs,  # Observer frame
+        flux=flux_lambda_cgs,  # Observer frame
+    )
+
+    return source
+
+
 def curved_power_law_rise_flat_sed(
     time: float | ArrayLike,
     peak_luminosity: float,
@@ -343,85 +462,3 @@ def broken_power_law_rise_flat_sed(
     )
 
     return source
-
-
-def snf_2011fe_sed(
-    time: float | ArrayLike,
-    dist_lum: float,
-    redshift: float,
-    **kwargs,
-):
-    """
-    A transient model using the 'snf-2011fe' SED template from sncosmo.
-
-    Leverages sncosmo's built-in redshift handling.
-
-    Parameters:
-    -----------
-    time : float or array-like
-        Time array - days since t0_mjd_transient in observer frame (from redback).
-    t0_mjd_transient : float
-        MJD of the transient (not used in flux calculation, just for reference).
-    dist_lum : float
-        Luminosity distance (Mpc).
-    redshift : float
-        Cosmological redshift.
-    """
-
-    raise NotImplementedError("snf_2011fe_sed is deprecated.")
-
-    # Ensure time is 1D (observer frame from redback)
-    time_obs = np.atleast_1d(time)
-
-    # Convert to scalars
-    dist_lum = to_scalar(dist_lum)
-    z = to_scalar(redshift)
-
-    # Create sncosmo model with snf-2011fe source
-    model = sncosmo.Model(source="snf-2011fe")
-
-    # Set redshift - sncosmo will handle all transformations
-    model.set(z=z)
-
-    model.set(t0=20.0 * (1 + z))  # Set t0 in observer frame
-
-    # Set B-band absolute magnitude
-    model.set_source_peakabsmag(-19.0, "bessellb", "ab")
-
-    # Check template phase range
-    source = model.source
-    phase_min, phase_max = source.minphase(), source.maxphase()
-
-    # Create a dense wavelength grid in observer frame
-    # Cover optical range relevant for ZTF
-    lambda_obs = np.linspace(3500, 9500, 500)  # Angstroms
-
-    # Get the SED at each time point
-    flux_2d = np.zeros((len(time_obs), len(lambda_obs)))
-
-    # Only evaluate within the valid phase range
-    valid_mask = (time_obs >= phase_min) & (time_obs <= phase_max)
-
-    for i, t in enumerate(time_obs):
-        if not valid_mask[i]:
-            # Outside template range, leave as zero
-            continue
-
-        try:
-            sed_flux = model.flux(t, lambda_obs)
-            flux_2d[i, :] = sed_flux
-
-        except Exception as e:
-            # If still fails, leave as zero
-            if i < 3:
-                print(f"  WARNING at t={t:.2f}: {e}")
-            continue
-
-    # Return RedbackTimeSeriesSource with observer-frame quantities
-    source_redback = RedbackTimeSeriesSource(
-        phase=time_obs,
-        wave=lambda_obs,
-        flux=flux_2d,
-    )
-
-    return source_redback

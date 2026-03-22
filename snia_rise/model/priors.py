@@ -390,8 +390,12 @@ def sample_hierarchical_params(
     """
     min_mean_t_rise = 10.0
     max_mean_t_rise = 30.0
-    min_mean_alpha_0 = 1.5
-    max_mean_alpha_0 = 3.5
+    # Mock data
+    min_mean_alpha_0 = 1.0
+    max_mean_alpha_0 = 4.0
+    # ZTF real data
+    # min_mean_alpha_0 = 1.5
+    # max_mean_alpha_0 = 3.5
 
     # Sample t_rise hyperpriors (common to all structures)
     mean_t_rise = numpyro.sample(

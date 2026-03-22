@@ -116,6 +116,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         max_dist_lum: float = 270,
         z_fixed: float = None,
         turtls_model_name: str = "DPL_Ni0.4_KE0.50_P100",
+        bump_mode: str = "spike",
     ) -> list[pd.DataFrame]:
         """
         Simulate light curves using Redback.
@@ -131,6 +132,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         from .sed import (
             broken_power_law_rise_flat_sed,
             curved_power_law_rise_flat_sed,
+            power_law_plus_gaussian_bump_flat_sed,
             power_law_rise_flat_sed,
         )
 
@@ -267,6 +269,38 @@ class RedbackLightCurveLib(SNLightCurveLib):
                     * (1 + np.log(params_sim["t_rise"] / T_PIVOT))
                 )
 
+            elif model in [
+                "power_law_bump_spike",
+                "power_law_bump_long",
+            ]:
+                # Fix baseline rise parameters to isolate bump-induced fitting systematics
+                params_sim["t_rise"] = np.full(num_tot, 19.0)
+                params_sim["alpha_0"] = np.full(num_tot, 2.1)
+                params_sim["log_Aprime"] = np.full(num_tot, np.log(40.0))
+
+                # Gaussian bump amplitude in normalized flux units (peak=100)
+                params_sim["amp"] = np.random.uniform(2.0, 5.0, num_tot)
+
+                # Sample bump width via FWHM, then derive sigma and center
+                if model == "power_law_bump_spike":
+                    bump_mode_eff = "spike"
+                elif model == "power_law_bump_long":
+                    bump_mode_eff = "long"
+
+                if bump_mode_eff == "spike":
+                    params_sim["t_fwhm"] = np.random.uniform(1.0, 3.0, num_tot)
+                elif bump_mode_eff == "long":
+                    params_sim["t_fwhm"] = np.random.uniform(4.0, 7.0, num_tot)
+                else:
+                    raise ValueError(
+                        f"Unknown bump_mode '{bump_mode_eff}'. Use 'spike' or 'long'."
+                    )
+
+                params_sim["t_sigma"] = params_sim["t_fwhm"] / (
+                    2.0 * np.sqrt(2.0 * np.log(2.0))
+                )
+                params_sim["t_cen"] = 2.0 * params_sim["t_sigma"]
+
             elif model == "broken_power_law":
                 # Compuate alpha_1 based on other parameters
                 params_sim["t_b"] = np.random.uniform(20, 25, num_tot)
@@ -355,6 +389,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 raise FileNotFoundError(f"TURTLS model file not found: {file_path}")
 
             df_turtls = pd.read_csv(file_path, delim_whitespace=True)
+            # Fill NaN of inf values with 0.0 (a low absolute magnitude - basically 0 flux)
+            df_turtls = df_turtls.replace([np.inf, -np.inf, np.nan], 0.0)
             t_rise, b_peak = cls._find_peak_poly4(
                 df_turtls["Time"].values, df_turtls["B"].values
             )
@@ -378,7 +414,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         model_dir = (
             model if z_fixed is None else f"{model}_z_{z_fixed:.2f}".replace(".", "_")
         )
-        if "power_law" in model:
+        if ("power_law" in model) and ("bump" not in model):
             model_dir = f"{model_dir}_{param_dependence}"
         elif "turtls" in model.lower():
             model_dir = f"{model_dir}_{turtls_model_name}"
@@ -407,6 +443,11 @@ class RedbackLightCurveLib(SNLightCurveLib):
             if "power_law" in model:
                 if model == "power_law":
                     sed_model = power_law_rise_flat_sed
+                elif model in [
+                    "power_law_bump_spike",
+                    "power_law_bump_long",
+                ]:
+                    sed_model = power_law_plus_gaussian_bump_flat_sed
                 elif model == "curved_power_law":
                     sed_model = curved_power_law_rise_flat_sed
                 elif model == "broken_power_law":
@@ -929,6 +970,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
             raise FileNotFoundError(f"TURTLS model file not found: {file_path}")
 
         df = pd.read_csv(file_path, delim_whitespace=True)
+        df = df.replace([np.inf, -np.inf, np.nan], 0.0)
 
         ztf_path = os.path.join(
             os.path.dirname(redback.__file__), "tables", "ztf.tar.gz"
@@ -955,9 +997,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
         z = params["redshift"]
         dist_lum = params["dist_lum"]
 
-        # Scale TURTLS rest-frame days to peak using gs band
-        peak_idx = df["gs"].idxmin()
-        t_peak_rest = df["Time"].iloc[peak_idx]
+        # Scale TURTLS rest-frame days to peak using B band
+        t_peak_rest, _ = cls._find_peak_poly4(df["Time"].values, df["B"].values)
         phase_rest = df["Time"].values - t_peak_rest
         phase_obs = phase_rest * (1 + z)
 
@@ -1003,8 +1044,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             # Normalize so that flux_peak is ~100
             # Note: in templates, we normalize by peak_flux.
-            flux_peak = flux_src[peak_idx]
-
+            flux_peak = np.interp(t_peak_rest, df["Time"].values, flux_src)
             phase.append(np.concatenate([phase_non_det, phase_obs]))
             flux.append(np.concatenate([flux_obs_non_det, flux_det]) / flux_peak * 100)
             flux_err.append(
