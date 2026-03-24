@@ -116,7 +116,6 @@ class RedbackLightCurveLib(SNLightCurveLib):
         max_dist_lum: float = 270,
         z_fixed: float = None,
         turtls_model_name: str = "DPL_Ni0.4_KE0.50_P100",
-        bump_mode: str = "spike",
     ) -> list[pd.DataFrame]:
         """
         Simulate light curves using Redback.
@@ -269,10 +268,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
                     * (1 + np.log(params_sim["t_rise"] / T_PIVOT))
                 )
 
-            elif model in [
-                "power_law_bump_spike",
-                "power_law_bump_long",
-            ]:
+            elif model == "power_law_bump":
                 # Fix baseline rise parameters to isolate bump-induced fitting systematics
                 params_sim["t_rise"] = np.full(num_tot, 19.0)
                 params_sim["alpha_0"] = np.full(num_tot, 2.1)
@@ -281,21 +277,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 # Gaussian bump amplitude in normalized flux units (peak=100)
                 params_sim["amp"] = np.random.uniform(2.0, 5.0, num_tot)
 
-                # Sample bump width via FWHM, then derive sigma and center
-                if model == "power_law_bump_spike":
-                    bump_mode_eff = "spike"
-                elif model == "power_law_bump_long":
-                    bump_mode_eff = "long"
-
-                if bump_mode_eff == "spike":
-                    params_sim["t_fwhm"] = np.random.uniform(1.0, 3.0, num_tot)
-                elif bump_mode_eff == "long":
-                    params_sim["t_fwhm"] = np.random.uniform(4.0, 7.0, num_tot)
-                else:
-                    raise ValueError(
-                        f"Unknown bump_mode '{bump_mode_eff}'. Use 'spike' or 'long'."
-                    )
-
+                # Sample bump width via broad FWHM prior, then derive sigma and center
+                params_sim["t_fwhm"] = np.random.uniform(1.0, 7.0, num_tot)
                 params_sim["t_sigma"] = params_sim["t_fwhm"] / (
                     2.0 * np.sqrt(2.0 * np.log(2.0))
                 )
@@ -443,10 +426,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
             if "power_law" in model:
                 if model == "power_law":
                     sed_model = power_law_rise_flat_sed
-                elif model in [
-                    "power_law_bump_spike",
-                    "power_law_bump_long",
-                ]:
+                elif model == "power_law_bump":
                     sed_model = power_law_plus_gaussian_bump_flat_sed
                 elif model == "curved_power_law":
                     sed_model = curved_power_law_rise_flat_sed

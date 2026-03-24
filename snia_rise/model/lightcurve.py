@@ -237,6 +237,7 @@ class SNLightCurve(object):
         filename: str = None,
         offset: float = 30,
         post_pred_samples: int = 25,
+        ax=None,
     ):
         """
         Plot the light curve and the inferred model.
@@ -249,21 +250,24 @@ class SNLightCurve(object):
             Filename to save the figure.
         offset : float, optional, default=30
             Offset to separate g & r light curves in the plot.
+        ax : matplotlib.axes.Axes, optional
+            Axes to plot on. If None, a new figure and axes will be created.
 
         Returns
         -------
         None
         """
 
-        colors = np.array(["tab:green", "tab:red", "tab:cyan", "tab:orange"])
+        colors = np.array(["#0072B2", "#D55E00", "tab:cyan", "tab:orange"])
         n_color = len(np.unique(self.idx_filt))
 
-        _, ax = plt.subplots(
-            figsize=(8, 2.25 * max(n_color, 2)),
-            sharex=True,
-            sharey=True,
-            constrained_layout=True,
-        )
+        if ax is None:
+            _, ax = plt.subplots(
+                figsize=(8, 2.25 * max(n_color, 2)),
+                sharex=True,
+                sharey=True,
+                constrained_layout=True,
+            )
 
         post_sample = self.post_sample
         if post_sample is None:
@@ -277,9 +281,10 @@ class SNLightCurve(object):
             beta_ = self.lc_early["beta"]
             t_fl = np.ravel(post_sample["t_fl"])
 
+            p16, p84 = np.percentile(t_fl, [16, 84])
+            ax.axvspan(p16, p84, color="#B9C1C3", alpha=0.25, zorder=-1)
+
             idx_post_check = np.random.choice(len(t_fl), post_pred_samples)
-            for i in idx_post_check:
-                ax.axvline(t_fl[i], color="0.2", lw=0.1)
 
         for k, flt in enumerate(np.sort(np.unique(self.idx_filt))):
             for j, fcqfid in enumerate(np.unique(self.idx_fcqfid)):
@@ -296,6 +301,7 @@ class SNLightCurve(object):
                     markeredgecolor=colors[k],
                     ecolor=colors[k],
                     fmt="o",
+                    markersize=10,
                     zorder=10,
                 )
                 if self.lc_peak is not None:
@@ -313,6 +319,7 @@ class SNLightCurve(object):
                         ecolor=colors[k],
                         fmt="o",
                         alpha=0.25,
+                        markersize=10,
                         zorder=10,
                     )
 
@@ -326,7 +333,7 @@ class SNLightCurve(object):
                     alpha_1_ = np.ravel(post_sample["alpha_1"][..., flt])
                 else:
                     alpha_1_ = np.zeros_like(alpha_0_)
-                t_pred = jnp.linspace(ax.get_xlim()[0], ax.get_xlim()[1], 1000)
+                t_pred = jnp.linspace(-35, 1, 500)
                 for i in idx_post_check:
                     ax.plot(
                         t_pred,
@@ -340,8 +347,9 @@ class SNLightCurve(object):
                             t_pivot=T_PIVOT,
                         )
                         - (flt - 0.5 * (n_color - 1)) * offset,
-                        color="0.2",
-                        lw=0.1,
+                        color="0.5",
+                        alpha=0.2,
+                        lw=1,
                         zorder=-1,
                     )
 
@@ -1571,10 +1579,13 @@ class SNLightCurveLib(object):
             ),
         )
 
-    def show_summary(self):
+    def show_summary(self, **kwargs):
         """
         Arviz summary wrapper.
         """
+
+        stat_focus = kwargs.pop("stat_focus", "median")
+        hdi_prob = kwargs.pop("hdi_prob", 0.95)
 
         return az.summary(
             self.post_sample,
@@ -1589,8 +1600,9 @@ class SNLightCurveLib(object):
                     )
                 ]
             ),
-            stat_focus="median",
-            hdi_prob=0.95,
+            stat_focus=stat_focus,
+            hdi_prob=hdi_prob,
+            **kwargs,
         )
 
     def compare_true_vs_fitted_params(self, band: str = "g"):

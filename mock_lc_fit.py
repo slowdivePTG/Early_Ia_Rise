@@ -28,7 +28,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--true_model",
         default=None,
-        help="Select the underlying true model (e.g. 'power_law', 'power_law_bump_spike', 'power_law_bump_long', 'turtls_DPL_Ni0.4_KE1.40_P3', '2011fe'). Default is the same as the fitting model.",
+        help="Select the underlying true model (e.g. 'power_law', 'power_law_bump', 'turtls_DPL_Ni0.4_KE1.40_P3', '2011fe'). Default is the same as the fitting model.",
     )
     parser.add_argument(
         "--true_param_dependence",
