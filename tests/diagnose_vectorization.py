@@ -23,7 +23,7 @@ from snia_rise._utils import get_recommended_chain_method
 from snia_rise.model.model_structure import hierarchical_model
 
 # Load a small test dataset
-from snia_rise.simulate.mock_lc import RedbackLightCurveLib
+from snia_rise.simulate.simulator import RedbackLightCurveLib
 
 # Enable GPU
 numpyro.set_platform("gpu")

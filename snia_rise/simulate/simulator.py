@@ -2,6 +2,7 @@ import glob
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -115,7 +116,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         min_dist_lum: float = 10,
         max_dist_lum: float = 270,
         z_fixed: float = None,
-        turtls_model_name: str = "DPL_Ni0.4_KE0.50_P100",
+        template_model_id: str | None = None,
     ) -> list[pd.DataFrame]:
         """
         Simulate light curves using Redback.
@@ -128,12 +129,13 @@ class RedbackLightCurveLib(SNLightCurveLib):
         from scipy.optimize import brentq
 
         from .._utils._plt import set_plot_style
-        from .sed import (
+        from .parametric_models import (
             broken_power_law_rise_flat_sed,
             curved_power_law_rise_flat_sed,
             power_law_plus_gaussian_bump_flat_sed,
             power_law_rise_flat_sed,
         )
+        from .template_models import build_photometry_engine
 
         logging.getLogger("redback").setLevel(logging.WARNING)
 
@@ -356,29 +358,64 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
                 params_sim["alpha_1"] = alpha_v_1 - alpha_v_2
 
-        elif model in ["2011fe", "2021aefx"]:
-            params_sim["t_rise"] = np.full(num_tot, 0.0)
+        elif (
+            "turtls" in model.lower()
+            or "shen" in model.lower()
+            or "observation" in model.lower()
+        ):
+            # Resolve template model ID
+            if template_model_id is None:
+                raise ValueError(
+                    "template_model_id must be provided for template-based models."
+                )
+            for template in ["turtls", "shen2021", "observation"]:
+                if template in model.lower():
+                    template_model_id = f"{template}:{template_model_id}"
+                    break
 
-        elif "turtls" in model.lower():
-            base_dir = (
-                Path(__file__).resolve().parent.parent.parent
-                / "data"
-                / "TURTLS-Light-curves"
-                / "56Ni_distributions"
-                / "LightCurves"
-            )
-            file_path = base_dir / f"{turtls_model_name}.dat"
-            if not file_path.exists():
-                raise FileNotFoundError(f"TURTLS model file not found: {file_path}")
+            # Load photometry engine once
+            photometry_engine = build_photometry_engine(template_model_id)
 
-            df_turtls = pd.read_csv(file_path, delim_whitespace=True)
-            # Fill NaN of inf values with 0.0 (a low absolute magnitude - basically 0 flux)
-            df_turtls = df_turtls.replace([np.inf, -np.inf, np.nan], 0.0)
-            t_rise, b_peak = cls._find_peak_poly4(
-                df_turtls["Time"].values, df_turtls["B"].values
-            )
-            params_sim["t_rise"] = np.full(num_tot, t_rise)
-            params_sim["B_peak"] = np.full(num_tot, b_peak)
+            # Store metadata
+            params_sim["template_model_id"] = [template_model_id] * num_tot
+            params_sim["template_family"] = [photometry_engine.model.family] * num_tot
+
+            # For Shen, pre-draw angles and compute angle-dependent peak properties
+            if photometry_engine.model.family in ("shen2021", "shen"):
+                n_angles = photometry_engine.get_num_viewing_angles()
+                params_sim["n_shen_angles"] = np.full(num_tot, n_angles)
+
+                # Draw random viewing angle indices for each simulated transient
+                angle_idxs = np.random.randint(0, n_angles, num_tot)
+                params_sim["shen_angle_idx"] = angle_idxs
+
+                # Precompute peak for each angle (since n_angles is small, e.g. ~14)
+                # This avoids re-integrating SEDs num_tot times.
+                t_peaks_by_angle = np.zeros(n_angles)
+                m_peaks_by_angle = np.zeros(n_angles)
+
+                print(f"Pre-computing peaks for {n_angles} viewing angles...")
+                for i in range(n_angles):
+                    tp, mp = photometry_engine.get_peak(
+                        band="bessellb", z=0.0, angle_idx=i
+                    )
+                    t_peaks_by_angle[i] = tp
+                    m_peaks_by_angle[i] = mp
+
+                # Assign per-transient properties based on drawn angle
+                params_sim["t_rise"] = t_peaks_by_angle[angle_idxs]
+                params_sim["B_peak"] = m_peaks_by_angle[angle_idxs]
+
+            else:
+                # TURTLS or other band-template models (single implementation)
+                t_peak_rest, M_peak_rest = photometry_engine.get_peak(
+                    band="bessellb", z=0.0
+                )
+                params_sim["t_rise"] = np.full(num_tot, t_peak_rest)
+                params_sim["B_peak"] = np.full(num_tot, M_peak_rest)
+
+                params_sim["n_shen_angles"] = np.full(num_tot, -1)
+                params_sim["shen_angle_idx"] = np.full(num_tot, -1)
 
         else:
             raise ValueError(f"Model {model} not recognized.")
@@ -399,8 +436,16 @@ class RedbackLightCurveLib(SNLightCurveLib):
         )
         if ("power_law" in model) and ("bump" not in model):
             model_dir = f"{model_dir}_{param_dependence}"
-        elif "turtls" in model.lower():
-            model_dir = f"{model_dir}_{turtls_model_name}"
+        elif (
+            "turtls" in model.lower()
+            or "shen" in model.lower()
+            or "observation" in model.lower()
+        ):
+            sanitized_id = template_model_id.replace(":", "_")
+            model_dir = sanitized_id
+
+            if z_fixed is not None:
+                model_dir = f"{model_dir}_z_{z_fixed:.2f}".replace(".", "_")
 
         data_dir = Path("./data/mock") / model_dir
         if os.path.exists(data_dir):
@@ -445,30 +490,26 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 )
                 print(f"  → {len(lc_peak['phase'])} detections before peak")
 
-            elif "turtls" in model.lower():
-                single_params["turtls_model_name"] = turtls_model_name
-                lc_peak = cls._simulate_single_light_curve_turtls(params=single_params)
-                single_params["turtls_model_name"] = turtls_model_name
+            elif (
+                "turtls" in model.lower()
+                or "shen" in model.lower()
+                or "observation" in model.lower()
+            ):
+                angle_idx = None
+                if single_params.get("template_family") in ("shen2021", "shen"):
+                    angle_idx = int(single_params["shen_angle_idx"])
+
+                lc_peak = cls._simulate_single_light_curve_unified_template(
+                    params=single_params,
+                    photometry_engine=photometry_engine,
+                    angle_idx=angle_idx,
+                )
 
                 if lc_peak is None:
                     continue
 
-            elif "2011fe" in model:
-                sed_model = "snf-2011fe"
-
-                lc_peak = cls._simulate_single_light_curve_template(
-                    params=single_params, obj="2011fe"
-                )
-
-            elif "21aefx" in model:
-                sed_model = "salt-2021aefx"
-
-                lc_peak = cls._simulate_single_light_curve_template(
-                    params=single_params, obj="2021aefx"
-                )
-
-            else:
-                raise ValueError(f"Unknown model {model}")
+            # Reset the plot style after Redback's modification
+            set_plot_style()
 
             # plt.figure(figsize=(8, 3))
             # for band, color in zip([1, 2], ["tab:green", "tab:red"]):
@@ -526,9 +567,6 @@ class RedbackLightCurveLib(SNLightCurveLib):
             data_dir / "simulated_lc_params.csv",
             index=False,
         )
-
-        # Reset the plot style after Redback's modification
-        set_plot_style()
 
     @staticmethod
     def get_dist_lum_redshift(
@@ -717,191 +755,6 @@ class RedbackLightCurveLib(SNLightCurveLib):
         return lc_peak
 
     @classmethod
-    def _simulate_single_light_curve_template(
-        cls, params: dict, obj: str = "2011fe"
-    ) -> pd.DataFrame | None:
-        """
-        Simulate a single light curve using Pereira et al. (2013) SNIFS spectrophotometric time series.
-        """
-
-        import glob
-        import os
-
-        import redback
-        import sncosmo
-        from astropy.cosmology import FlatLambdaCDM
-        from astropy.table import Table
-
-        assert obj in ["2011fe", "2021aefx"], "Invalid object name"
-
-        Z_11FE = 0.000804
-        Z_21AEFX = 0.005017
-        DIST_LUM_11FE = 7  # Mpc
-        DIST_LUM_21AEFX = 18  # Mpc
-
-        ztf_path = os.path.join(
-            os.path.dirname(redback.__file__), "tables", "ztf.tar.gz"
-        )
-        filter_path = os.path.join(
-            os.path.dirname(redback.__file__), "tables", "filters.csv"
-        )
-
-        # Load ZTF pointings and filter settings
-        ztf_pointings = pd.read_csv(ztf_path, compression="gzip")
-        ztf_filters = pd.read_csv(filter_path)
-        ztf_filters = ztf_filters[ztf_filters["sncosmo_name"].isin(["ztfg", "ztfr"])]
-
-        def get_flux_err_sky(filt: str, num: int) -> np.ndarray:
-            """
-            Get sky flux error for ZTF filter.
-            """
-            depth = ztf_pointings.loc[
-                ztf_pointings["filter"] == filt, "fiveSigmaDepth"
-            ].values
-            skymaglim = np.random.choice(depth, size=num)
-            flux_ref = ztf_filters[ztf_filters["sncosmo_name"] == filt][
-                "reference_flux"
-            ].values[0]
-            skyfluxlim = flux_ref * 10 ** (-0.4 * skymaglim)
-            flux_err_sky = skyfluxlim / 5.0
-
-            return flux_err_sky
-
-        source_lst = []
-        phase_det = []
-
-        if obj == "2011fe":
-            # Load SNIFS spectra from Pereira et al. (2013)
-            spec_files = sorted(glob.glob("./data/Pereira_2013/*.dat"))
-
-            for spec_file in spec_files:
-                with open(spec_file, "r") as f:
-                    header = f.readlines()
-                for line in header:
-                    if "TMAX" in line:
-                        phase = float(line.split("=")[1].strip().split()[0])
-                        break
-                if phase > 1.0:
-                    break
-                spec = np.loadtxt(spec_file)
-                source = [
-                    spec[:, 0] / (1 + Z_11FE),
-                    spec[:, 1] * (1 + Z_11FE),
-                    spec[:, 2] ** 0.5,
-                ]
-                source_lst.append(source)
-                phase_det.append(phase)
-
-        elif obj == "2021aefx":
-            tab = Table.read(
-                "./data/Hosseinzadeh_2022/ReadMe_dbf2.txt",
-                format="ascii.fixed_width_two_line",
-                header_start=16,
-                position_line=17,
-                data_start=18,
-                data_end=64,
-            )
-            tab = tab[tab["Phase"] < 5]
-            # Load SALT spectra from Hosseinzadeh et al. (2022)
-            for k in range(len(tab)):
-                spec_file_fits = tab[k]["FITS Filename"]
-                spec_info = spec_file_fits.split(".")[0].split("_")
-                spec_file = glob.glob(
-                    f"./data/Hosseinzadeh_2022/*{spec_info[1]}*{spec_info[2]}*"
-                )
-                if len(spec_file) == 0:
-                    continue
-                spec = np.loadtxt(spec_file[0])
-                source = [spec[:, 0] / (1 + Z_21AEFX), spec[:, 1] * (1 + Z_21AEFX)]
-                phase = tab[k]["Phase"]
-                source_lst.append(source)
-                phase_det.append(phase)
-
-        cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
-
-        # Set up synthetic light curves before t_fl (non-detection phase)
-        z = params["redshift"]
-        dist_lum = cosmo.luminosity_distance(z).value  # in Mpc
-
-        # Get fluxes and errors for each filter
-        phase = []
-        flux, flux_err = [], []
-        for filt in ["ztfg", "ztfr"]:
-            ztf_trans = np.loadtxt(f"./data/{filt}.dat")
-            ztf_filt = sncosmo.Bandpass(ztf_trans[:, 0], ztf_trans[:, 1], name=filt)
-
-            # Non-detections
-            phase_non_det = np.arange(-50, -18, 2) + 2
-            flux_err_sky_non_det = get_flux_err_sky(filt, len(phase_non_det))
-
-            flux_err_non_det = flux_err_sky_non_det
-            flux_obs_non_det = np.random.randn(len(phase_non_det)) * flux_err_non_det
-
-            mag_src = []
-            if obj == "2011fe":
-                dist_lum_src = DIST_LUM_11FE
-            elif obj == "2021aefx":
-                dist_lum_src = DIST_LUM_21AEFX
-            for source in source_lst:
-                src = sncosmo.Spectrum(
-                    wave=source[0] * (1 + z),
-                    flux=source[1] / (1 + z) * (dist_lum_src / dist_lum) ** 2,
-                )
-                try:
-                    mag_src.append(src.bandmag(ztf_filt, "ab"))
-                except ValueError:
-                    mag_src.append(np.nan)
-
-            # Detections
-            flux_err_sky_det = get_flux_err_sky(filt, len(mag_src))
-            flux_ref = ztf_filters[ztf_filters["sncosmo_name"] == filt][
-                "reference_flux"
-            ].values[0]
-
-            mag_src = np.array(mag_src)
-            # True fluxes
-            flux_src = flux_ref * 10 ** (-0.4 * mag_src)
-            # Photometric errors
-            flux_err_phot = flux_src * 0.02  # 2% photometric error
-            flux_err_det = (flux_err_sky_det**2 + flux_err_phot**2) ** 0.5
-            flux_det = flux_src + np.random.randn(len(phase_det)) * flux_err_det
-            flux_peak = flux_src[-1] * (1 + 0.01 * np.abs(phase_det[-1]))
-
-            idx_det = np.where(np.isfinite(flux_det))[0]
-
-            phase.append(
-                np.concatenate([phase_non_det, [phase_det[idx] for idx in idx_det]])
-            )
-            flux.append(
-                np.concatenate([flux_obs_non_det, [flux_det[idx] for idx in idx_det]])
-                / flux_peak
-                * 100
-            )
-            flux_err.append(
-                np.concatenate(
-                    [flux_err_non_det, [flux_err_det[idx] for idx in idx_det]]
-                )
-                / flux_peak
-                * 100
-            )
-
-        filt = np.array([1] * len(phase[0]) + [2] * len(phase[1])).astype(np.int32)
-        fcqfid = filt.astype(np.int32)
-
-        lc_peak = pd.DataFrame(
-            dict(
-                phase=np.concatenate(phase),
-                flux=np.concatenate(flux) + params["base"],
-                flux_err=np.concatenate(flux_err),
-                fcqfid=fcqfid,
-                filt=filt,
-            )
-        )
-
-        lc_peak.reset_index(drop=True, inplace=True)
-
-        return lc_peak
-
     @staticmethod
     def _find_peak_poly4(time, magnitude):
         from scipy.optimize import curve_fit, fsolve
@@ -928,30 +781,22 @@ class RedbackLightCurveLib(SNLightCurveLib):
         return t_peak_guess + phase_peak, mag_peak
 
     @classmethod
-    def _simulate_single_light_curve_turtls(cls, params: dict) -> pd.DataFrame | None:
+    def _simulate_single_light_curve_unified_template(
+        cls,
+        params: dict,
+        photometry_engine: Any,
+        angle_idx: int | None = None,
+    ) -> pd.DataFrame | None:
         """
-        Simulate a single light curve using TURTLS models, ignoring K-corrections.
+        Simulate a single light curve using the unified template photometry engine.
+        Handles both TURTLS (band templates) and Shen+2021 (SED models).
         """
         import os
-        from pathlib import Path
 
         import redback
+        from astropy.cosmology import FlatLambdaCDM
 
-        model_name = params.get("turtls_model_name", "DPL_Ni0.4_KE0.50_P100")
-        base_dir = (
-            Path(__file__).resolve().parent.parent.parent
-            / "data"
-            / "TURTLS-Light-curves"
-            / "56Ni_distributions"
-            / "LightCurves"
-        )
-        file_path = base_dir / f"{model_name}.dat"
-        if not file_path.exists():
-            raise FileNotFoundError(f"TURTLS model file not found: {file_path}")
-
-        df = pd.read_csv(file_path, delim_whitespace=True)
-        df = df.replace([np.inf, -np.inf, np.nan], 0.0)
-
+        # Shared ZTF setup
         ztf_path = os.path.join(
             os.path.dirname(redback.__file__), "tables", "ztf.tar.gz"
         )
@@ -975,72 +820,118 @@ class RedbackLightCurveLib(SNLightCurveLib):
             return flux_err_sky
 
         z = params["redshift"]
-        dist_lum = params["dist_lum"]
+        # dist_lum is in Mpc, engine usually needs cosmo for accurate distance modulus if not provided
+        cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
 
-        # Scale TURTLS rest-frame days to peak using B band
-        t_peak_rest, _ = cls._find_peak_poly4(df["Time"].values, df["B"].values)
-        phase_rest = df["Time"].values - t_peak_rest
-        phase_obs = phase_rest * (1 + z)
+        # 1. Determine Peak for this transient (at this z and angle)
+        if photometry_engine.model.family == "observation":
+            t_peak_obs = 0.0
+        else:
+            t_peak_obs, m_peak_obs = photometry_engine.get_peak(
+                band="bessellb", z=z, cosmo=cosmo, angle_idx=angle_idx
+            )
 
-        dist_modulus = 5 * np.log10(dist_lum * 1e5)
+        # 2. Define Observer Time Grid
+        # We generate a dense grid covering the model's rest-frame duration
+        t_min_rest = photometry_engine.model.time_rest.min()
+        t_max_rest = photometry_engine.model.time_rest.max()
+
+        t_obs_start = t_min_rest * (1 + z)
+        t_obs_end = t_max_rest * (1 + z)
+
+        # Create a grid. 1 day cadence is sufficient for interpolation/mocking
+        t_obs_grid = np.arange(t_obs_start, t_obs_end, 1.0)
+
+        # Calculate phases relative to peak
+        phase_obs_grid = t_obs_grid - t_peak_obs
+
+        # 3. Compute Observer Magnitudes
+        filters = ["ztfg", "ztfr"]
+        mags_dict = photometry_engine.get_obs_mag(
+            filters=filters, t_obs=t_obs_grid, z=z, cosmo=cosmo, angle_idx=angle_idx
+        )
 
         phase = []
         flux = []
         flux_err = []
 
-        bands_mapping = {"ztfg": "gs", "ztfr": "rs"}
+        for filt in filters:
+            # Get magnitudes for this filter
+            mag_obs = mags_dict[filt]
 
-        for filt in ["ztfg", "ztfr"]:
-            turtls_band = bands_mapping[filt]
+            # Identify valid magnitudes (not nan/inf)
+            valid_mask = np.isfinite(mag_obs)
+            if not np.any(valid_mask):
+                continue
 
-            # Non-detections up to explosion time (phase_rest = -t_peak_rest)
-            phase_non_det = np.arange(
-                phase_obs[0] - 30, phase_obs[0], 1
-            ) + np.random.normal(0, 0.5)
+            flux_ref = ztf_filters[ztf_filters["sncosmo_name"] == filt][
+                "reference_flux"
+            ].values[0]
+
+            flux_model_grid = np.zeros_like(mag_obs)
+            flux_model_grid[valid_mask] = flux_ref * 10 ** (-0.4 * mag_obs[valid_mask])
+
+            # Define peak flux for this band for normalization to 100
+            flux_peak_band = np.max(flux_model_grid)
+            if flux_peak_band <= 0:
+                flux_peak_band = 1e-30
+
+            # Simulate Non-Detections (Pre-explosion)
+            # Pre-explosion corresponds to times before t_obs_start (approx)
+            # We add some points before the model starts
+            phase_start = t_obs_start - t_peak_obs
+
+            if photometry_engine.model.family == "observation":
+                phase_non_det = np.arange(
+                    phase_start - 30, phase_start - 2.5, 1
+                ) + np.random.normal(0, 0.5)
+            else:
+                phase_non_det = np.arange(
+                    phase_start - 30, phase_start, 1
+                ) + np.random.normal(0, 0.5)
             flux_err_sky_non_det = get_flux_err_sky(filt, len(phase_non_det))
             flux_obs_non_det = (
                 np.random.randn(len(phase_non_det)) * flux_err_sky_non_det
             )
 
-            # Detections
-            mag_abs = df[turtls_band].values
-            mag_app = mag_abs + dist_modulus
+            # Simulate Detections (Model duration)
+            phase_det = phase_obs_grid
+            flux_src_det = flux_model_grid
 
-            flux_ref = ztf_filters[ztf_filters["sncosmo_name"] == filt][
-                "reference_flux"
-            ].values[0]
-            # Convert AB to physical using ZTF reference flux
-            # Apparent mag m = -2.5 log10(F / F_ref)
-            flux_src = flux_ref * 10 ** (-0.4 * mag_app)
-
-            # Fix NaN fluxes if any
-            flux_src[np.isnan(flux_src)] = 0.0
-
-            flux_err_sky_det = get_flux_err_sky(filt, len(flux_src))
-            flux_err_phot = flux_src * 0.02
+            # Errors
+            flux_err_sky_det = get_flux_err_sky(filt, len(flux_src_det))
+            flux_err_phot = flux_src_det * 0.02
             flux_err_det = (flux_err_sky_det**2 + flux_err_phot**2) ** 0.5
 
-            flux_det = flux_src + np.random.randn(len(flux_src)) * flux_err_det
-
-            # Normalize so that flux_peak is ~100
-            # Note: in templates, we normalize by peak_flux.
-            flux_peak = np.interp(t_peak_rest, df["Time"].values, flux_src)
-            phase.append(np.concatenate([phase_non_det, phase_obs]))
-            flux.append(np.concatenate([flux_obs_non_det, flux_det]) / flux_peak * 100)
-            flux_err.append(
-                np.concatenate([flux_err_sky_non_det, flux_err_det]) / flux_peak * 100
+            flux_obs_det = (
+                flux_src_det + np.random.randn(len(flux_src_det)) * flux_err_det
             )
 
-        filt = np.array([1] * len(phase[0]) + [2] * len(phase[1])).astype(np.int32)
-        fcqfid = filt.astype(np.int32)
+            # Store concatenated results, normalized
+            phase.append(np.concatenate([phase_non_det, phase_det]))
+            flux.append(
+                np.concatenate([flux_obs_non_det, flux_obs_det]) / flux_peak_band * 100
+            )
+            flux_err.append(
+                np.concatenate([flux_err_sky_non_det, flux_err_det])
+                / flux_peak_band
+                * 100
+            )
+
+        if not phase:
+            return None
+
+        filt_idx = []
+        for i, p in enumerate(phase):
+            filt_idx.append(np.full(len(p), i + 1, dtype=np.int32))
 
         lc_peak = pd.DataFrame(
             dict(
                 phase=np.concatenate(phase),
                 flux=np.concatenate(flux) + params.get("base", 0.0),
                 flux_err=np.concatenate(flux_err),
-                fcqfid=fcqfid,
-                filt=filt,
+                fcqfid=np.concatenate(filt_idx),
+                filt=np.concatenate(filt_idx),
             )
         )
 

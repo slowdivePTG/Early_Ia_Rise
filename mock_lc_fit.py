@@ -6,7 +6,7 @@ import numpyro
 import xarray as xr
 
 from snia_rise._utils import set_best_platform
-from snia_rise.simulate.mock_lc import RedbackLightCurveLib
+from snia_rise.simulate.simulator import RedbackLightCurveLib
 
 numpyro.enable_x64()
 
@@ -28,13 +28,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--true_model",
         default=None,
-        help="Select the underlying true model (e.g. 'power_law', 'power_law_bump', 'turtls_DPL_Ni0.4_KE1.40_P3', '2011fe'). Default is the same as the fitting model.",
+        help="Select the underlying true model (e.g. 'power_law', 'power_law_bump', 'shen', '2011fe'). Default is the same as the fitting model.",
     )
     parser.add_argument(
         "--true_param_dependence",
         choices=["independent", "correlated", None],
         default=None,
         help="Parameter dependence of the true simulation for power-law families: 'independent' or 'correlated' (default: None).",
+    )
+    parser.add_argument(
+        "--template_model_id",
+        default=None,
+        help="Template model ID (e.g. '2011fe' or '1.0_2e5') used for simulation. Required if true_model implies a template model.",
     )
     parser.add_argument(
         "--sampling_model",
@@ -135,6 +140,10 @@ if __name__ == "__main__":
     for early_threshold in args.early_threshold:
         model = args.model
         true_model = model if args.true_model is None else args.true_model
+
+        if args.template_model_id is not None:
+            sanitized_id = args.template_model_id.replace(":", "_")
+            true_model = f"{args.true_model}_{sanitized_id}"
 
         true_model = (
             true_model
