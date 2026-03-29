@@ -6,9 +6,10 @@ This module provides:
 2) Loaders for:
    - TURTLS synthetic multi-band light curves (rest-frame absolute magnitudes).
    - Shen+2021 time-dependent SED models (rest-frame spectral luminosity-like grids).
+   - Observed spectrophotometric models (2011fe)
 3) Two photometry engines behind a common interface:
    - TURTLSBandPhotometryEngine: band-template, no K-correction approximation.
-   - ShenSEDPhotometryEngine: full SED-based synthetic photometry with redshifting.
+   - SEDPhotometryEngine: full SED-based synthetic photometry with redshifting.
 
 Design notes
 ------------
@@ -61,20 +62,41 @@ def _distance_modulus_from_cosmo(z: float, cosmo: Any | None) -> float:
     return float(cosmo.distmod(z).value)
 
 
-def _safe_interp1d(x: np.ndarray, y: np.ndarray, x_new: np.ndarray) -> np.ndarray:
+def _match_native_time_indices(
+    t_native: np.ndarray, t_query: np.ndarray, atol: float = 1e-8
+) -> tuple[np.ndarray, np.ndarray]:
     """
-    1D linear interpolation with edge clipping.
+    Match query times to native grid times without interpolation.
+
+    Returns
+    -------
+    matched : np.ndarray[bool]
+        Boolean mask over t_query indicating exact (within atol) native-grid matches.
+    idx : np.ndarray[int]
+        For each query time, the nearest native index (valid only where matched is True).
     """
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    x_new = np.asarray(x_new, dtype=float)
-    if x.ndim != 1 or y.ndim != 1:
-        raise ValueError("x and y must be 1D arrays")
-    if x.size != y.size:
-        raise ValueError("x and y must have the same length")
-    if x.size < 2:
-        raise ValueError("Need at least 2 points for interpolation")
-    return np.interp(x_new, x, y, left=y[0], right=y[-1])
+    t_native = np.asarray(t_native, dtype=float)
+    t_query = np.asarray(t_query, dtype=float)
+
+    if t_native.ndim != 1:
+        raise ValueError("t_native must be 1D")
+    if t_query.ndim != 1:
+        raise ValueError("t_query must be 1D")
+    if t_native.size == 0:
+        raise ValueError("t_native cannot be empty")
+
+    idx = np.searchsorted(t_native, t_query)
+    idx = np.clip(idx, 0, t_native.size - 1)
+
+    idx_left = np.clip(idx - 1, 0, t_native.size - 1)
+    left_dist = np.abs(t_query - t_native[idx_left])
+    right_dist = np.abs(t_query - t_native[idx])
+
+    use_left = left_dist <= right_dist
+    idx_nearest = np.where(use_left, idx_left, idx)
+
+    matched = np.abs(t_query - t_native[idx_nearest]) <= float(atol)
+    return matched, idx_nearest.astype(int)
 
 
 def normalize_band_name(name: str) -> str:
@@ -455,9 +477,12 @@ def load_observed_model(
 ) -> TemplateSEDModel:
     """
     Load observed SN Ia spectral time series (e.g., 2011fe).
-    Resamples spectra onto a common rest-frame wavelength grid and scales to 10pc.
+
+    Note: No wavelength regridding/interpolation is performed. We keep spectra on their
+    native wavelength grid and require all epochs to have an identical wavelength grid
+    to form a single 2D (time, wavelength) SED array. Epochs with mismatched wavelength
+    sampling are dropped.
     """
-    from scipy.interpolate import interp1d
 
     if base_dir is None:
         base_dir_path = Path("./data")
@@ -514,33 +539,51 @@ def load_observed_model(
     if not spectra:
         raise ValueError(f"No valid spectra loaded for {model_name}")
 
-    # Regrid to common wavelength
-    w_mins = [s[0].min() for s in spectra]
-    w_maxs = [s[0].max() for s in spectra]
-    w_min = max(w_mins)
-    w_max = min(w_maxs)
-
-    # Common grid, 10A spacing
-    common_wave = np.arange(np.ceil(w_min), np.floor(w_max), 10.0)
-
-    n_time = len(times)
-    n_wave = len(common_wave)
-    sed_flux = np.zeros((n_time, n_wave))
-
-    # Sort by time
+    # NOTE: No wavelength regridding / interpolation is performed here by design.
+    # Observed spectra may have different native wavelength grids per epoch; we keep
+    # the first epoch's native grid and REQUIRE all other epochs to match it exactly.
+    #
+    # This preserves the "native grid only" requirement, but it also means any
+    # spectrum whose wavelength sampling differs will be dropped.
+    #
+    # Sort by time first so "first epoch" is deterministic.
     sorter = np.argsort(times)
     times = np.array(times)[sorter]
     spectra = [spectra[i] for i in sorter]
+
+    # Use the first spectrum's wavelength grid as the shared native grid
+    common_wave = np.asarray(spectra[0][0], dtype=float)
+    if common_wave.ndim != 1 or common_wave.size < 2:
+        raise ValueError("Invalid wavelength grid in observed spectrum")
 
     # Distance scaling to 10pc (absolute flux)
     # F_10pc = F_dist * (dist / 10pc)^2
     dist_factor = (DIST_MPC * 1e6 / 10.0) ** 2
 
-    for i in range(n_time):
-        w, f = spectra[i]
-        interp = interp1d(w, f, bounds_error=False, fill_value=0.0)
-        f_regrid = interp(common_wave)
-        sed_flux[i, :] = f_regrid * dist_factor
+    # Keep only epochs whose wavelength grid matches exactly
+    kept_times = []
+    kept_fluxes = []
+
+    for t, (w, f) in zip(times, spectra):
+        w = np.asarray(w, dtype=float)
+        f = np.asarray(f, dtype=float)
+
+        if w.shape != common_wave.shape:
+            continue
+        if not np.allclose(w, common_wave, rtol=0.0, atol=0.0):
+            continue
+
+        kept_times.append(t)
+        kept_fluxes.append(f * dist_factor)
+
+    if len(kept_times) < 2:
+        raise ValueError(
+            "Observed SED epochs do not share an identical wavelength grid; "
+            "cannot build a 2D (time, wavelength) SED without interpolation."
+        )
+
+    times = np.asarray(kept_times, dtype=float)
+    sed_flux = np.vstack([np.asarray(ff, dtype=float) for ff in kept_fluxes])
 
     meta = {
         "source": f"observation_{name_lower}",
@@ -579,7 +622,7 @@ def load_template_model(
             return load_turtls_model(source, base_dir=base_dir)
         if family in {"shen", "shen2021"}:
             return load_shen2021_model(source, base_dir=base_dir)
-        if family in {"observation", "observed", "sn"}:
+        if family in {"observation"}:
             return load_observed_model(source, base_dir=base_dir)
         raise ValueError(f"Unsupported family '{family}' in registry for {model_id}")
 
@@ -597,7 +640,7 @@ def load_template_model(
         return load_turtls_model(name)
     if family in {"shen", "shen2021"}:
         return load_shen2021_model(name)
-    if family in {"observation", "observed", "sn"}:
+    if family in {"observation"}:
         return load_observed_model(name)
 
     raise ValueError(f"Unsupported model family prefix: {family}")
@@ -758,10 +801,12 @@ class TURTLSBandPhotometryEngine:
                     f"Model {self.model.model_id} missing band '{b_rest}' "
                     f"required for filter '{f}'"
                 )
-            M_rest = _safe_interp1d(
-                self.model.time_rest, self.model.band_abs_mag[b_rest], t_rest
+            mags = np.full(t_rest.shape, np.nan, dtype=float)
+            matched, idx_native = _match_native_time_indices(
+                self.model.time_rest, t_rest
             )
-            out[f_norm] = M_rest + dm
+            mags[matched] = self.model.band_abs_mag[b_rest][idx_native[matched]] + dm
+            out[f_norm] = mags
         return out
 
     def get_peak(
@@ -780,11 +825,11 @@ class TURTLSBandPhotometryEngine:
 
 
 # -----------------------------
-# Shen photometry engine
+# SED photometry engine (Shen+2021 and observation-based)
 # -----------------------------
 
 
-class ShenSEDPhotometryEngine:
+class SEDPhotometryEngine:
     """
     Full-SED synthetic photometry engine.
 
@@ -792,9 +837,9 @@ class ShenSEDPhotometryEngine:
     """
 
     def __init__(self, model: TemplateSEDModel) -> None:
-        if model.family not in {"shen2021", "observation", "observed"}:
+        if model.family not in {"shen2021", "observation"}:
             raise ValueError(
-                "ShenSEDPhotometryEngine requires family='shen2021' or 'observation'"
+                "SEDPhotometryEngine requires family='shen2021' or 'observation'"
             )
         if not model.is_sed_model():
             raise ValueError("Model must provide wavelength_rest and sed_flux")
@@ -807,19 +852,13 @@ class ShenSEDPhotometryEngine:
     def get_num_viewing_angles(self) -> int:
         return self.model.meta.get("num_viewing_angles", 1)
 
-    def _interp_sed_time(
-        self, t_rest: np.ndarray, angle_idx: int | None = None
-    ) -> np.ndarray:
+    def _get_sed_grid(self, angle_idx: int | None = None) -> np.ndarray:
         """
-        Interpolate SED grid in time.
-        Returns array shape (len(t_rest), n_wave).
+        Return native SED grid at model time samples (no time interpolation).
+        Shape: (n_time, n_wave)
         """
-        t_rest = np.asarray(t_rest, dtype=float)
-        t_grid = self.model.time_rest
-
         if angle_idx is not None:
             if "sed_flux_all_angles" not in self.model.meta:
-                # If explicit angle requested but not available, fallback to default if 0
                 if angle_idx == 0:
                     sed = self.model.sed_flux
                 else:
@@ -832,12 +871,8 @@ class ShenSEDPhotometryEngine:
                     )
                 sed = sed_all[:, :, angle_idx]
         else:
-            sed = self.model.sed_flux  # (n_time, n_wave)
-
-        out = np.empty((t_rest.size, sed.shape[1]), dtype=float)
-        for j in range(sed.shape[1]):
-            out[:, j] = _safe_interp1d(t_grid, sed[:, j], t_rest)
-        return out
+            sed = self.model.sed_flux
+        return np.asarray(sed, dtype=float)
 
     def get_obs_mag(
         self,
@@ -869,15 +904,16 @@ class ShenSEDPhotometryEngine:
         z = float(z)
         t_rest = t_obs / (1.0 + z)
 
-        sed_rest = self._interp_sed_time(t_rest, angle_idx=angle_idx)  # (n_t, n_wave)
         wave_rest = self.model.wavelength_rest
+        sed_native = self._get_sed_grid(angle_idx=angle_idx)  # (n_native, n_wave)
+        matched, idx_native = _match_native_time_indices(self.model.time_rest, t_rest)
 
         # Convert rest-frame F_lambda at 10pc to observed f_lambda:
         # f_lambda_obs(λ_obs) = F_lambda_10pc(λ_rest) * (10pc / D_L)^2 / (1+z)
         # with λ_obs = λ_rest (1+z)
         if z > 0 and cosmo is None:
             raise ValueError(
-                "cosmo is required for Shen full-SED photometry at z > 0 "
+                "cosmo is required for full-SED photometry at z > 0 "
                 "(needs luminosity distance)."
             )
 
@@ -892,25 +928,26 @@ class ShenSEDPhotometryEngine:
         wave_obs = wave_rest * (1.0 + z)
 
         out: dict[str, np.ndarray] = {}
+        matched_idx = np.where(matched)[0]
         for f in filters:
             f_norm = normalize_band_name(f)
-            mags = np.empty(t_obs.size, dtype=float)
+            mags = np.full(t_obs.size, np.nan, dtype=float)
 
-            # Build temporary TimeSeriesSource once per filter call for simplicity
-            # Flux unit expected by sncosmo is typically erg / s / cm^2 / A
-            flux_obs = sed_rest * geom
-            src = sncosmo.TimeSeriesSource(
-                phase=t_obs,  # observer-time axis
-                wave=wave_obs,
-                flux=flux_obs,
-                zero_before=True,
-            )
+            if matched_idx.size > 0:
+                t_obs_matched = t_obs[matched_idx]
+                flux_obs_native = sed_native[idx_native[matched_idx]] * geom
+                src = sncosmo.TimeSeriesSource(
+                    phase=t_obs_matched,
+                    wave=wave_obs,
+                    flux=flux_obs_native,
+                    zero_before=True,
+                )
 
-            for i, t in enumerate(t_obs):
-                try:
-                    mags[i] = src.bandmag(f_norm, "ab", t)
-                except Exception:
-                    mags[i] = np.nan
+                for j, t in enumerate(t_obs_matched):
+                    try:
+                        mags[matched_idx[j]] = src.bandmag(f_norm, "ab", t)
+                    except Exception:
+                        mags[matched_idx[j]] = np.nan
 
             out[f_norm] = mags
 
@@ -959,10 +996,10 @@ class ShenSEDPhotometryEngine:
 def build_photometry_engine(
     model_id: str,
     registry: dict[str, dict[str, Any]] | None = None,
-) -> TURTLSBandPhotometryEngine | ShenSEDPhotometryEngine:
+) -> TURTLSBandPhotometryEngine | SEDPhotometryEngine:
     model = load_template_model(model_id, registry=registry)
     if model.family == "turtls":
         return TURTLSBandPhotometryEngine(model)
     if model.family in {"shen2021", "observation", "observed"}:
-        return ShenSEDPhotometryEngine(model)
+        return SEDPhotometryEngine(model)
     raise ValueError(f"Unsupported model family: {model.family}")

@@ -828,22 +828,27 @@ class RedbackLightCurveLib(SNLightCurveLib):
             t_peak_obs = 0.0
         else:
             t_peak_obs, m_peak_obs = photometry_engine.get_peak(
-                band="bessellb", z=z, cosmo=cosmo, angle_idx=angle_idx
+                band="bessellb", z=0.0, cosmo=cosmo, angle_idx=angle_idx, method="poly4"
             )
 
-        # 2. Define Observer Time Grid
-        # We generate a dense grid covering the model's rest-frame duration
-        t_min_rest = photometry_engine.model.time_rest.min()
-        t_max_rest = photometry_engine.model.time_rest.max()
+        # 2. Define Observer Time Grid from native REST-FRAME model epochs
+        # Use native model times directly (no synthetic observer-frame cadence grid)
+        time_rest_native = np.asarray(photometry_engine.model.time_rest, dtype=float)
 
-        t_obs_start = t_min_rest * (1 + z)
-        t_obs_end = t_max_rest * (1 + z)
+        if photometry_engine.model.family == "shen2021":
+            random_idx = np.random.binomial(1, 0.5)
+            time_rest_native = time_rest_native[random_idx::2]
+            # Exclude the first 2 rest-frame days from template sampling
+            time_rest_native = time_rest_native[time_rest_native >= 2.0]
 
-        # Create a grid. 1 day cadence is sufficient for interpolation/mocking
-        t_obs_grid = np.arange(t_obs_start, t_obs_end, 1.0)
+        if time_rest_native.size == 0:
+            return None
 
-        # Calculate phases relative to peak
-        phase_obs_grid = t_obs_grid - t_peak_obs
+        # Explicit observer-frame grid constructed from native rest-frame epochs
+        t_obs_grid = time_rest_native * (1 + z)
+
+        # Calculate phases relative to peak (rest-frame)
+        phase_obs_grid = t_obs_grid / (1 + z) - t_peak_obs
 
         # 3. Compute Observer Magnitudes
         filters = ["ztfg", "ztfr"]
@@ -872,23 +877,20 @@ class RedbackLightCurveLib(SNLightCurveLib):
             flux_model_grid[valid_mask] = flux_ref * 10 ** (-0.4 * mag_obs[valid_mask])
 
             # Define peak flux for this band for normalization to 100
-            flux_peak_band = np.max(flux_model_grid)
+            flux_peak_band = np.max(flux_model_grid) * 1.01
             if flux_peak_band <= 0:
                 flux_peak_band = 1e-30
 
             # Simulate Non-Detections (Pre-explosion)
-            # Pre-explosion corresponds to times before t_obs_start (approx)
-            # We add some points before the model starts
-            phase_start = t_obs_start - t_peak_obs
+            # Pre-explosion corresponds to times before the first native sampled epoch
+            t_obs_fl = t_obs_grid.min() - t_peak_obs
 
             if photometry_engine.model.family == "observation":
-                phase_non_det = np.arange(
-                    phase_start - 30, phase_start - 2.5, 1
-                ) + np.random.normal(0, 0.5)
+                phase_non_det = np.arange(-50.0, -18.0, 2.0) + 2.0
             else:
-                phase_non_det = np.arange(
-                    phase_start - 30, phase_start, 1
-                ) + np.random.normal(0, 0.5)
+                phase_non_det = np.arange(t_obs_fl - 30, t_obs_fl - 2.0, 2) / (1 + z)
+
+            phase_non_det += np.random.normal(0, 0.05 / (1 + z), len(phase_non_det))
             flux_err_sky_non_det = get_flux_err_sky(filt, len(phase_non_det))
             flux_obs_non_det = (
                 np.random.randn(len(phase_non_det)) * flux_err_sky_non_det
