@@ -8,7 +8,7 @@ import xarray as xr
 from astropy.table import Table
 
 from snia_rise._utils import set_best_platform
-from snia_rise.ztf_lc import ZTFLib
+from snia_rise.ztf_lc import SampleConfig, ZTFLib
 
 numpyro.enable_x64()
 
@@ -45,6 +45,12 @@ if __name__ == "__main__":
         default=False,
         action="store_true",
         help="Use sample with early light curve coverage",
+    )
+    parser.add_argument(
+        "--baseline-coverage",
+        default=False,
+        action="store_true",
+        help="Use sample with baseline light curve coverage",
     )
     parser.add_argument(
         "--x1-cut",
@@ -153,7 +159,7 @@ if __name__ == "__main__":
     for early_threshold in args.early_threshold:
         print(f"\nProcessing DRs: {dr} with early threshold: {early_threshold}")
         print(
-            f"Volume-complete: {args.volume_complete}, Early-coverage: {args.early_coverage}"
+            f"Volume-complete: {args.volume_complete}, Early-coverage: {args.early_coverage}, Baseline-coverage: {args.baseline_coverage}"
         )
         print(f"Model: {args.model}, Sampling model: {args.sampling_model}")
 
@@ -176,8 +182,10 @@ if __name__ == "__main__":
                 idx &= tab_info["volume_limited"] == 1
             if args.early_coverage:
                 idx &= tab_info["early_coverage"] == 1
+            if args.baseline_coverage:
+                idx &= tab_info["baseline_coverage"] == 1
             ztfid_col = "ztfname"
-            x1_col = "x1"          # column name in DR2 CSV
+            x1_col = "x1"  # column name in DR2 CSV
             source = "DR2"
 
         elif dr == "edr":
@@ -188,17 +196,19 @@ if __name__ == "__main__":
             idx = np.ones(len(tab_info), dtype=bool)
             if args.volume_complete:
                 idx &= tab_info["volume_limited"] == 1
+            if args.baseline_coverage:
+                idx &= tab_info["baseline_coverage"] == 1
             args.early_coverage = True  # set to True for EDR since all have early data
             ztfid_col = "name"
-            x1_col = "x1_salt2"   # column name in EDR CSV
+            x1_col = "x1_salt2"  # column name in EDR CSV
             source = "EDR"
 
         elif dr == "early_late":
             dr_dir = "ztf_early_late"
             tab_info = Table.read("./data/ztf_early_late/ztf_early_Ia.csv")
-            idx = tab_info["not_obs"].mask   # boolean mask already
+            idx = tab_info["not_obs"].mask  # boolean mask already
             ztfid_col = "ztfid"
-            x1_col = None          # x1-cut not supported for early_late
+            x1_col = None  # x1-cut not supported for early_late
             source = "early_late"
 
         # ------------------------------------------------------------------ #
@@ -238,28 +248,36 @@ if __name__ == "__main__":
             else:
                 print(f"\n--- Full sample ({n_sub} objects) ---")
 
-            ztflib = ZTFLib(
-                ztfid_lib=tab_info[ztfid_col][idx_sub],
+            config = SampleConfig(
                 source=source,
-                early_threshold=early_threshold,
                 volume_complete=args.volume_complete,
                 early_coverage=args.early_coverage,
-                rise_model=args.model,
-                sampling_model=args.sampling_model,
+                baseline_coverage=args.baseline_coverage,
                 no_t0_err=args.no_t0_err,
                 x1_subsample=x1_subsample,
                 sn_type=args.sn_type,
             )
+            ztflib = ZTFLib(
+                ztfid_lib=tab_info[ztfid_col][idx_sub],
+                config=config,
+                early_threshold=early_threshold,
+                rise_model=args.model,
+                sampling_model=args.sampling_model,
+            )
 
             if args.no_t0_err:
                 ztflib.t0_err = None
+
+            target_accept_prob = 0.85 if args.baseline_coverage else 0.6
 
             ztflib.sampling(
                 num_warmup=args.num_warmup,
                 num_samples=args.num_samples,
                 num_chains=args.num_chains,
                 thinning=args.thinning,
-                nuts_params=dict(max_tree_depth=12, target_accept_prob=0.85),
+                nuts_params=dict(
+                    max_tree_depth=12, target_accept_prob=target_accept_prob
+                ),
                 random_seed=114514,
                 prior_config=dict(
                     rise_model=args.model,
@@ -270,15 +288,8 @@ if __name__ == "__main__":
 
             # Save the posterior
             post_sample = xr.Dataset(ztflib.post_sample)
-            outfile = f"post_sample_{args.sampling_model}"
-            if args.volume_complete:
-                outfile += "_volume_complete"
-            if args.early_coverage:
-                outfile += "_early_coverage"
-            if x1_subsample is not None:
-                outfile += f"_{x1_subsample}"
-            if args.sn_type != "normal":
-                outfile += f"_{args.sn_type}"
-            outfile += ".nc"
+            outfile = (
+                f"post_sample_{args.sampling_model}{config.get_filename_suffix()}.nc"
+            )
             post_sample.to_netcdf(file_dir / outfile)
             print(f"Saved posterior samples to: {file_dir / outfile}")

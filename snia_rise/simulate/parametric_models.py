@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import sncosmo
 from jax._src.typing import ArrayLike
 from redback.sed import RedbackTimeSeriesSource
 

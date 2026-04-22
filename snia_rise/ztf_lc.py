@@ -1,4 +1,5 @@
 import glob
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -86,13 +87,13 @@ class ZTFDataProcessor:
 
         # Discard the fcqfID with few baseline points
         ## Already done in the preprocessing
-        idx_base = phase < -25
-        idx_fcqfid_few_base = []
-        for fcqfid_val in np.unique(fcqfid):
-            if np.sum((fcqfid == fcqfid_val) & idx_base) < 5:
-                idx_fcqfid_few_base.append(fcqfid_val)
-                print(f"Discarding fcqfid {fcqfid_val} with few baseline points")
-        idx &= ~np.isin(fcqfid, idx_fcqfid_few_base)
+        # idx_base = phase < -25
+        # idx_fcqfid_few_base = []
+        # for fcqfid_val in np.unique(fcqfid):
+        # if np.sum((fcqfid == fcqfid_val) & idx_base) < 5:
+        # idx_fcqfid_few_base.append(fcqfid_val)
+        # print(f"Discarding fcqfid {fcqfid_val} with few baseline points")
+        # idx &= ~np.isin(fcqfid, idx_fcqfid_few_base)
 
         lc_early = {
             "phase": phase[idx],
@@ -332,7 +333,9 @@ class ZTFIaDR2(SNLightCurve):
         """
         Initialize the class instance.
         """
-        tab_info = Table.read(self.dr2_dir + self.tab_info_path.replace("normal", sn_type))
+        tab_info = Table.read(
+            self.dr2_dir + self.tab_info_path.replace("normal", sn_type)
+        )
         lc_list = sorted(glob.glob(self.dr2_dir + self.tab_lc_path))
         ztfid_list = [lc.split("/")[-1].split("_")[0] for lc in lc_list]
         if ztfid not in ztfid_list:
@@ -529,19 +532,41 @@ class ZTFIaEDR(SNLightCurve):
         super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid, t0_err=t0_unc)
 
 
+@dataclass
+class SampleConfig:
+    source: str
+    volume_complete: bool = False
+    early_coverage: bool = False
+    baseline_coverage: bool = False
+    no_t0_err: bool = False
+    x1_subsample: str | None = None
+    sn_type: str = "normal"
+
+    def get_filename_suffix(self) -> str:
+        suffix = ""
+        if self.volume_complete:
+            suffix += "_volume_complete"
+        if self.early_coverage or self.source.lower() in ["early_late", "edr"]:
+            suffix += "_early"
+        if self.baseline_coverage:
+            suffix += "_baseline"
+        if self.no_t0_err:
+            suffix += "_no_t0_err"
+        if self.x1_subsample is not None:
+            suffix += f"_{self.x1_subsample}"
+        if self.sn_type != "normal":
+            suffix += f"_{self.sn_type}"
+        return suffix
+
+
 class ZTFLib(SNLightCurveLib):
     def __init__(
         self,
         ztfid_lib: list = None,
-        source: str = None,
+        config: SampleConfig = None,
         early_threshold: float = 0.4,
         rise_model: str = "power_law",
         sampling_model: str = "hierarchical_mvn",
-        volume_complete: bool = False,
-        early_coverage: bool = False,
-        no_t0_err: bool = False,
-        x1_subsample: str | None = None,
-        sn_type: str = "normal",
         **kwargs,
     ) -> None:
         """
@@ -571,7 +596,7 @@ class ZTFLib(SNLightCurveLib):
         import os
         from pathlib import Path
 
-        if ztfid_lib is None or source is None:
+        if ztfid_lib is None or config is None:
             super().__init__(sampling_model=sampling_model)
             return
 
@@ -584,11 +609,15 @@ class ZTFLib(SNLightCurveLib):
 
         for ztfid in ztfid_lib:
             try:
-                if source.lower() == "edr":
+                if config.source.lower() == "edr":
                     ztf_sn = ZTFIaEDR(ztfid=ztfid, early_threshold=early_threshold)
-                elif source.lower() == "dr2":
-                    ztf_sn = ZTFIaDR2(ztfid=ztfid, early_threshold=early_threshold, sn_type=sn_type)
-                elif source.lower() == "early_late":
+                elif config.source.lower() == "dr2":
+                    ztf_sn = ZTFIaDR2(
+                        ztfid=ztfid,
+                        early_threshold=early_threshold,
+                        sn_type=config.sn_type,
+                    )
+                elif config.source.lower() == "early_late":
                     ztf_sn = ZTFIaEarlyLate(
                         ztfid=ztfid, early_threshold=early_threshold
                     )
@@ -605,22 +634,11 @@ class ZTFLib(SNLightCurveLib):
             t0_err_lib.append(ztf_sn.t0_err)
 
         post_sample_dir = Path(
-            f"./data/ztf_snia_{source.lower()}/results/frac{int(early_threshold * 100)}_{rise_model}"
+            f"./data/ztf_snia_{config.source.lower()}/results/frac{int(early_threshold * 100)}_{rise_model}"
         )
-        filename = f"post_sample_{sampling_model}"
-        if volume_complete:
-            filename += "_volume_complete"
-        if early_coverage or source.lower() in ["early_late", "edr"]:
-            filename += "_early_coverage"
-        if no_t0_err:
-            filename += "_no_t0_err"
-        if x1_subsample is not None:
-            filename += f"_{x1_subsample}"
-        if sn_type != "normal":
-            filename += f"_{sn_type}"
-        filename += ".nc"
-        print(filename)
+        filename = f"post_sample_{sampling_model}{config.get_filename_suffix()}.nc"
         post_sample_file = post_sample_dir / filename
+        # print(post_sample_file)
 
         if os.path.exists(post_sample_file):
             print("Loading existing .nc file...")
@@ -632,7 +650,7 @@ class ZTFLib(SNLightCurveLib):
             lc_early_lib=lc_early_lib,
             lc_peak_lib=lc_peak_lib,
             ztfid_lib=ztfid_lib_processed,
-            t0_err=None if no_t0_err else t0_err_lib,
+            t0_err=None if config.no_t0_err else t0_err_lib,
             sampling_model=sampling_model,
             **kwargs,
         )

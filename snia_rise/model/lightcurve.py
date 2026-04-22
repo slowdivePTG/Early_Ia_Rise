@@ -467,6 +467,7 @@ class SNLightCurveLib(object):
         for k, lc in enumerate(self.lc_library):
             if lc.n_obs == 0:
                 print(f"Warning: Light curve {lc.ID} has no observations. Skipping...")
+                continue
             # concatenate the indices
             self.idx_filt = np.append(self.idx_filt, lc.idx_filt)
             self.idx_fcqfid = np.append(
@@ -482,9 +483,26 @@ class SNLightCurveLib(object):
 
         n_obj = len(np.unique(self.idx_obj))
         n_fcqfid = len(np.unique(self.idx_fcqfid))
-        assert n_obj == self.idx_obj.max() + 1, "Indexing error: idx_obj"
-        assert n_fcqfid == self.idx_fcqfid.max() + 1, "Indexing error: idx_fcqfid"
-        assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt"
+
+        if len(self.idx_obj) > 0 and n_obj != self.idx_obj.max() + 1:
+            print(
+                f"Warning: {len(self.lc_library) - n_obj} SNe have no data within the epoch range. Re-indexing idx_obj..."
+            )
+            valid_idx = np.unique(self.idx_obj)
+            self.lc_library = [self.lc_library[i] for i in valid_idx]
+            if len(self.ztfid_lib) > 0:
+                self.ztfid_lib = [self.ztfid_lib[i] for i in valid_idx]
+            if self.t0_err is not None:
+                self.t0_err = self.t0_err[valid_idx]
+            _, self.idx_obj = np.unique(self.idx_obj, return_inverse=True)
+
+        if len(self.idx_fcqfid) > 0 and n_fcqfid != self.idx_fcqfid.max() + 1:
+            print("Warning: Indexing gap found in idx_fcqfid. Re-indexing...")
+            _, self.idx_fcqfid = np.unique(self.idx_fcqfid, return_inverse=True)
+
+        if len(self.idx_filt) > 0 and n_filt != self.idx_filt.max() + 1:
+            print("Warning: Indexing gap found in idx_filt. Re-indexing...")
+            _, self.idx_filt = np.unique(self.idx_filt, return_inverse=True)
         print("Number of objects:", n_obj)
         print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
         print("Number of filters:", n_filt)
@@ -542,8 +560,7 @@ class SNLightCurveLib(object):
                             )
                         ) ** 0.5
 
-            for matrix in ["Corr", "Sigma"]:
-                sample.drop_vars(matrix)
+            sample = sample.drop_vars(["Corr", "Sigma"])
 
         # Post-calculate population-level parameters if not sampled directly
         if "mean_t_rise" not in sample:
@@ -555,7 +572,7 @@ class SNLightCurveLib(object):
             if "mean_alpha_0" not in sample:
                 sample["mean_alpha_0"] = sample["alpha_0"].mean(dim="obj")
                 sample["sigma_alpha_0"] = sample["alpha_0"].std(dim="obj", ddof=1)
-            if "mean_log_Aprime" not in sample:
+            if "mean_log_Aprime" not in sample and "log_Aprime" in sample:
                 sample["mean_log_Aprime"] = sample["log_Aprime"].mean(dim="obj")
                 sample["sigma_log_Aprime"] = sample["log_Aprime"].std(dim="obj", ddof=1)
 
@@ -567,13 +584,19 @@ class SNLightCurveLib(object):
                         sample["alpha_0"][..., j],
                         dim="obj",
                     )
-                if f"corr_t_rise_log_Aprime_flt{j + 1}" not in sample:
+                if (
+                    f"corr_t_rise_log_Aprime_flt{j + 1}" not in sample
+                    and "log_Aprime" in sample
+                ):
                     sample[f"corr_t_rise_log_Aprime_flt{j + 1}"] = xr.corr(
                         sample["t_rise"],
                         sample["log_Aprime"][..., j],
                         dim="obj",
                     )
-                if f"corr_alpha_log_Aprime_flt{j + 1}" not in sample:
+                if (
+                    f"corr_alpha_log_Aprime_flt{j + 1}" not in sample
+                    and "log_Aprime" in sample
+                ):
                     sample[f"corr_alpha_log_Aprime_flt{j + 1}"] = xr.corr(
                         sample["alpha_0"][..., j],
                         sample["log_Aprime"][..., j],
@@ -604,7 +627,7 @@ class SNLightCurveLib(object):
                             * sample["sigma_alpha_0"][..., j]
                             * sample["sigma_alpha_0"][..., k]
                             * sample[f"corr_alpha_flt{j + 1}_flt{k + 1}"]
-                        )
+                        ) ** (1 / 2)
                     if f"corr_t_rise_alpha_flt{j + 1}-flt{k + 1}" not in sample:
                         sample[f"corr_t_rise_alpha_flt{j + 1}-flt{k + 1}"] = xr.corr(
                             sample["t_rise"],
@@ -766,6 +789,96 @@ class SNLightCurveLib(object):
 
         self.lc_library.extend(lc_lib.lc_library)
         self.ztfid_lib.extend(lc_lib.ztfid_lib)
+
+    def extract_sublibrary(self, mask: list) -> "SNLightCurveLib":
+        """
+        Extract a sub-library from the current SNLightCurveLib object.
+
+        Parameters
+        ----------
+        mask : list or np.ndarray
+            A boolean array of the same length as the number of objects in the library.
+
+        Returns
+        -------
+        SNLightCurveLib
+            A new SNLightCurveLib object containing the selected SNe.
+        """
+        assert len(mask) == len(self.lc_library), (
+            "Mask length must match the number of objects in the library."
+        )
+
+        lc_early_lib = [lc.lc_early for i, lc in enumerate(self.lc_library) if mask[i]]
+        lc_peak_lib = [lc.lc_peak for i, lc in enumerate(self.lc_library) if mask[i]]
+        ztfid_lib = (
+            [self.ztfid_lib[i] for i in range(len(self.ztfid_lib)) if mask[i]]
+            if len(self.ztfid_lib) > 0
+            else None
+        )
+        t0_err = (
+            [self.t0_err[i] for i in range(len(self.t0_err)) if mask[i]]
+            if self.t0_err is not None
+            else None
+        )
+
+        new_lib = SNLightCurveLib(
+            lc_early_lib=lc_early_lib,
+            lc_peak_lib=lc_peak_lib,
+            ztfid_lib=ztfid_lib,
+            t0_err=t0_err,
+            sampling_model=self.model_structure,
+        )
+
+        obj_idx = np.where(mask)[0]
+
+        # Determine the original fcqfid and filt indices that are kept
+        kept_fcqfid = []
+        kept_filt = []
+        for i in obj_idx:
+            obj_mask = self.idx_obj == i
+            kept_fcqfid.extend(self.idx_fcqfid[obj_mask])
+            kept_filt.extend(self.idx_filt[obj_mask])
+
+        kept_fcqfid = np.unique(kept_fcqfid).astype(int)
+        kept_filt = np.unique(kept_filt).astype(int)
+
+        def subset_dataset(ds):
+            if ds is None:
+                return None
+            ds_sub = ds.copy()
+            if "obj" in ds_sub.dims:
+                ds_sub = ds_sub.isel(obj=obj_idx)
+            if "fcqfid" in ds_sub.dims:
+                ds_sub = ds_sub.isel(fcqfid=kept_fcqfid)
+            if "filt" in ds_sub.dims:
+                ds_sub = ds_sub.isel(filt=kept_filt)
+
+            for dim in ["obj", "fcqfid", "filt"]:
+                if dim in ds_sub.coords and dim not in ds.coords:
+                    ds_sub = ds_sub.drop_vars(dim)
+
+            vars_to_drop = [
+                var
+                for var in ds_sub.data_vars
+                if var.startswith("mean_")
+                or var.startswith("sigma_")
+                or var.startswith("corr_")
+            ]
+            if vars_to_drop:
+                ds_sub = ds_sub.drop_vars(vars_to_drop)
+
+            return ds_sub
+
+        new_lib.post_sample = subset_dataset(self.post_sample)
+        new_lib.prior_sample = subset_dataset(self.prior_sample)
+
+        if new_lib.post_sample is not None:
+            new_lib.decode_post_sample(model_structure=self.model_structure)
+
+        if new_lib.prior_sample is not None:
+            new_lib.decode_prior_sample()
+
+        return new_lib
 
     def _sampling_unpooled(
         self,

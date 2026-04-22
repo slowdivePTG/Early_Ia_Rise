@@ -388,13 +388,11 @@ def sample_hierarchical_params(
     amp_prime : array, shape (n_obj, n_filt)
     alpha_0 : array, shape (n_obj, n_filt)
     """
-    # Mock data
     min_mean_t_rise = 5.0
     max_mean_t_rise = 50.0
     # ZTF real data
     # min_mean_t_rise = 10.0
     # max_mean_t_rise = 30.0
-    # Mock data
     min_mean_alpha_0 = 1.0
     max_mean_alpha_0 = 4.0
     # ZTF real data
