@@ -190,7 +190,7 @@ class ZTFIaEarlyLate(SNLightCurve):
         fcqfid = data["fcqfid"]
         filt = data["filter_id"]
 
-        # Calculate 40% times and max flux from data
+        # Calculate X% times and max flux from data
         t_g_early, _ = ZTFDataProcessor.calculate_early_times(
             phase,
             flux,
@@ -330,9 +330,6 @@ class ZTFIaDR2(SNLightCurve):
     def __init__(
         self, ztfid: str, early_threshold: float = 0.4, sn_type: str = "normal"
     ) -> None:
-        """
-        Initialize the class instance.
-        """
         tab_info = Table.read(
             self.dr2_dir + self.tab_info_path.replace("normal", sn_type)
         )
@@ -377,29 +374,29 @@ class ZTFIaDR2(SNLightCurve):
             np.bitwise_and(tab_lc["flag"].data[:, None], bad_bitmask).sum(axis=1) == 0
         )
         # outliers in the baseline
-        idx_baseline = (tab_lc["mjd"].data - t0) / (1 + z) < -25
-        mask &= ~(
-            (
-                np.abs(
-                    tab_lc["flux"].data.astype("<f4")
-                    / tab_lc["flux_err"].data.astype("<f4")
-                )
-                > 10
-            )
-            & idx_baseline
-        )
-        for _fcqfid in np.unique(tab_lc["fcqfid"].data):
-            f_med = np.median(
-                tab_lc["flux"].data[(tab_lc["fcqfid"] == _fcqfid) & idx_baseline]
-            )
-            mask &= ~(
-                (
-                    np.abs(tab_lc["flux"].data.astype("<f4") - f_med)
-                    > 3 * tab_lc["flux_err"].data.astype("<f4")
-                )
-                & (tab_lc["fcqfid"] == _fcqfid)
-                & idx_baseline
-            )
+        # idx_baseline = (tab_lc["mjd"].data - t0) / (1 + z) < -25
+        # mask &= ~(
+        #     (
+        #         np.abs(
+        #             tab_lc["flux"].data.astype("<f4")
+        #             / tab_lc["flux_err"].data.astype("<f4")
+        #         )
+        #         > 10
+        #     )
+        #     & idx_baseline
+        # )
+        # for _fcqfid in np.unique(tab_lc["fcqfid"].data):
+        #     idx_fcqfid = (tab_lc["fcqfid"] == _fcqfid) & idx_baseline
+        #     if idx_fcqfid.sum() == 0:
+        #         continue
+        #     f_med = np.median(tab_lc["flux"].data[idx_fcqfid])
+        #     mask &= ~(
+        #         (
+        #             np.abs(tab_lc["flux"].data.astype("<f4") - f_med)
+        #             > 3 * tab_lc["flux_err"].data.astype("<f4")
+        #         )
+        #         & idx_fcqfid
+        #     )
         data = tab_lc[mask]
 
         flux = data["flux"].data.astype("<f4")
@@ -410,7 +407,7 @@ class ZTFIaDR2(SNLightCurve):
         fcqfid = data["fcqfid"].data
         filt = data["filter_id"].data
 
-        # Calculate 40% times and max flux from data
+        # Calculate X% times and max flux from data
         t_g_early, flux_g_max = ZTFDataProcessor.calculate_early_times(
             phase,
             flux,
@@ -657,9 +654,4 @@ class ZTFLib(SNLightCurveLib):
         self.post_sample = post_sample
         self.decode_post_sample()
 
-        if self.post_sample is not None:
-            self.sampling(
-                sample_prior=True,
-                prior_config=dict(rise_model=rise_model),
-            )
-            self.decode_prior_sample()
+

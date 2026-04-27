@@ -1286,25 +1286,27 @@ class SNLightCurveLib(object):
         platform = jax.default_backend()
         chain_method = get_recommended_chain_method(platform, num_chains)
 
-        if self.prior_sample is None:
-            print("Sampling from prior...")
-            prior_pred = infer.Predictive(kernel, num_samples=num_samples * num_chains)(
-                rng_key,
-                **running_params,
-                prior_config=prior_config,
-            )
-
-            coords, dims = extract_coords_dims_from_model(
-                kernel,
-                model_kwargs={**running_params, "prior_config": prior_config},
-                num_samples=1,
-            )
-
-            self.prior_sample = az.from_numpyro(
-                prior=prior_pred, coords=coords, dims=dims
-            ).prior.astype("float32")
-
         if sample_prior:
+            if self.prior_sample is None:
+                print("Sampling from prior...")
+                prior_pred = infer.Predictive(kernel, num_samples=num_samples * num_chains)(
+                    rng_key,
+                    **running_params,
+                    prior_config=prior_config,
+                )
+
+                coords, dims = extract_coords_dims_from_model(
+                    kernel,
+                    model_kwargs={**running_params, "prior_config": prior_config},
+                    num_samples=1,
+                )
+
+                self.prior_sample = az.from_numpyro(
+                    prior=prior_pred, coords=coords, dims=dims
+                ).prior.astype("float32")
+
+                del prior_pred
+
             self.decode_prior_sample()
             return
 

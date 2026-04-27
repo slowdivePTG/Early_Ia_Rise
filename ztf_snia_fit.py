@@ -268,7 +268,7 @@ if __name__ == "__main__":
             if args.no_t0_err:
                 ztflib.t0_err = None
 
-            target_accept_prob = 0.85 if args.baseline_coverage else 0.6
+            target_accept_prob = 0.8 if args.early_coverage else 0.6
 
             ztflib.sampling(
                 num_warmup=args.num_warmup,

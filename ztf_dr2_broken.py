@@ -121,7 +121,14 @@ def hierarchical_broken_linear_model(
     numpyro.sample("obs_y", dist.Normal(y_true, y_err), obs=y_mean)
 
 
-def get_chains(x_samples=None, y_samples=None, x_mean=None, x_err=None, **kwargs):
+def get_chains(
+    x_samples=None,
+    y_samples=None,
+    x_mean=None,
+    x_err=None,
+    models=["lin", "brok"],
+    **kwargs,
+):
     """
     Utility function to extract and prepare MCMC chains for both models.
     """
@@ -137,42 +144,54 @@ def get_chains(x_samples=None, y_samples=None, x_mean=None, x_err=None, **kwargs
     y_mean, y_err = prepare_data(y_samples)
 
     # 2. Run MCMC for Linear Model
-    print("Fitting Hierarchical Linear Model...")
-    mcmc_lin = MCMC(
-        NUTS(hierarchical_linear_model, init_strategy=init_to_median),
-        num_warmup=2000,
-        num_samples=1000,
-        num_chains=4,
-        chain_method="parallel",
-        progress_bar=False,
-    )
-    mcmc_lin.run(
-        jax.random.PRNGKey(0), x_mean=x_mean, x_err=x_err, y_mean=y_mean, y_err=y_err
-    )
-    idata_lin = az.from_numpyro(mcmc_lin)
+    if "lin" in models:
+        print("Fitting Hierarchical Linear Model...")
+        mcmc_lin = MCMC(
+            NUTS(hierarchical_linear_model, init_strategy=init_to_median),
+            num_warmup=2000,
+            num_samples=2000,
+            num_chains=4,
+            thinning=2,
+            chain_method="parallel",
+            progress_bar=False,
+        )
+        mcmc_lin.run(
+            jax.random.PRNGKey(0),
+            x_mean=x_mean,
+            x_err=x_err,
+            y_mean=y_mean,
+            y_err=y_err,
+        )
+        idata_lin = az.from_numpyro(mcmc_lin)
+    else:
+        idata_lin = None
 
-    # 3. Run MCMC for Broken Linear Model
-    print("Fitting Hierarchical Broken Linear Model...")
-    mcmc_brok = MCMC(
-        NUTS(hierarchical_broken_linear_model, init_strategy=init_to_median),
-        num_warmup=2000,
-        num_samples=1000,
-        num_chains=4,
-        chain_method="parallel",
-        progress_bar=False,
-    )
-    mcmc_brok.run(
-        jax.random.PRNGKey(1),
-        x_mean=x_mean,
-        x_err=x_err,
-        y_mean=y_mean,
-        y_err=y_err,
-        **kwargs,
-    )
-    idata_brok = az.from_numpyro(mcmc_brok)
-    idata_brok.posterior["beta1_2"] = (
-        idata_brok.posterior["beta1"] - idata_brok.posterior["beta2"]
-    )
+    if "brok" in models:
+        # 3. Run MCMC for Broken Linear Model
+        print("Fitting Hierarchical Broken Linear Model...")
+        mcmc_brok = MCMC(
+            NUTS(hierarchical_broken_linear_model, init_strategy=init_to_median),
+            num_warmup=2000,
+            num_samples=2000,
+            num_chains=4,
+            thinning=2,
+            chain_method="parallel",
+            progress_bar=False,
+        )
+        mcmc_brok.run(
+            jax.random.PRNGKey(1),
+            x_mean=x_mean,
+            x_err=x_err,
+            y_mean=y_mean,
+            y_err=y_err,
+            **kwargs,
+        )
+        idata_brok = az.from_numpyro(mcmc_brok)
+        idata_brok.posterior["beta1_2"] = (
+            idata_brok.posterior["beta1"] - idata_brok.posterior["beta2"]
+        )
+    else:
+        idata_brok = None
 
     return idata_lin, idata_brok
 
