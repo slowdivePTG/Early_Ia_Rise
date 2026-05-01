@@ -11,7 +11,7 @@ from numpyro.infer.initialization import init_to_median
 from sklearn.preprocessing import LabelEncoder
 
 from .._utils import plt
-from ..constants import T_PIVOT
+from ..constants import EPS, T_PIVOT
 from .model_structure import (
     f_t,
     hierarchical_model,
@@ -424,6 +424,10 @@ class SNLightCurveLib(object):
         self.idx_fcqfid = np.array([], dtype=int)
         self.idx_obj = np.array([], dtype=int)
 
+        self.inf_data = None
+        self.post_sample: xr.DataArray = None
+        self.prior_sample: xr.DataArray = None
+
         if lc_early_lib is None:
             return
 
@@ -508,10 +512,6 @@ class SNLightCurveLib(object):
         print("Number of filters:", n_filt)
         print("Number of total observations:", len(self.phase))
         print("Light curves compiled...")
-
-        self.inf_data = None
-        self.post_sample: xr.DataArray = None
-        self.prior_sample: xr.DataArray = None
 
     @staticmethod
     def decode_sample(
@@ -698,8 +698,11 @@ class SNLightCurveLib(object):
             lc.post_sample["C"] = self.post_sample["C"][..., fcqfid_in_obj]
             # lc.post_sample["beta"] = self.post_sample["beta"][..., fcqfid_in_obj]
 
+            # Parameters specific to each filter used by this object
+            filt_in_obj = np.unique(self.idx_filt[self.idx_obj == k])
+
             # A: (n_chains, n_samples, n_obj, n_filt)
-            lc.post_sample["Aprime"] = self.post_sample["Aprime"][..., k, :]
+            lc.post_sample["Aprime"] = self.post_sample["Aprime"][..., k, filt_in_obj]
             # lc.post_sample["A"] = self.post_sample["A"][..., k, :]
 
             # t_fl: (n_chains, n_samples, n_obj)
@@ -715,12 +718,24 @@ class SNLightCurveLib(object):
 
             else:  # Unpooled or Hierarchical (all variants:  mvn, independent, tfl_only)
                 # alpha_0: (n_chains, n_samples, n_obj, n_filt)
-                lc.post_sample["alpha_0"] = self.post_sample["alpha_0"][..., k, :]
+                lc.post_sample["alpha_0"] = self.post_sample["alpha_0"][
+                    ..., k, filt_in_obj
+                ]
                 # alpha_1: (n_chains, n_samples, n_obj, n_filt)
                 if "alpha_1" in self.post_sample.keys():
-                    lc.post_sample["alpha_1"] = self.post_sample["alpha_1"][..., k, :]
+                    lc.post_sample["alpha_1"] = self.post_sample["alpha_1"][
+                        ..., k, filt_in_obj
+                    ]
 
             lc.post_sample = xr.Dataset(lc.post_sample)
+            if "fcqfid" in lc.post_sample.dims:
+                lc.post_sample = lc.post_sample.assign_coords(
+                    fcqfid=np.arange(len(fcqfid_in_obj))
+                )
+            if "filt" in lc.post_sample.dims:
+                lc.post_sample = lc.post_sample.assign_coords(
+                    filt=np.arange(len(filt_in_obj))
+                )
 
     def append(self, lc_lib: "SNLightCurveLib"):
         """
@@ -853,6 +868,13 @@ class SNLightCurveLib(object):
             if "filt" in ds_sub.dims:
                 ds_sub = ds_sub.isel(filt=kept_filt)
 
+            if "obj" in ds_sub.dims:
+                ds_sub = ds_sub.assign_coords(obj=np.arange(ds_sub.sizes["obj"]))
+            if "fcqfid" in ds_sub.dims:
+                ds_sub = ds_sub.assign_coords(fcqfid=np.arange(ds_sub.sizes["fcqfid"]))
+            if "filt" in ds_sub.dims:
+                ds_sub = ds_sub.assign_coords(filt=np.arange(ds_sub.sizes["filt"]))
+
             for dim in ["obj", "fcqfid", "filt"]:
                 if dim in ds_sub.coords and dim not in ds.coords:
                     ds_sub = ds_sub.drop_vars(dim)
@@ -877,6 +899,17 @@ class SNLightCurveLib(object):
 
         if new_lib.prior_sample is not None:
             new_lib.decode_prior_sample()
+
+        if new_lib.post_sample is not None and len(new_lib.idx_fcqfid) > 0:
+            assert new_lib.post_sample.sizes.get("fcqfid", 0) == len(
+                np.unique(new_lib.idx_fcqfid)
+            ), "fcqfid dimension mismatch between post_sample and idx_fcqfid"
+            assert new_lib.post_sample.sizes.get("obj", 0) == len(new_lib.lc_library), (
+                "obj dimension mismatch between post_sample and lc_library"
+            )
+            assert new_lib.post_sample.sizes.get("filt", 0) == len(
+                np.unique(new_lib.idx_filt)
+            ), "filt dimension mismatch between post_sample and idx_filt"
 
         return new_lib
 
@@ -1289,7 +1322,9 @@ class SNLightCurveLib(object):
         if sample_prior:
             if self.prior_sample is None:
                 print("Sampling from prior...")
-                prior_pred = infer.Predictive(kernel, num_samples=num_samples * num_chains)(
+                prior_pred = infer.Predictive(
+                    kernel, num_samples=num_samples * num_chains
+                )(
                     rng_key,
                     **running_params,
                     prior_config=prior_config,
@@ -1374,6 +1409,186 @@ class SNLightCurveLib(object):
             ]
             sample = sample.drop_vars(vars_to_remove)
         return sample
+
+    def generate_posterior_predictive(self, n_total=1000, rng_seed=None):
+        """
+        Sample from the population-level hyperprior distribution.
+
+        Randomly selects `n_total` posterior draws of the hyperparameters
+        (means, covariances), and for each draws one (t_rise, alpha_0) pair
+        from the inferred population distribution.
+
+        Only valid for hierarchical models.
+
+        Parameters
+        ----------
+        n_total : int, optional
+            Number of samples to draw from the population distribution.
+            Default: 1000.
+        rng_seed : int, optional
+            Seed for numpy random number generator for reproducibility.
+
+        Returns
+        -------
+        xr.Dataset
+            Dataset with dimensions (sample, [filt]) containing:
+            - t_rise : (sample,) — rise time, clipped at EPS
+            - alpha_0 : (sample, filt) — power-law index per filter,
+              clipped at 1+EPS.  Not present for hierarchical_trise.
+
+        Raises
+        ------
+        ValueError
+            If no posterior samples exist, or if the model is unpooled/pooled.
+
+        Notes
+        -----
+        - For hierarchical (independent): draws from MVN with diagonal covariance
+        - For hierarchical_mvn: draws from full MVN using the posterior covariance
+        - For hierarchical_trise: draws only t_rise from 1-D Normal; alpha_0 omitted
+        """
+        if self.post_sample is None:
+            raise ValueError("No posterior samples found. Run sampling() first.")
+
+        if self.model_structure in ("pooled", "unpooled"):
+            raise ValueError(
+                "Posterior predictives are only available for hierarchical models. "
+                f"Current model: {self.model_structure}"
+            )
+
+        # Determine correlation structure
+        if self.model_structure == "hierarchical_mvn":
+            correlation_structure = "mvn"
+        elif self.model_structure == "hierarchical_trise":
+            correlation_structure = "trise_only"
+            print(
+                "Warning: hierarchical_trise has no population-level alpha_0. "
+                "Only t_rise posterior predictives will be generated."
+            )
+        else:
+            correlation_structure = "independent"
+
+        n_chain = self.post_sample.sizes["chain"]
+        n_draw = self.post_sample.sizes["draw"]
+
+        # Determine number of filters from post_sample or fallback to idx_filt
+        n_filt = self.post_sample.sizes.get("filt", 0) or len(np.unique(self.idx_filt))
+
+        # Extract population mean and std for t_rise
+        if "mean_t_rise" in self.post_sample:
+            mean_t_rise = self.post_sample["mean_t_rise"].values
+        else:
+            mean_t_rise = self.post_sample["t_rise"].mean(dim="obj").values
+
+        if "sigma_t_rise" in self.post_sample:
+            sigma_t_rise = self.post_sample["sigma_t_rise"].values
+        else:
+            sigma_t_rise = self.post_sample["t_rise"].std(dim="obj", ddof=1).values
+
+        # Extract population mean and std for alpha_0 (not for trise_only)
+        if correlation_structure != "trise_only":
+            if "mean_alpha_0" in self.post_sample:
+                mean_alpha_0 = self.post_sample["mean_alpha_0"].values
+            else:
+                mean_alpha_0 = self.post_sample["alpha_0"].mean(dim="obj").values
+
+            if "sigma_alpha_0" in self.post_sample:
+                sigma_alpha_0 = self.post_sample["sigma_alpha_0"].values
+            else:
+                sigma_alpha_0 = (
+                    self.post_sample["alpha_0"].std(dim="obj", ddof=1).values
+                )
+
+        rng = np.random.default_rng(rng_seed)
+
+        if correlation_structure == "trise_only":
+            # Flatten chain × draw → n_post, randomly select n_total
+            mu_flat = mean_t_rise.ravel()  # (n_post,)
+            sigma_flat = sigma_t_rise.ravel()  # (n_post,)
+            n_post = len(mu_flat)
+            idx = rng.choice(n_post, size=n_total, replace=n_total > n_post)
+            z = rng.normal(size=n_total)
+            t_rise_pp = np.clip(mu_flat[idx] + sigma_flat[idx] * z, EPS, None).astype(
+                np.float32
+            )
+            alpha_0_pp = None
+
+        else:
+            d = 1 + n_filt
+            mu = np.concatenate(
+                [mean_t_rise[..., None], mean_alpha_0], axis=-1
+            )  # (chain, draw, d)
+            sigma = np.concatenate(
+                [sigma_t_rise[..., None], sigma_alpha_0], axis=-1
+            )  # (chain, draw, d)
+
+            # Build covariance (chain, draw, d, d)
+            if correlation_structure == "independent":
+                cov = np.zeros((n_chain, n_draw, d, d))
+                cov[:, :, range(d), range(d)] = sigma**2
+
+            else:  # mvn
+                if "Sigma" in self.post_sample:
+                    raw = self.post_sample["Sigma"].values
+                    cov = raw[:, :, :d, :d]
+
+                elif "Corr" in self.post_sample:
+                    raw = self.post_sample["Corr"].values
+                    corr = raw[:, :, :d, :d]
+                    cov = sigma[:, :, None, :] * sigma[:, :, :, None] * corr
+
+                else:
+                    corr = np.broadcast_to(np.eye(d), (n_chain, n_draw, d, d)).copy()
+                    for j in range(n_filt):
+                        key = f"corr_t_rise_alpha_flt{j + 1}"
+                        if key in self.post_sample:
+                            v = self.post_sample[key].values
+                            corr[:, :, 0, j + 1] = v
+                            corr[:, :, j + 1, 0] = v
+                    for i in range(n_filt):
+                        for j in range(i + 1, n_filt):
+                            key = f"corr_alpha_flt{i + 1}_flt{j + 1}"
+                            if key in self.post_sample:
+                                v = self.post_sample[key].values
+                                corr[:, :, i + 1, j + 1] = v
+                                corr[:, :, j + 1, i + 1] = v
+                    cov = sigma[:, :, None, :] * sigma[:, :, :, None] * corr
+
+            # Flatten chain × draw → (n_post, d) and (n_post, d, d)
+            n_post = n_chain * n_draw
+            mu_flat = mu.reshape(n_post, d)
+            cov_flat = cov.reshape(n_post, d, d)
+
+            # Randomly select n_total draws
+            idx = rng.choice(n_post, size=n_total, replace=n_total > n_post)
+
+            mu_sel = mu_flat[idx]  # (n_total, d)
+            cov_sel = cov_flat[idx]  # (n_total, d, d)
+
+            # Batch Cholesky with small jitter
+            cov_sel = cov_sel + 1e-8 * np.eye(d)
+            L = np.linalg.cholesky(cov_sel)
+            z = rng.normal(size=(n_total, d))
+            theta = mu_sel + np.einsum("ni,nij->nj", z, L.transpose(0, 2, 1))
+
+            t_rise_pp = theta[:, 0]
+            alpha_0_pp = theta[:, 1:]
+
+        # Package as xarray Dataset
+        coords = {"sample": np.arange(n_total)}
+        data_vars = {
+            "t_rise": (("sample",), t_rise_pp),
+        }
+        if alpha_0_pp is not None:
+            filt_coords = (
+                self.post_sample.coords["filt"].values
+                if "filt" in self.post_sample.coords
+                else np.arange(n_filt)
+            )
+            data_vars["alpha_0"] = (("sample", "filt"), alpha_0_pp)
+            coords["filt"] = filt_coords
+
+        return xr.Dataset(data_vars=data_vars, coords=coords)
 
     def drop_bad_chains(
         self,

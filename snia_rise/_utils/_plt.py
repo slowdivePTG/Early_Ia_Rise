@@ -116,12 +116,18 @@ def show_kde_posterior(
     import numpy as np
     import seaborn as sns
 
-    prior_sample = lib.prior_sample.copy()
     post_sample = lib.post_sample.copy()
+    if show_prior:
+        assert lib.prior_sample is not None, (
+            "Prior sample is not available in the library."
+        )
+        prior_sample = lib.prior_sample.copy()
+    else:
+        prior_sample = None
 
-    for sample in [prior_sample, post_sample]:
+    for sample in [post_sample, prior_sample]:
         if sample is None:
-            return
+            continue
 
         for k in range(len(np.unique(lib.idx_filt))):
             sample[f"mean_alpha_flt{k + 1}"] = sample["mean_alpha_0"][..., k]
@@ -131,13 +137,15 @@ def show_kde_posterior(
 
     # Flatten the xarray DataArray to 1D array for seaborn
     param_post = post_sample[param].values.flatten()
-    param_prior = prior_sample[param].values.flatten()
-
     if x_range is not None:
         param_post = param_post[(param_post >= x_range[0]) & (param_post <= x_range[1])]
-        param_prior = param_prior[
-            (param_prior >= x_range[0]) & (param_prior <= x_range[1])
-        ]
+
+    if show_prior:
+        param_prior = prior_sample[param].values.flatten()
+        if x_range is not None:
+            param_prior = param_prior[
+                (param_prior >= x_range[0]) & (param_prior <= x_range[1])
+            ]
 
     # Check if param_post is empty after filtering
     if len(param_post) == 0:

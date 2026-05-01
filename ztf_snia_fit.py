@@ -60,9 +60,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--sn_type",
-        choices=["normal", "03fg"],
+        choices=["normal", "03fg", "91bg", "02cx"],
         default="normal",
-        help="Select SN type to fit (default: normal; options: normal, 03fg). Note: 03fg-like SNe are only available in DR2",
+        help="Select SN type to fit (default: normal; options: normal, 03fg, 91bg, 02cx). Note: peculiar SNe are only available in DR2",
     )
     parser.add_argument(
         "--model",

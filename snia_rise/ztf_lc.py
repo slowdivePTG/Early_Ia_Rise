@@ -374,29 +374,36 @@ class ZTFIaDR2(SNLightCurve):
             np.bitwise_and(tab_lc["flag"].data[:, None], bad_bitmask).sum(axis=1) == 0
         )
         # outliers in the baseline
-        # idx_baseline = (tab_lc["mjd"].data - t0) / (1 + z) < -25
-        # mask &= ~(
-        #     (
-        #         np.abs(
-        #             tab_lc["flux"].data.astype("<f4")
-        #             / tab_lc["flux_err"].data.astype("<f4")
-        #         )
-        #         > 10
-        #     )
-        #     & idx_baseline
-        # )
-        # for _fcqfid in np.unique(tab_lc["fcqfid"].data):
-        #     idx_fcqfid = (tab_lc["fcqfid"] == _fcqfid) & idx_baseline
-        #     if idx_fcqfid.sum() == 0:
-        #         continue
-        #     f_med = np.median(tab_lc["flux"].data[idx_fcqfid])
-        #     mask &= ~(
-        #         (
-        #             np.abs(tab_lc["flux"].data.astype("<f4") - f_med)
-        #             > 3 * tab_lc["flux_err"].data.astype("<f4")
-        #         )
-        #         & idx_fcqfid
-        #     )
+        phase = (tab_lc["mjd"].data - t0) / (1 + z)
+        idx_baseline = (phase < -30) & (phase > -100)
+        if idx_baseline.sum() > 0:
+            bad_baseline = (
+                np.abs(
+                    tab_lc["flux"].data.astype("<f4")
+                    / (
+                        tab_lc["flux_err"].data.astype("<f4")
+                        * tab_lc["err_scale"].data.astype("<f4")
+                    )
+                )
+                > 10
+            ) & idx_baseline
+
+        for _fcqfid in np.unique(tab_lc["fcqfid"].data):
+            idx_fcqfid = tab_lc["fcqfid"] == _fcqfid
+            # If there are baseline data in certain fields
+            if (idx_fcqfid & idx_baseline).sum() > 0:
+                # More than 50% bad points in a single fcqfID -> mask the entire field
+                if (bad_baseline & idx_fcqfid).sum() > 0.5 * (
+                    idx_fcqfid & idx_baseline
+                ).sum():
+                    mask &= ~idx_fcqfid
+                    print(
+                        f"{ztfid}: {(bad_baseline & idx_fcqfid).sum()} bad points ({(idx_fcqfid & bad_baseline).sum() / (idx_fcqfid & idx_baseline).sum() * 100:.1f}%) in {_fcqfid}: mask the field"
+                    )
+                # Normal random outliers -> mask bad points
+                else:
+                    mask &= ~(bad_baseline & idx_fcqfid)
+
         data = tab_lc[mask]
 
         flux = data["flux"].data.astype("<f4")
@@ -653,5 +660,3 @@ class ZTFLib(SNLightCurveLib):
         )
         self.post_sample = post_sample
         self.decode_post_sample()
-
-
