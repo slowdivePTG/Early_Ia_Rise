@@ -110,58 +110,31 @@ def show_kde_posterior(
     param: str,
     ax: plt.Axes | list[plt.Axes],
     x_range=None,
-    show_prior=False,
     **kwargs,
 ):
     import numpy as np
     import seaborn as sns
 
-    post_sample = lib.post_sample.copy()
-    if show_prior:
-        assert lib.prior_sample is not None, (
-            "Prior sample is not available in the library."
-        )
-        prior_sample = lib.prior_sample.copy()
-    else:
-        prior_sample = None
+    sample = lib.post_sample.copy()
 
-    for sample in [post_sample, prior_sample]:
-        if sample is None:
-            continue
+    for k in range(len(np.unique(lib.idx_filt))):
+        sample[f"mean_alpha_flt{k + 1}"] = sample["mean_alpha_0"][..., k]
+        sample[f"sigma_alpha_flt{k + 1}"] = sample["sigma_alpha_0"][..., k]
+        sample[f"mean_log_Aprime_flt{k + 1}"] = sample["mean_log_Aprime"][..., k]
+        sample[f"sigma_log_Aprime_flt{k + 1}"] = sample["sigma_log_Aprime"][..., k]
 
-        for k in range(len(np.unique(lib.idx_filt))):
-            sample[f"mean_alpha_flt{k + 1}"] = sample["mean_alpha_0"][..., k]
-            sample[f"sigma_alpha_flt{k + 1}"] = sample["sigma_alpha_0"][..., k]
-            sample[f"mean_log_Aprime_flt{k + 1}"] = sample["mean_log_Aprime"][..., k]
-            sample[f"sigma_log_Aprime_flt{k + 1}"] = sample["sigma_log_Aprime"][..., k]
-
-    # Flatten the xarray DataArray to 1D array for seaborn
-    param_post = post_sample[param].values.flatten()
+    param_1d = sample[param].values.flatten()
     if x_range is not None:
-        param_post = param_post[(param_post >= x_range[0]) & (param_post <= x_range[1])]
+        param_1d = param_1d[(param_1d >= x_range[0]) & (param_1d <= x_range[1])]
 
-    if show_prior:
-        param_prior = prior_sample[param].values.flatten()
-        if x_range is not None:
-            param_prior = param_prior[
-                (param_prior >= x_range[0]) & (param_prior <= x_range[1])
-            ]
-
-    # Check if param_post is empty after filtering
-    if len(param_post) == 0:
+    if len(param_1d) == 0:
         print(f"Warning: No data for parameter '{param}' in range {x_range}")
         return
 
     bw_adjust = kwargs.get("bw_adjust", 1)
     params = dict(fill=True, alpha=0.25, lw=2, **kwargs)
-    params_prior = dict(
-        alpha=0.75, lw=2, linestyle="--", color=kwargs.get("color", "0.5")
-    )
 
-    if show_prior:
-        sns.kdeplot(x=param_prior, ax=ax, bw_adjust=bw_adjust, **params_prior)
-
-    sns.kdeplot(x=param_post, ax=ax, bw_adjust=bw_adjust, **params)
+    sns.kdeplot(x=param_1d, ax=ax, bw_adjust=bw_adjust, **params)
     ax.set_xlim(x_range)
     ax.set_ylabel("")
 
@@ -342,67 +315,6 @@ def show_color_value_comparison(mock_libs, colors, labels, truths=None, ax=None)
 
     ax[0].set_xlabel(r"$\mu_{\alpha_g - \alpha_r}$")
     ax[1].set_xlabel(r"$\sigma_{\alpha_g - \alpha_r}$")
-
-    return ax
-
-
-def show_corr_prior_posterior(mock_libs, colors, labels, truths=None):
-    n_lib = len(mock_libs)
-
-    fix, ax = plt.subplots(
-        n_lib,
-        4,
-        figsize=(14, n_lib * 3 - (n_lib - 1) * 0.8),
-        constrained_layout=True,
-        sharey="col",
-        sharex="col",
-    )
-
-    if truths is not None:
-        for j in range(4):
-            if truths[j] is not None:
-                for k in range(n_lib):
-                    _ax = ax[k, j]
-                    _ax.axvline(
-                        truths[j],
-                        color="0.5",
-                        linestyle=":",
-                        lw=5,
-                        alpha=0.5,
-                        zorder=-1,
-                    )
-
-    params = [
-        "corr_t_rise_alpha_flt2",
-        "corr_t_rise_log_Aprime_flt2",
-        "corr_alpha_log_Aprime_flt2",
-        "corr_alpha_flt1_flt2",
-    ]
-    for k in range(n_lib):
-        mock_lib = mock_libs[k]
-        color = colors[k]
-        label = labels[k]
-        for i, param in enumerate(params):
-            show_kde_posterior(
-                mock_lib,
-                param=param,
-                ax=ax[k, i],
-                x_range=(-1, 1),
-                color=color,
-                label=label,
-                show_prior=True,
-            )
-        for _ax in ax[k, 1:]:
-            _ax.set_ylabel("")
-        ax[k, 0].set_ylabel(r"$\mathrm{Density}$")
-        ax[k, -1].legend(frameon=False)
-
-    ax[-1, 0].set_xlabel(r"$\rho({t_\mathrm{rise}, \alpha_r})$")
-    # ax[-1, 1].set_xlabel(r"$\rho({t_\mathrm{rise}, \alpha_g - \alpha_r})$")
-    ax[-1, 1].set_xlabel(r"$\rho({t_\mathrm{rise}, \ln A_r})$")
-    ax[-1, 2].set_xlabel(r"$\rho(\alpha_r, \ln A_r)$")
-    ax[-1, 3].set_xlabel(r"$\rho(\alpha_r, \alpha_g)$")
-
     return ax
 
 

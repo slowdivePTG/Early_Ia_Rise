@@ -67,8 +67,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_lc",
         type=int,
-        default=100,
-        help="Number of mock light curves to simulate (default: 100)",
+        default=None,
+        help="Number of mock light curves to use (default: all available)",
     )
     parser.add_argument(
         "--early_threshold",
@@ -112,6 +112,11 @@ if __name__ == "__main__":
         type=int,
         default=4,
         help="Number of devices for parallel processing (default: local device count)",
+    )
+    parser.add_argument(
+        "--early_coverage",
+        action="store_true",
+        help="Only fit light curves that pass the early-time coverage cut",
     )
 
     args = parser.parse_args()
@@ -159,6 +164,7 @@ if __name__ == "__main__":
             sampling_model=args.sampling_model,
             prior_type=args.prior_type.lower(),
             true_param_dependence=args.true_param_dependence,
+            early_coverage=args.early_coverage,
         )
 
         # Align result directory with input directory structure that may include param dependence

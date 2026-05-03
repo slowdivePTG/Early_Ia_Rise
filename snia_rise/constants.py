@@ -14,7 +14,7 @@ instead to ensure consistency across the codebase.
 from typing import Final
 
 # Pivot time for the power-law rise (the typical time to reach ~40% of the maximum flux)
-EPS: Final[float] = 1e-10
+EPS: Final[float] = 1e-6
 T_PIVOT: Final[float] = 8.0
 
 __all__ = ["T_PIVOT", "EPS"]

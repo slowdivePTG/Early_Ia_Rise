@@ -9,7 +9,28 @@ import pandas as pd
 import xarray as xr
 
 from .._utils import plt
+from ..constants import EPS
 from ..model.lightcurve import SNLightCurveLib
+
+
+def _count_nights(phase, mask, bin_width=0.5):
+    """Count distinct observing nights within a phase mask.
+
+    Groups consecutive observations within `bin_width` phase days of the
+    earliest ungrouped point, matching the sliding-window algorithm used
+    by ``data_binning`` for ZTF data.
+    """
+    p = np.sort(phase[mask])
+    if len(p) == 0:
+        return 0
+    n, i = 0, 0
+    while i < len(p):
+        n += 1
+        limit = p[i] + bin_width
+        i += 1
+        while i < len(p) and p[i] < limit:
+            i += 1
+    return n
 
 
 class RedbackLightCurveLib(SNLightCurveLib):
@@ -26,6 +47,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         sampling_model: str = "hierarchical",
         prior_type: str = "uniform",
         true_param_dependence: str | None = None,
+        early_coverage: bool = False,
     ) -> None:
         if (true_param_dependence is not None) and ("power_law" in true_model):
             file_dir = Path(f"./data/mock/{true_model}_{true_param_dependence}")
@@ -34,6 +56,17 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
         peak_files = sorted(glob.glob(str(Path(file_dir) / "lc_peak*.csv")))
         params_file = file_dir / "simulated_lc_params.csv"
+
+        # Filter by early_coverage flag if requested
+        keep_idx = None
+        if early_coverage and os.path.exists(params_file):
+            params_meta = pd.read_csv(params_file)
+            if "early_coverage" in params_meta.columns:
+                keep_idx = np.where(params_meta["early_coverage"] == 1)[0]
+                peak_files = [peak_files[k] for k in keep_idx if k < len(peak_files)]
+                print(
+                    f"Filtered to {len(peak_files)} light curves with early_coverage=True"
+                )
 
         post_sample_dir = Path(file_dir) / f"{model}_frac{int(early_threshold * 100)}"
         if sampling_model in ["hierarchical_trise", "unpooled", "pooled"]:
@@ -68,13 +101,16 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 )
             )
             idx = lc_peak["flux"].values >= 5 * lc_peak["flux_err"].values
-            phase = lc_peak["phase"].values[idx]
-            flux = lc_peak["flux"].values[idx]
-            early_cut = flux < early_threshold * 100
-            if np.sum(early_cut) > 0:
-                idx_early = lc_peak["phase"] < phase[early_cut][-1] + 0.5
-            else:
-                idx_early = lc_peak["phase"] < phase[-1]
+            idx_early = lc_peak["phase"] < 0
+            if np.sum(idx) > 0:
+                phase = lc_peak["phase"].values[idx]
+                flux = lc_peak["flux"].values[idx]
+                early_cut = flux < early_threshold * 100
+                if np.sum(early_cut) > 0:
+                    idx_early = lc_peak["phase"] < phase[early_cut][-1] + 0.5
+                else:
+                    idx_early = lc_peak["phase"] < phase[0]
+
             lc_early_lib.append({key: item[idx_early] for key, item in lc_peak.items()})
 
         if not os.path.exists(post_sample_full_file):
@@ -84,7 +120,10 @@ class RedbackLightCurveLib(SNLightCurveLib):
             post_sample = xr.load_dataset(post_sample_full_file)
 
         if os.path.exists(params_file):
-            params_true = pd.read_csv(params_file)[:n_lc].to_dict(orient="list")
+            params_df = pd.read_csv(params_file)
+            if keep_idx is not None:
+                params_df = params_df.iloc[keep_idx]
+            params_true = params_df[:n_lc].to_dict(orient="list")
         else:
             print("No true parameters file found.")
             params_true = None
@@ -96,6 +135,16 @@ class RedbackLightCurveLib(SNLightCurveLib):
         )
 
         self.params_true = params_true
+
+        # If SNe with no observations were removed from the library,
+        # slice params_true to match the surviving objects.
+        if self.params_true is not None and hasattr(self, '_obs_valid_idx'):
+            vi = self._obs_valid_idx
+            if len(vi) < len(next(iter(self.params_true.values()))):
+                self.params_true = {
+                    k: [v[i] for i in vi]
+                    for k, v in self.params_true.items()
+                }
 
         self.post_sample = post_sample
         self.decode_post_sample()
@@ -140,12 +189,11 @@ class RedbackLightCurveLib(SNLightCurveLib):
         logging.getLogger("redback").setLevel(logging.WARNING)
 
         # For the power-law rise models
-        T0_MJD_TRANSIENT = 59050.0
         PEAK_LUMINOSITY = 2e28  # intrinsic peak luminosity (erg/s/Hz)
         from ..constants import T_PIVOT
 
         # Sample the population parameters using numpy.random
-        num_tot = n_lc * 20  # oversample to account for non-detections
+        num_tot = n_lc * 10  # oversample to account for non-detections
 
         np.random.seed(num_tot + np.sum([ord(c) for c in model]))
 
@@ -155,31 +203,31 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
         if "power_law" in model:
             # Add the required t0_mjd_transient parameter
-            # This sets when each transient begins (in MJD)
-            params_sim["t0_mjd_transient"] = np.full(num_tot, T0_MJD_TRANSIENT)
+            # Each transient gets a random MJD to average over ZTF cadence
+            params_sim["t0_mjd_transient"] = np.random.uniform(58200, 59150, num_tot)
             params_sim["ra"] = np.random.uniform(0, 360, num_tot)
             params_sim["dec"] = np.random.uniform(-10, 70, num_tot)
 
             # True hyper-parameters for the power-law rise model
             params_true = dict(
-                mean_alpha=2.1,
+                mean_alpha=2.0,
                 sigma_alpha=0.3,
-                mean_t_rise=19.0,
+                mean_t_rise=18.5,
                 sigma_t_rise=1.5,
             )
 
             # Support independent or correlated sampling for (t_rise, alpha_0, log_Aprime)
             # Correlated sampling is enabled when sampling_mode == "correlated"
             # Fixed correlation matrix (order: [t_rise, alpha_0, log_Aprime]):
-            # corr(t_rise, alpha_0) = +0.5, corr(t_rise, log_Aprime) = -0.5, corr(alpha_0, log_Aprime) = 0.0
+            # corr(t_rise, alpha_0) = +0.3, corr(t_rise, log_Aprime) = -0.3, corr(alpha_0, log_Aprime) = 0.0
             corr_matrix = (
                 None
                 if param_dependence == "independent"
                 else np.array(
                     [
-                        [1.0, 0.5, -0.5],
-                        [0.5, 1.0, 0.0],
-                        [-0.5, 0.0, 1.0],
+                        [1.0, 0.3, -0.3],
+                        [0.3, 1.0, 0.0],
+                        [-0.3, 0.0, 1.0],
                     ]
                 )
             )
@@ -193,7 +241,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
                     np.random.normal(
                         params_true["mean_alpha"], params_true["sigma_alpha"], num_tot
                     ),
-                    1.05,
+                    1.0 + EPS,
                     5.0,
                 )
                 params_sim["peak_luminosity"] = np.full(num_tot, PEAK_LUMINOSITY)
@@ -270,26 +318,10 @@ class RedbackLightCurveLib(SNLightCurveLib):
                     * (1 + np.log(params_sim["t_rise"] / T_PIVOT))
                 )
 
-            elif model == "power_law_bump":
-                # Fix baseline rise parameters to isolate bump-induced fitting systematics
-                params_sim["t_rise"] = np.full(num_tot, 19.0)
-                params_sim["alpha_0"] = np.full(num_tot, 2.1)
-                params_sim["log_Aprime"] = np.full(num_tot, np.log(40.0))
-
-                # Gaussian bump amplitude in normalized flux units (peak=100)
-                params_sim["amp"] = np.random.uniform(2.0, 5.0, num_tot)
-
-                # Sample bump width via broad FWHM prior, then derive sigma and center
-                params_sim["t_fwhm"] = np.random.uniform(1.0, 7.0, num_tot)
-                params_sim["t_sigma"] = params_sim["t_fwhm"] / (
-                    2.0 * np.sqrt(2.0 * np.log(2.0))
-                )
-                params_sim["t_cen"] = 2.0 * params_sim["t_sigma"]
-
             elif model == "broken_power_law":
-                # Compuate alpha_1 based on other parameters
-                params_sim["t_b"] = np.random.uniform(20, 25, num_tot)
                 params_sim["s"] = np.random.uniform(0.5, 1.5, num_tot)
+                ratio = np.random.uniform(1.0, 1.5, num_tot)
+                params_sim["t_b"] = params_sim["t_rise"] / ratio
 
                 alpha_v_1 = params_sim["alpha_0"] / 2 - 1
 
@@ -314,49 +346,38 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 # Solve for alpha_v_2 for each simulation
                 alpha_v_2 = np.zeros(num_tot)
 
-                # Target ratio is t_rise / t_b
+                # Target ratio is t_rise / t_b (already = ratio drawn above)
                 target_ratios = params_sim["t_rise"] / params_sim["t_b"]
 
                 for i in range(num_tot):
-                    av1 = alpha_v_1[i]
-                    s_val = params_sim["s"][i]
-                    ratio = target_ratios[i]
-
-                    # Constraints: (1+av1)/(1+av2) < 0
-                    # alpha_v_1 ~ 0 (-0.5 to 0.5).
-                    # => alpha_v_2 < -1
-                    try:
-                        # Looking for a solution somewhat far from alpha_v_1 to avoid singularity
-                        sol = brentq(
-                            _peak_equation,
-                            av1 - 5,
-                            -1.01,
-                            args=(av1, s_val, ratio),
-                        )
-                    except ValueError:
-                        # Fallback or wider search if root is not bracketed in standard decay range
-                        # av2s = np.linspace(av1 - 5, -1.01, 1000)
-                        # func_vals = [
-                        #     _peak_equation(av2, av1, s_val, ratio) for av2 in av2s
-                        # ]
-
-                        # plt.plot(av2s, func_vals)
-                        # plt.axhline(0, color="k", ls=":")
-                        # plt.title(f"Failed to bracket root for index {i}")
-                        # plt.xlabel("alpha_v_2")
-                        # plt.ylabel("Function Value")
-                        # plt.show()
-                        # raise RuntimeError(
-                        #     f"Failed to find root for alpha_v_2 at index {i}: av1={av1}, s={s_val}, ratio={ratio}"
-                        # )
-                        print(
-                            f"Warning: Failed to find root for alpha_v_2 at index {i}: av1={av1}, s={s_val}, ratio={ratio}"
-                        )
-                        continue
-
+                    av1_i = alpha_v_1[i]
+                    s_i = params_sim["s"][i]
+                    ratio_i = target_ratios[i]
+                    sol = brentq(
+                        _peak_equation,
+                        av1_i - 5,
+                        -1.01,
+                        args=(av1_i, s_i, ratio_i),
+                    )
                     alpha_v_2[i] = sol
 
                 params_sim["alpha_1"] = alpha_v_1 - alpha_v_2
+
+            elif model == "power_law_bump":
+                # Fix baseline rise parameters to isolate bump-induced fitting systematics
+                params_sim["t_rise"] = np.full(num_tot, 18.5)
+                params_sim["alpha_0"] = np.full(num_tot, 2.0)
+                params_sim["log_Aprime"] = np.full(num_tot, np.log(40.0))
+
+                # Gaussian bump amplitude in normalized flux units (peak=100)
+                params_sim["amp"] = np.random.uniform(2.0, 5.0, num_tot)
+
+                # Sample bump width via broad FWHM prior, then derive sigma and center
+                params_sim["t_fwhm"] = np.random.uniform(1.0, 7.0, num_tot)
+                params_sim["t_sigma"] = params_sim["t_fwhm"] / (
+                    2.0 * np.sqrt(2.0 * np.log(2.0))
+                )
+                params_sim["t_cen"] = 2.0 * params_sim["t_sigma"]
 
         elif (
             "turtls" in model.lower()
@@ -468,6 +489,9 @@ class RedbackLightCurveLib(SNLightCurveLib):
             if len(params_valid_det) >= n_lc:
                 break
 
+            early_cov = None
+            n_obs_early_val = None
+
             if "power_law" in model:
                 if model == "power_law":
                     sed_model = power_law_rise_flat_sed
@@ -478,12 +502,14 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 elif model == "broken_power_law":
                     sed_model = broken_power_law_rise_flat_sed
 
-                lc_peak = cls._simulate_single_light_curve_redback(
+                result = cls._simulate_single_light_curve_redback(
                     sed_model=sed_model, params=single_params
                 )
 
-                if lc_peak is None:
+                if result is None:
                     continue
+
+                lc_peak, early_cov, n_obs_early_val = result
 
                 print(
                     f"Simulating transient {idx_obs + 1}/{n_lc} ({i + 1} attempts)..."
@@ -507,6 +533,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
                 if lc_peak is None:
                     continue
+
+                early_cov = True
 
             # Reset the plot style after Redback's modification
             set_plot_style()
@@ -535,6 +563,10 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             lc_peak_lib[idx_obs] = lc_peak
 
+            single_params["early_coverage"] = int(early_cov)
+            single_params["n_obs_early"] = (
+                n_obs_early_val if n_obs_early_val is not None else -1
+            )
             params_valid_det.append(single_params)
 
             if ((idx_obs + 1) % 50 == 0) and "power_law" in model:
@@ -543,7 +575,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 )
                 print(f"{'=' * 40}")
                 print(
-                    f"Current t_rise = {np.mean(params_valid_det_df['t_rise']):.1f} +/- {np.std(params_valid_det_df['t_rise']):.1f}"
+                    f"Current t_rise = {np.mean(params_valid_det_df['t_rise']):.2f} +/- {np.std(params_valid_det_df['t_rise']):.2f}"
                 )
                 print(
                     f"Current alpha = {np.mean(params_valid_det_df['alpha_0']):.2f} +/- {np.std(params_valid_det_df['alpha_0']):.2f}"
@@ -651,9 +683,20 @@ class RedbackLightCurveLib(SNLightCurveLib):
     @classmethod
     def _simulate_single_light_curve_redback(
         cls, sed_model, params: dict
-    ) -> pd.DataFrame | None:
+    ) -> tuple[pd.DataFrame, bool, int] | None:
         """
         Simulate a single light curve using Redback.
+
+        Returns
+        -------
+        (lc_peak, early_coverage, n_obs_early) | None
+            lc_peak: DataFrame with pre-peak photometry.
+            early_coverage: True if the transient passes the full
+                early-time coverage criteria (baseline + early).
+            n_obs_early: minimum of distinct high-SNR early-phase nights
+                across g and r bands.
+            None: if the loose save gate fails (pre/post-peak nights
+                or both bands not observed).
         """
         from redback.simulate_transients import SimulateOpticalTransient
 
@@ -682,43 +725,45 @@ class RedbackLightCurveLib(SNLightCurveLib):
         obs = sim.observations
 
         # only need g and r bands
-        idx_g = obs["band"] == "ztfg"
-        idx_r = obs["band"] == "ztfr"
-        obs = obs[idx_g | idx_r].reset_index(drop=True)
-        idx_snr = obs["flux(erg/cm2/s)"] / obs["flux_error"] > 5
+        obs = obs[(obs["band"] == "ztfg") | (obs["band"] == "ztfr")].reset_index(
+            drop=True
+        )
         obs["phase"] = (obs["time"] - params["t0_mjd_transient"]) / (
             1 + params["redshift"]
         ) - params["t_rise"]
 
-        idx_early = (obs["phase"] < -10) & (obs["phase"] > -25)
-        idx_rise = (obs["phase"] >= -10) & (obs["phase"] < 0)
-        idx_fall = (obs["phase"] >= 0) & (obs["phase"] < 10)
-        idx_baseline = (obs["phase"] < -25) & (obs["phase"] > -100)
+        phase = obs["phase"].values
+        idx_snr = obs["flux(erg/cm2/s)"] / obs["flux_error"] > 5
 
+        # Loose save gate: at least 2 distinct nights per filter before & after peak
+        idx_g = obs["band"] == "ztfg"
+        idx_r = obs["band"] == "ztfr"
+        idx_prepeak = phase < 0
+        idx_postpeak = phase >= 0
         if (
-            # >= 2 high-SNR points in both g and r band during early phase
-            (
-                (np.sum(idx_snr & idx_early & idx_g) < 2)
-                or (np.sum(idx_snr & idx_early & idx_r) < 2)
-            )
-            or
-            # >= 2 high-SNR points during rise and fall in at least one band
-            (
-                np.sum(idx_snr & idx_rise & idx_g) < 2
-                or np.sum(idx_snr & idx_fall & idx_g) < 2
-            )
-            and (
-                np.sum(idx_snr & idx_rise & idx_r) < 2
-                or np.sum(idx_snr & idx_fall & idx_r) < 2
-            )
-            # >= 10 baseline points in both bands
-            or (np.sum(idx_baseline & idx_g) < 10)
-            or (np.sum(idx_baseline & idx_r) < 10)
+            _count_nights(phase, idx_prepeak & idx_snr) < 2
+            or _count_nights(phase, idx_postpeak & idx_snr) < 2
+            or np.sum(idx_g & idx_snr) == 0
+            or np.sum(idx_r & idx_snr) == 0
         ):
             return None
 
+        # Full early-coverage flag (the strict detection-quality criteria)
+        idx_early = (phase < -10) & (phase > -25)
+        idx_baseline = (phase < -25) & (phase > -100)
+
+        n_obs_early = min(
+            _count_nights(phase, idx_snr & idx_early & idx_g),
+            _count_nights(phase, idx_snr & idx_early & idx_r),
+        )
+
+        early_coverage = (
+            n_obs_early >= 2
+            and _count_nights(phase, idx_baseline & idx_g) >= 10
+            and _count_nights(phase, idx_baseline & idx_r) >= 10
+        )
+
         # Generate early light curve up to early_threshold of peak flux
-        phase = obs["phase"].values
         flux_mock = obs["flux(erg/cm2/s)"].values
         flux_err_mock = obs["flux_error"].values
 
@@ -752,7 +797,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         )
         lc_peak.reset_index(drop=True, inplace=True)
 
-        return lc_peak
+        return lc_peak, early_coverage, n_obs_early
 
     @classmethod
     @staticmethod

@@ -493,6 +493,7 @@ class SNLightCurveLib(object):
                 f"Warning: {len(self.lc_library) - n_obj} SNe have no data within the epoch range. Re-indexing idx_obj..."
             )
             valid_idx = np.unique(self.idx_obj)
+            self._obs_valid_idx = valid_idx
             self.lc_library = [self.lc_library[i] for i in valid_idx]
             if len(self.ztfid_lib) > 0:
                 self.ztfid_lib = [self.ztfid_lib[i] for i in valid_idx]
@@ -845,6 +846,12 @@ class SNLightCurveLib(object):
         )
 
         obj_idx = np.where(mask)[0]
+
+        if hasattr(self, 'params_true') and self.params_true is not None:
+            new_lib.params_true = {
+                k: [v[i] for i in obj_idx]
+                for k, v in self.params_true.items()
+            }
 
         # Determine the original fcqfid and filt indices that are kept
         kept_fcqfid = []
@@ -1753,7 +1760,7 @@ class SNLightCurveLib(object):
 
     def aggregate_samples(self):
         """
-        Aggregate the prior and posterior samples from individual light curves into a single
+        Aggregate the posterior samples from individual light curves into a single
         xarray.Dataset, creating a data structure comparable to the hierarchical model output.
         This method is intended for use with unpooled models where each light curve
         is sampled independently.
@@ -1871,11 +1878,6 @@ class SNLightCurveLib(object):
         if aggregated_post is not None:
             self.post_sample = self.decode_sample(aggregated_post)
 
-        # Aggregate priors
-        aggregated_prior = _aggregate_samples("prior_sample")
-        if aggregated_prior is not None:
-            self.prior_sample = self.decode_sample(aggregated_prior)
-
     def plot_corner(
         self,
         save: bool = False,
@@ -1935,7 +1937,7 @@ class SNLightCurveLib(object):
             **kwargs,
         )
 
-    def compare_true_vs_fitted_params(self, band: str = "g"):
+    def compare_true_vs_fitted_params(self, band: str = "r"):
         """
         Compare true vs fitted parameters for a specific band.
 
