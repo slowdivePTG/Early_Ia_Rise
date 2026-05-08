@@ -561,7 +561,7 @@ class SNLightCurveLib(object):
                             )
                         ) ** 0.5
 
-            sample = sample.drop_vars(["Corr", "Sigma"])
+            sample = sample.drop_vars(["Sigma"])
 
         # Post-calculate population-level parameters if not sampled directly
         if "mean_t_rise" not in sample:
@@ -847,10 +847,9 @@ class SNLightCurveLib(object):
 
         obj_idx = np.where(mask)[0]
 
-        if hasattr(self, 'params_true') and self.params_true is not None:
+        if hasattr(self, "params_true") and self.params_true is not None:
             new_lib.params_true = {
-                k: [v[i] for i in obj_idx]
-                for k, v in self.params_true.items()
+                k: [v[i] for i in obj_idx] for k, v in self.params_true.items()
             }
 
         # Determine the original fcqfid and filt indices that are kept
@@ -1231,7 +1230,6 @@ class SNLightCurveLib(object):
         num_chains: int = 2,
         thinning: int = 1,
         random_seed: int = 11,
-        sample_prior: bool = False,
         prior_config: dict = {},
         nuts_params: dict = {},
         debug_save: bool = False,
@@ -1253,8 +1251,6 @@ class SNLightCurveLib(object):
             Thinning factor for MCMC samples (default: 1).
         random_seed : int, optional
             Random seed for reproducibility (default: 11).
-        sample_prior : bool, optional
-            Whether to sample from the prior distribution only (default: False).
         prior_pred_samples : int, optional
             Number of samples to draw from the prior predictive distribution (default: 500).
         prior_config : dict, optional
@@ -1281,7 +1277,6 @@ class SNLightCurveLib(object):
             "pooled",
             "unpooled",
             "hierarchical",
-            "hierarchical_trise",
             "hierarchical_mvn",
         ], f"Invalid model structure: {model_structure}"
 
@@ -1295,18 +1290,20 @@ class SNLightCurveLib(object):
             print("Using hierarchical model for sampling...")
             prior_config["correlation_structure"] = "independent"
             kernel = hierarchical_model
-        elif model_structure == "hierarchical_trise":
-            print("Using hierarchical t_rise model for sampling...")
-            prior_config["correlation_structure"] = "trise_only"
-            kernel = hierarchical_model
         elif model_structure == "hierarchical_mvn":
             print("Using hierarchical mvn model for sampling...")
             prior_config["correlation_structure"] = "mvn"
             kernel = hierarchical_model
         else:
             raise ValueError(
-                "Invalid model structure. Options: 'pooled', 'unpooled', 'hierarchical' (as well as '_mvn' and '_trise')"
+                "Invalid model structure. Options: 'pooled', 'unpooled', 'hierarchical' (as well as '_mvn')"
             )
+
+        from .priors import summarize_priors
+
+        n_filt = len(np.unique(self.idx_filt))
+        n_obj = len(np.unique(self.idx_obj))
+        summarize_priors(model_structure, prior_config, n_filt, n_obj)
 
         running_params = {
             "t": self.phase,
@@ -1325,32 +1322,6 @@ class SNLightCurveLib(object):
 
         platform = jax.default_backend()
         chain_method = get_recommended_chain_method(platform, num_chains)
-
-        if sample_prior:
-            if self.prior_sample is None:
-                print("Sampling from prior...")
-                prior_pred = infer.Predictive(
-                    kernel, num_samples=num_samples * num_chains
-                )(
-                    rng_key,
-                    **running_params,
-                    prior_config=prior_config,
-                )
-
-                coords, dims = extract_coords_dims_from_model(
-                    kernel,
-                    model_kwargs={**running_params, "prior_config": prior_config},
-                    num_samples=1,
-                )
-
-                self.prior_sample = az.from_numpyro(
-                    prior=prior_pred, coords=coords, dims=dims
-                ).prior.astype("float32")
-
-                del prior_pred
-
-            self.decode_prior_sample()
-            return
 
         if model_structure == "unpooled":
             self._sampling_unpooled(
@@ -1441,7 +1412,7 @@ class SNLightCurveLib(object):
             Dataset with dimensions (sample, [filt]) containing:
             - t_rise : (sample,) — rise time, clipped at EPS
             - alpha_0 : (sample, filt) — power-law index per filter,
-              clipped at 1+EPS.  Not present for hierarchical_trise.
+              clipped at 1+EPS.
 
         Raises
         ------
@@ -1452,7 +1423,6 @@ class SNLightCurveLib(object):
         -----
         - For hierarchical (independent): draws from MVN with diagonal covariance
         - For hierarchical_mvn: draws from full MVN using the posterior covariance
-        - For hierarchical_trise: draws only t_rise from 1-D Normal; alpha_0 omitted
         """
         if self.post_sample is None:
             raise ValueError("No posterior samples found. Run sampling() first.")
@@ -1466,12 +1436,6 @@ class SNLightCurveLib(object):
         # Determine correlation structure
         if self.model_structure == "hierarchical_mvn":
             correlation_structure = "mvn"
-        elif self.model_structure == "hierarchical_trise":
-            correlation_structure = "trise_only"
-            print(
-                "Warning: hierarchical_trise has no population-level alpha_0. "
-                "Only t_rise posterior predictives will be generated."
-            )
         else:
             correlation_structure = "independent"
 
@@ -1492,74 +1456,57 @@ class SNLightCurveLib(object):
         else:
             sigma_t_rise = self.post_sample["t_rise"].std(dim="obj", ddof=1).values
 
-        # Extract population mean and std for alpha_0 (not for trise_only)
-        if correlation_structure != "trise_only":
-            if "mean_alpha_0" in self.post_sample:
-                mean_alpha_0 = self.post_sample["mean_alpha_0"].values
-            else:
-                mean_alpha_0 = self.post_sample["alpha_0"].mean(dim="obj").values
+        # Extract population mean and std for alpha_0
+        if "mean_alpha_0" in self.post_sample:
+            mean_alpha_0 = self.post_sample["mean_alpha_0"].values
+        else:
+            mean_alpha_0 = self.post_sample["alpha_0"].mean(dim="obj").values
 
-            if "sigma_alpha_0" in self.post_sample:
-                sigma_alpha_0 = self.post_sample["sigma_alpha_0"].values
-            else:
-                sigma_alpha_0 = (
-                    self.post_sample["alpha_0"].std(dim="obj", ddof=1).values
-                )
+        if "sigma_alpha_0" in self.post_sample:
+            sigma_alpha_0 = self.post_sample["sigma_alpha_0"].values
+        else:
+            sigma_alpha_0 = self.post_sample["alpha_0"].std(dim="obj", ddof=1).values
 
         rng = np.random.default_rng(rng_seed)
+        d = 1 + n_filt
+        mu = np.concatenate(
+            [mean_t_rise[..., None], mean_alpha_0], axis=-1
+        )  # (chain, draw, d)
+        sigma = np.concatenate(
+            [sigma_t_rise[..., None], sigma_alpha_0], axis=-1
+        )  # (chain, draw, d)
 
-        if correlation_structure == "trise_only":
-            # Flatten chain × draw → n_post, randomly select n_total
-            mu_flat = mean_t_rise.ravel()  # (n_post,)
-            sigma_flat = sigma_t_rise.ravel()  # (n_post,)
-            n_post = len(mu_flat)
-            idx = rng.choice(n_post, size=n_total, replace=n_total > n_post)
-            z = rng.normal(size=n_total)
-            t_rise_pp = np.clip(mu_flat[idx] + sigma_flat[idx] * z, EPS, None).astype(
-                np.float32
-            )
-            alpha_0_pp = None
+        # Build covariance (chain, draw, d, d)
+        if correlation_structure == "independent":
+            cov = np.zeros((n_chain, n_draw, d, d))
+            cov[:, :, range(d), range(d)] = sigma**2
 
-        else:
-            d = 1 + n_filt
-            mu = np.concatenate(
-                [mean_t_rise[..., None], mean_alpha_0], axis=-1
-            )  # (chain, draw, d)
-            sigma = np.concatenate(
-                [sigma_t_rise[..., None], sigma_alpha_0], axis=-1
-            )  # (chain, draw, d)
+        else:  # mvn
+            if "Sigma" in self.post_sample:
+                raw = self.post_sample["Sigma"].values
+                cov = raw[:, :, :d, :d]
 
-            # Build covariance (chain, draw, d, d)
-            if correlation_structure == "independent":
-                cov = np.zeros((n_chain, n_draw, d, d))
-                cov[:, :, range(d), range(d)] = sigma**2
+            elif "Corr" in self.post_sample:
+                raw = self.post_sample["Corr"].values
+                corr = raw[:, :, :d, :d]
+                cov = sigma[:, :, None, :] * sigma[:, :, :, None] * corr
 
-            else:  # mvn
-                if "Sigma" in self.post_sample:
-                    raw = self.post_sample["Sigma"].values
-                    cov = raw[:, :, :d, :d]
-
-                elif "Corr" in self.post_sample:
-                    raw = self.post_sample["Corr"].values
-                    corr = raw[:, :, :d, :d]
-                    cov = sigma[:, :, None, :] * sigma[:, :, :, None] * corr
-
-                else:
-                    corr = np.broadcast_to(np.eye(d), (n_chain, n_draw, d, d)).copy()
-                    for j in range(n_filt):
-                        key = f"corr_t_rise_alpha_flt{j + 1}"
+            else:
+                corr = np.broadcast_to(np.eye(d), (n_chain, n_draw, d, d)).copy()
+                for j in range(n_filt):
+                    key = f"corr_t_rise_alpha_flt{j + 1}"
+                    if key in self.post_sample:
+                        v = self.post_sample[key].values
+                        corr[:, :, 0, j + 1] = v
+                        corr[:, :, j + 1, 0] = v
+                for i in range(n_filt):
+                    for j in range(i + 1, n_filt):
+                        key = f"corr_alpha_flt{i + 1}_flt{j + 1}"
                         if key in self.post_sample:
                             v = self.post_sample[key].values
-                            corr[:, :, 0, j + 1] = v
-                            corr[:, :, j + 1, 0] = v
-                    for i in range(n_filt):
-                        for j in range(i + 1, n_filt):
-                            key = f"corr_alpha_flt{i + 1}_flt{j + 1}"
-                            if key in self.post_sample:
-                                v = self.post_sample[key].values
-                                corr[:, :, i + 1, j + 1] = v
-                                corr[:, :, j + 1, i + 1] = v
-                    cov = sigma[:, :, None, :] * sigma[:, :, :, None] * corr
+                            corr[:, :, i + 1, j + 1] = v
+                            corr[:, :, j + 1, i + 1] = v
+                cov = sigma[:, :, None, :] * sigma[:, :, :, None] * corr
 
             # Flatten chain × draw → (n_post, d) and (n_post, d, d)
             n_post = n_chain * n_draw
@@ -1596,6 +1543,101 @@ class SNLightCurveLib(object):
             coords["filt"] = filt_coords
 
         return xr.Dataset(data_vars=data_vars, coords=coords)
+
+    def save_post_sample(self, file_path: str):
+        """
+        Save the posterior sample to a netCDF file with metadata attributes.
+
+        Parameters
+        ----------
+        file_path : str
+            Path for the output ``.nc`` file.
+        """
+        ds = xr.Dataset(self.post_sample)
+        ds.attrs["pop_prior"] = str(self.pop_prior)
+        ds.to_netcdf(file_path)
+        print(f"Saved posterior samples to: {file_path}")
+
+    def export_population_prior(
+        self, file_path: str, include_corr: bool = True, base_dir: str = None
+    ):
+        """
+        Export the population-level posterior as a YAML config file,
+        suitable for use as a population-informed prior via
+        ``--prior-config``.
+
+        Extracts chain-median values for the mean and sigma of each
+        population parameter.  If a full ``Corr`` matrix is present
+        in the posterior, it is exported as well.
+
+        Parameters
+        ----------
+        file_path : str
+            Filename for the output YAML file (e.g. ``"my_prior.yaml"``).
+        include_corr : bool
+            Whether to include the correlation matrix (default ``True``).
+        base_dir : str, optional
+            Base directory for ``config/`` subfolder.  When provided the
+            file is saved to ``{base_dir}/config/{file_path}``.  If
+            ``None``, *file_path* is used as-is.
+        """
+        import os
+
+        import yaml
+
+        if base_dir is not None:
+            out_dir = os.path.join(base_dir, "config")
+            os.makedirs(out_dir, exist_ok=True)
+            file_path = os.path.join(out_dir, file_path)
+
+        if self.post_sample is None:
+            raise ValueError("No posterior samples available to export.")
+
+        ps = self.post_sample
+        n_filt = ps.sizes.get("filt", 2)
+
+        pop = {}
+
+        # t_rise
+        if "mean_t_rise" in ps and "sigma_t_rise" in ps:
+            pop["t_rise"] = {
+                "mean": float(ps["mean_t_rise"].median()),
+                "sigma": float(ps["sigma_t_rise"].median()),
+            }
+
+        # alpha_0 (per filter)
+        if "mean_alpha_0" in ps and "sigma_alpha_0" in ps:
+            pop["alpha_0"] = {
+                "mean": ps["mean_alpha_0"]
+                .median(dim=("draw", "chain"))
+                .values.tolist(),
+                "sigma": ps["sigma_alpha_0"]
+                .median(dim=("draw", "chain"))
+                .values.tolist(),
+            }
+
+        # log_Aprime (per filter)
+        if "mean_log_Aprime" in ps and "sigma_log_Aprime" in ps:
+            pop["log_Aprime"] = {
+                "mean": ps["mean_log_Aprime"]
+                .median(dim=("draw", "chain"))
+                .values.tolist(),
+                "sigma": ps["sigma_log_Aprime"]
+                .median(dim=("draw", "chain"))
+                .values.tolist(),
+            }
+
+        # Correlation matrix
+        if include_corr and "Corr" in ps:
+            corr_med = ps["Corr"].median(dim=("draw", "chain")).values
+            pop["corr"] = corr_med.tolist()
+
+        config = {"population_priors": pop}
+
+        with open(file_path, "w") as f:
+            yaml.dump(config, f, default_flow_style=None, sort_keys=False)
+
+        print(f"Population prior config saved to {file_path}")
 
     def drop_bad_chains(
         self,
@@ -1929,6 +1971,7 @@ class SNLightCurveLib(object):
                         ("mean" in var or "sigma" in var or "corr" in var)
                         and "chain" in self.post_sample[var].dims
                         and "draw" in self.post_sample[var].dims
+                        and "Aprime" not in var
                     )
                 ]
             ),

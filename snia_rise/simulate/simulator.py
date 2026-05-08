@@ -48,6 +48,8 @@ class RedbackLightCurveLib(SNLightCurveLib):
         prior_type: str = "uniform",
         true_param_dependence: str | None = None,
         early_coverage: bool = False,
+        baseline_coverage: bool = False,
+        pop_prior: bool = False,
     ) -> None:
         if (true_param_dependence is not None) and ("power_law" in true_model):
             file_dir = Path(f"./data/mock/{true_model}_{true_param_dependence}")
@@ -57,19 +59,24 @@ class RedbackLightCurveLib(SNLightCurveLib):
         peak_files = sorted(glob.glob(str(Path(file_dir) / "lc_peak*.csv")))
         params_file = file_dir / "simulated_lc_params.csv"
 
-        # Filter by early_coverage flag if requested
+        # Filter by coverage flags if requested
         keep_idx = None
-        if early_coverage and os.path.exists(params_file):
+        if (early_coverage or baseline_coverage) and os.path.exists(params_file):
             params_meta = pd.read_csv(params_file)
-            if "early_coverage" in params_meta.columns:
-                keep_idx = np.where(params_meta["early_coverage"] == 1)[0]
-                peak_files = [peak_files[k] for k in keep_idx if k < len(peak_files)]
-                print(
-                    f"Filtered to {len(peak_files)} light curves with early_coverage=True"
-                )
+            mask = np.ones(len(params_meta), dtype=bool)
+            if early_coverage and "early_coverage" in params_meta.columns:
+                mask &= params_meta["early_coverage"].values == 1
+            if baseline_coverage and "baseline_coverage" in params_meta.columns:
+                mask &= params_meta["baseline_coverage"].values == 1
+            keep_idx = np.where(mask)[0]
+            peak_files = [peak_files[k] for k in keep_idx if k < len(peak_files)]
+            print(
+                f"Filtered to {len(peak_files)} light curves "
+                f"(early_coverage={early_coverage}, baseline_coverage={baseline_coverage})"
+            )
 
         post_sample_dir = Path(file_dir) / f"{model}_frac{int(early_threshold * 100)}"
-        if sampling_model in ["hierarchical_trise", "unpooled", "pooled"]:
+        if sampling_model in ["unpooled", "pooled"]:
             sampling_model_str = f"{sampling_model}_{prior_type.lower()}"
         else:
             sampling_model_str = sampling_model
@@ -77,12 +84,20 @@ class RedbackLightCurveLib(SNLightCurveLib):
             post_sample_dir / f"post_sample_{sampling_model_str}_{n_lc}.nc"
         )
 
+        if pop_prior:
+            post_sample_full_file = Path(
+                str(post_sample_full_file).replace(
+                    f"{sampling_model_str}_", f"{sampling_model_str}_pop_prior_"
+                )
+            )
+
         if n_lc is None:
             n_lc = len(peak_files)
         else:
             if len(peak_files) < n_lc:
                 raise ValueError(
-                    f"Insufficient light curve files in {file_dir}: found {len(peak_files)} simulated light curves, but {n_lc} are required."
+                    f"Insufficient light curve files in {file_dir}: found "
+                    f"{len(peak_files)} simulated light curves, but {n_lc} are required."
                 )
             peak_files = peak_files[:n_lc]
 
@@ -138,23 +153,18 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
         # If SNe with no observations were removed from the library,
         # slice params_true to match the surviving objects.
-        if self.params_true is not None and hasattr(self, '_obs_valid_idx'):
+        if self.params_true is not None and hasattr(self, "_obs_valid_idx"):
             vi = self._obs_valid_idx
             if len(vi) < len(next(iter(self.params_true.values()))):
                 self.params_true = {
-                    k: [v[i] for i in vi]
-                    for k, v in self.params_true.items()
+                    k: [v[i] for i in vi] for k, v in self.params_true.items()
                 }
 
         self.post_sample = post_sample
+        self.pop_prior = pop_prior
+        if self.post_sample is not None and "pop_prior" in self.post_sample.attrs:
+            self.pop_prior = self.post_sample.attrs["pop_prior"] == "True"
         self.decode_post_sample()
-
-        if self.post_sample is not None:
-            self.sampling(
-                sample_prior=True,
-                prior_config=dict(rise_model=model, prior_type=prior_type),
-            )
-            self.decode_prior_sample()
 
     @classmethod
     def simulate_mock_light_curve(
@@ -491,6 +501,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
 
             early_cov = None
             n_obs_early_val = None
+            base_cov = None
 
             if "power_law" in model:
                 if model == "power_law":
@@ -509,7 +520,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 if result is None:
                     continue
 
-                lc_peak, early_cov, n_obs_early_val = result
+                lc_peak, early_cov, n_obs_early_val, base_cov = result
 
                 print(
                     f"Simulating transient {idx_obs + 1}/{n_lc} ({i + 1} attempts)..."
@@ -535,6 +546,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
                     continue
 
                 early_cov = True
+                base_cov = True
 
             # Reset the plot style after Redback's modification
             set_plot_style()
@@ -566,6 +578,9 @@ class RedbackLightCurveLib(SNLightCurveLib):
             single_params["early_coverage"] = int(early_cov)
             single_params["n_obs_early"] = (
                 n_obs_early_val if n_obs_early_val is not None else -1
+            )
+            single_params["baseline_coverage"] = (
+                int(base_cov) if base_cov is not None else -1
             )
             params_valid_det.append(single_params)
 
@@ -683,18 +698,20 @@ class RedbackLightCurveLib(SNLightCurveLib):
     @classmethod
     def _simulate_single_light_curve_redback(
         cls, sed_model, params: dict
-    ) -> tuple[pd.DataFrame, bool, int] | None:
+    ) -> tuple[pd.DataFrame, bool, int, bool] | None:
         """
         Simulate a single light curve using Redback.
 
         Returns
         -------
-        (lc_peak, early_coverage, n_obs_early) | None
+        (lc_peak, early_coverage, n_obs_early, baseline_coverage) | None
             lc_peak: DataFrame with pre-peak photometry.
             early_coverage: True if the transient passes the full
                 early-time coverage criteria (baseline + early).
             n_obs_early: minimum of distinct high-SNR early-phase nights
                 across g and r bands.
+            baseline_coverage: True if the transient passes the baseline
+                coverage criteria (>=10 nights in both bands at -100 < phase < -25).
             None: if the loose save gate fails (pre/post-peak nights
                 or both bands not observed).
         """
@@ -757,11 +774,12 @@ class RedbackLightCurveLib(SNLightCurveLib):
             _count_nights(phase, idx_snr & idx_early & idx_r),
         )
 
-        early_coverage = (
-            n_obs_early >= 2
-            and _count_nights(phase, idx_baseline & idx_g) >= 10
+        baseline_coverage = (
+            _count_nights(phase, idx_baseline & idx_g) >= 10
             and _count_nights(phase, idx_baseline & idx_r) >= 10
         )
+
+        early_coverage = n_obs_early >= 2
 
         # Generate early light curve up to early_threshold of peak flux
         flux_mock = obs["flux(erg/cm2/s)"].values
@@ -797,7 +815,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         )
         lc_peak.reset_index(drop=True, inplace=True)
 
-        return lc_peak, early_coverage, n_obs_early
+        return lc_peak, early_coverage, n_obs_early, baseline_coverage
 
     @classmethod
     @staticmethod

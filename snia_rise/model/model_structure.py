@@ -7,6 +7,7 @@ from numpyro import distributions as dist
 
 from ..constants import EPS, T_PIVOT
 from .priors import (
+    build_population_informed_params,
     sample_alpha_0,
     sample_alpha_1,
     sample_amp_prime,
@@ -120,10 +121,6 @@ def hierarchical_model(
     2."independent": Independent hierarchical priors (diagonal covariance)
        t_rise_j ~ Normal(mean_t_rise, sigma_t_rise)
        alpha_0_i ~ Hierarchical(mean_alpha_0[i], sigma_alpha[i])
-
-    3."trise_only": Only t_rise hierarchical, alpha_0 unpooled
-       t_rise_j ~ Normal(mean_t_rise, sigma_t_rise)
-       alpha_0_i ~ [prior] per object and filter
 
     Posterior samples will have consistent shapes across all variants:
     - alpha_0: (n_chains, n_samples, n_obj, n_filt)
@@ -282,10 +279,6 @@ def unpooled_model(
             beta = np.ones_like(flux)
         beta_obs_provided = beta
 
-    # t_rise: shape (n_obj,)
-    with numpyro.plate("obj", n_obj):
-        t_rise = sample_t_rise(prior_config)
-
     # alpha_1: shape (n_obj, n_filt)
     rise_model = prior_config.get("rise_model", "power_law")
     if rise_model == "curved_power_law":
@@ -295,11 +288,109 @@ def unpooled_model(
     else:
         alpha_1 = jnp.zeros((n_obj, n_filt))
 
-    # alpha_0, amp: shape (n_obj, n_filt)
-    with numpyro.plate("obj", n_obj, dim=-2):
-        with numpyro.plate("filt", n_filt, dim=-1):
-            alpha_0 = sample_alpha_0(prior_config=prior_config)
-            amp_prime = sample_amp_prime()
+    # Population-informed priors from YAML config
+    pop_info = build_population_informed_params(prior_config, n_filt)
+
+    if pop_info["type"] == "mvn":
+        # Joint MultivariateNormal over all specified parameters
+        n_mvn_dim = len(pop_info["mu"])
+        with numpyro.plate("obj", n_obj):
+            theta_raw = numpyro.sample(
+                "theta_raw",
+                dist.Normal(0, 1).expand([n_mvn_dim]).to_event(1),
+            )
+        theta = pop_info["mu"] + (theta_raw @ pop_info["L"].T)
+
+        # Split into per-parameter arrays
+        result = {}
+        idx = 0
+        for name, is_per_filter, n_elem in pop_info["param_order"]:
+            if n_elem == 1:
+                result[name] = theta[..., idx]
+            else:
+                result[name] = theta[..., idx : idx + n_elem]
+            idx += n_elem
+
+        # Register deterministic sites
+        if "t_rise" in result:
+            with numpyro.plate("obj", n_obj):
+                t_rise = numpyro.deterministic(
+                    "t_rise", jnp.clip(result["t_rise"], EPS, None)
+                )
+        else:
+            with numpyro.plate("obj", n_obj):
+                t_rise = sample_t_rise(prior_config)
+
+        with numpyro.plate("obj", n_obj, dim=-2):
+            with numpyro.plate("filt", n_filt, dim=-1):
+                if "alpha_0" in result:
+                    alpha_0 = numpyro.deterministic(
+                        "alpha_0",
+                        jnp.clip(result["alpha_0"], 1 + EPS, None),
+                    )
+                else:
+                    alpha_0 = sample_alpha_0(prior_config=prior_config)
+
+                if "log_Aprime" in result:
+                    log_amp = numpyro.deterministic(
+                        "log_Aprime",
+                        jnp.clip(result["log_Aprime"], 0, jnp.log(1e3)),
+                    )
+                    amp_prime = numpyro.deterministic("Aprime", jnp.exp(log_amp))
+                else:
+                    amp_prime = sample_amp_prime()
+
+    elif pop_info["type"] == "independent":
+        pp = pop_info["params"]
+
+        if "t_rise" in pp:
+            with numpyro.plate("obj", n_obj):
+                t_rise = numpyro.sample(
+                    "t_rise",
+                    dist.TruncatedNormal(
+                        pp["t_rise"]["mean"], pp["t_rise"]["sigma"], low=EPS
+                    ),
+                )
+        else:
+            with numpyro.plate("obj", n_obj):
+                t_rise = sample_t_rise(prior_config)
+
+        with numpyro.plate("obj", n_obj, dim=-2):
+            with numpyro.plate("filt", n_filt, dim=-1):
+                if "alpha_0" in pp:
+                    alpha_0 = numpyro.sample(
+                        "alpha_0",
+                        dist.TruncatedNormal(
+                            pp["alpha_0"]["mean"],
+                            pp["alpha_0"]["sigma"],
+                            low=1 + EPS,
+                        ),
+                    )
+                else:
+                    alpha_0 = sample_alpha_0(prior_config=prior_config)
+
+                if "log_Aprime" in pp:
+                    log_amp = numpyro.sample(
+                        "log_Aprime",
+                        dist.TruncatedNormal(
+                            pp["log_Aprime"]["mean"],
+                            pp["log_Aprime"]["sigma"],
+                            low=0,
+                            high=jnp.log(1e3),
+                        ),
+                    )
+                    amp_prime = numpyro.deterministic("Aprime", jnp.exp(log_amp))
+                else:
+                    amp_prime = sample_amp_prime()
+
+    else:  # "none" — fall through to existing flat priors
+        with numpyro.plate("obj", n_obj):
+            t_rise = sample_t_rise(prior_config)
+
+        with numpyro.plate("obj", n_obj, dim=-2):
+            with numpyro.plate("filt", n_filt, dim=-1):
+                alpha_0 = sample_alpha_0(prior_config=prior_config)
+                amp_prime = sample_amp_prime()
 
     # t_fl: shape (n_obj,)
     t_fl = sample_t_fl(n_obj, t_rise, t0_err)

@@ -4,10 +4,9 @@ from pathlib import Path
 import jax
 import numpy as np
 import numpyro
-import xarray as xr
 from astropy.table import Table
 
-from snia_rise._utils import set_best_platform
+from snia_rise._utils import set_best_platform, load_population_prior_config
 from snia_rise.ztf_lc import SampleConfig, ZTFLib
 
 numpyro.enable_x64()
@@ -123,6 +122,12 @@ if __name__ == "__main__":
         default=False,
         action="store_true",
         help="Sample beta (uncertainty scaling) as a free parameter with log(beta) ~ HalfNormal (default: False, fixed at 1.0)",
+    )
+    parser.add_argument(
+        "--prior-config",
+        type=str,
+        default=None,
+        help="YAML file with population prior configuration for the unpooled model",
     )
     args = parser.parse_args()
     dr = args.dr.lower()
@@ -263,12 +268,25 @@ if __name__ == "__main__":
                 early_threshold=early_threshold,
                 rise_model=args.model,
                 sampling_model=args.sampling_model,
+                pop_prior=(args.prior_config is not None),
             )
 
             if args.no_t0_err:
                 ztflib.t0_err = None
 
             target_accept_prob = 0.8 if args.early_coverage else 0.6
+
+            # Build prior_config (optionally from YAML)
+            prior_config = dict(
+                rise_model=args.model,
+                sample_beta=args.sample_beta,
+            )
+            if args.prior_config is not None:
+                config_path = Path(args.prior_config)
+                if not config_path.is_absolute():
+                    config_path = file_dir / "config" / config_path
+                pop_config = load_population_prior_config(str(config_path))
+                prior_config.update(pop_config)
 
             ztflib.sampling(
                 num_warmup=args.num_warmup,
@@ -279,17 +297,16 @@ if __name__ == "__main__":
                     max_tree_depth=12, target_accept_prob=target_accept_prob
                 ),
                 random_seed=114514,
-                prior_config=dict(
-                    rise_model=args.model,
-                    sample_beta=args.sample_beta,
-                ),
+                prior_config=prior_config,
                 debug_save=False,
             )
 
             # Save the posterior
-            post_sample = xr.Dataset(ztflib.post_sample)
+            model_tag = args.sampling_model
+            if ztflib.pop_prior:
+                model_tag += "_pop_prior"
             outfile = (
-                f"post_sample_{args.sampling_model}{config.get_filename_suffix()}.nc"
+                f"post_sample_{model_tag}{config.get_filename_suffix()}.nc"
             )
-            post_sample.to_netcdf(file_dir / outfile)
+            ztflib.save_post_sample(file_dir / outfile)
             print(f"Saved posterior samples to: {file_dir / outfile}")

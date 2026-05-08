@@ -313,8 +313,6 @@ def _sample_mvn_hierarchical_params(
     # Slicing
     alpha_0_raw = theta[..., 1 : 1 + n_filt]
     alpha_0_clipped = jnp.clip(alpha_0_raw, 1 + EPS, None)
-    log_amp_prime_raw = theta[..., 1 + n_filt :]
-    log_amp_prime_clipped = jnp.clip(log_amp_prime_raw, 0, jnp.log(1e3))
 
     with numpyro.plate("obj", n_obj, dim=-2):
         with numpyro.plate("filt", n_filt, dim=-1):
@@ -322,40 +320,10 @@ def _sample_mvn_hierarchical_params(
             alpha_0 = numpyro.deterministic("alpha_0", alpha_0_clipped)
 
             # Extract amplitudes (A)
-            log_amp_prime = numpyro.deterministic("log_Aprime", log_amp_prime_clipped)
+            log_amp_prime = numpyro.deterministic(
+                "log_Aprime", theta[..., 1 + n_filt :]
+            )
             amp_prime = numpyro.deterministic("Aprime", jnp.exp(log_amp_prime))
-
-    return t_rise, amp_prime, alpha_0
-
-
-def _sample_trise_only_hierarchical_params(
-    n_obj,
-    n_filt,
-    mean_t_rise,
-    sigma_t_rise,
-    mean_alpha_0,
-    sigma_alpha_0,
-):
-    """Only t_rise hierarchical, alpha_0 sampled independently (like unpooled).
-
-    Returns
-    -------
-    t_rise : array, shape (n_obj,)
-    t_thresh : array, shape (n_obj,)
-    alpha_0 : array, shape (n_obj, n_filt)
-    """
-
-    # Sample t_rise hierarchically
-    with numpyro.plate("obj", n_obj):
-        t_rise = numpyro.sample(
-            "t_rise", dist.TruncatedNormal(mean_t_rise, sigma_t_rise, low=EPS)
-        )
-
-    with numpyro.plate("filt", n_filt, dim=-1):
-        with numpyro.plate("obj", n_obj, dim=-2):
-            alpha_0 = sample_alpha_0(mean_alpha_0, sigma_alpha_0, 1 + EPS, None)
-            amp_prime = sample_amp_prime()
-            # amp = numpyro.deterministic("A", amp_prime / jnp.power(10, alpha_0))
 
     return t_rise, amp_prime, alpha_0
 
@@ -378,7 +346,7 @@ def sample_hierarchical_params(
     n_filt : int
         Number of filters
     correlation_structure : str
-        "mvn", "independent", or "trise_only"
+        "mvn" or "independent"
     prior_config : dict
         Configuration dict
 
@@ -388,16 +356,12 @@ def sample_hierarchical_params(
     amp_prime : array, shape (n_obj, n_filt)
     alpha_0 : array, shape (n_obj, n_filt)
     """
+
+    # Same as uniform priors in the unpooled model
     min_mean_t_rise = 5.0
-    max_mean_t_rise = 50.0
-    # ZTF real data
-    # min_mean_t_rise = 10.0
-    # max_mean_t_rise = 30.0
-    min_mean_alpha_0 = 1.0
+    max_mean_t_rise = 35.0
+    min_mean_alpha_0 = 1.0 + EPS
     max_mean_alpha_0 = 4.0
-    # ZTF real data
-    # min_mean_alpha_0 = 1.5
-    # max_mean_alpha_0 = 3.5
 
     # Sample t_rise hyperpriors (common to all structures)
     mean_t_rise = numpyro.sample(
@@ -450,16 +414,257 @@ def sample_hierarchical_params(
                 sample_correlations=False,
             )
 
-    elif correlation_structure == "trise_only":
-        # Only t_rise hierarchical, alpha_0 non-hierarchical
-        mean_alpha_0 = prior_config.get("mean_alpha_0", 2)
-        sigma_alpha_0 = prior_config.get("sigma_alpha_0", None)
-        return _sample_trise_only_hierarchical_params(
-            n_obj, n_filt, mean_t_rise, sigma_t_rise, mean_alpha_0, sigma_alpha_0
-        )
-
     else:
         raise ValueError(
             f"Invalid correlation_structure '{correlation_structure}'. "
-            "Options: 'mvn', 'independent', 'trise_only'"
+            "Options: 'mvn', 'independent'"
         )
+
+
+def summarize_priors(model_structure: str, prior_config: dict, n_filt: int, n_obj: int):
+    """Print a summary table of all priors used in the model.
+
+    Parameters
+    ----------
+    model_structure : str
+        One of ``"unpooled"``, ``"pooled"``, ``"hierarchical"``,
+        ``"hierarchical_mvn"``.
+    prior_config : dict
+        The configuration dict (must contain ``"correlation_structure"``
+        for hierarchical models).
+    n_filt : int
+        Number of filters.
+    n_obj : int
+        Number of objects (only for per-object row notes).
+    """
+
+    pop_info = prior_config.get("population_priors", None)
+    prior_type = prior_config.get("prior_type", "maximum_entropy").lower()
+    rise_model = prior_config.get("rise_model", "power_law")
+    sample_beta = prior_config.get("sample_beta", False)
+
+    # ── helper ──────────────────────────────────────────────────────────
+    def _row(param, desc, scope):
+        print(f"  {param:20s} {desc:55s} {scope}")
+
+    print(f"\n{'=' * 80}")
+    print(f"  Prior Summary — {model_structure} model".center(76))
+    print(f"{'=' * 80}")
+
+    # ── Common nuisance parameters ──────────────────────────────────────
+    if model_structure in ("unpooled", "pooled", "hierarchical", "hierarchical_mvn"):
+        _row("base (C)", "Uniform(-50, 50)", "[n_fcqfid]")
+        if sample_beta:
+            _row("beta", "log(beta) ~ HalfNormal(0.1)", "[n_fcqfid]")
+        else:
+            _row("beta", "fixed = 1", "[n_fcqfid]")
+        if rise_model == "curved_power_law":
+            mean_neg = 1 / (20 * (1 + jnp.log(20)))
+            _row("alpha_1", f"Exponential(rate={1 / mean_neg:.1f})", "[n_obj x n_filt]")
+        else:
+            _row("alpha_1", "fixed = 0", "[n_obj x n_filt]")
+
+    # ── Unpooled / Pooled ───────────────────────────────────────────────
+    if model_structure in ("unpooled", "pooled"):
+        # Per-param scopes differ between unpooled and pooled:
+        #   unpooled → alpha_0 is [n_obj × n_filt]; pooled → shared [n_filt]
+        #   t_rise and log_Aprime are always per-object per-filter.
+        if model_structure == "unpooled":
+            scope_alpha_0 = "[n_obj x n_filt]"
+        else:
+            scope_alpha_0 = "[n_filt] (shared)"
+        # t_rise
+        pop_t = pop_info.get("t_rise") if pop_info else None
+        if pop_t is not None:
+            _row("t_rise", f"Normal({pop_t['mean']}, {pop_t['sigma']})", "[n_obj]")
+        elif prior_config.get("prior_type", "uniform").lower() in (
+            "gaussian",
+            "normal",
+        ):
+            mt = prior_config.get("mean_t_rise", 18)
+            st = prior_config.get("sigma_t_rise", 1.5)
+            _row("t_rise", f"TruncatedNormal({mt}, {st})", "[n_obj]")
+        else:
+            _row(
+                "t_rise",
+                f"Uniform(EPS, {prior_config.get('t_rise_max', 40)})",
+                "[n_obj]",
+            )
+
+        # alpha_0
+        pop_a = pop_info.get("alpha_0") if pop_info else None
+        if pop_a is not None:
+            _row(
+                "alpha_0",
+                f"Normal(mean={pop_a['mean']}, sigma={pop_a['sigma']})",
+                scope_alpha_0,
+            )
+        elif prior_type == "uniform":
+            mn = prior_config.get("min_alpha_0", 1)
+            mx = prior_config.get("max_alpha_0", 5)
+            _row("alpha_0", f"Uniform({mn}, {mx})", scope_alpha_0)
+        elif prior_type == "maximum_entropy":
+            me = prior_config.get("mean_alpha_0", 2)
+            se = prior_config.get("sigma_alpha_0", None)
+            if se is None:
+                _row(
+                    "alpha_0",
+                    f"MaxEnt Exponential(rate={1 / (me - 1):.2f}) + 1",
+                    scope_alpha_0,
+                )
+            else:
+                _row(
+                    "alpha_0",
+                    "MaxEnt Gamma(concentration=..., rate=...) + 1",
+                    scope_alpha_0,
+                )
+        elif prior_type == "normal":
+            me = prior_config.get("mean_alpha_0", 2)
+            se = prior_config.get("sigma_alpha_0")  # user must provide
+            _row("alpha_0", f"TruncatedNormal({me}, {se})", scope_alpha_0)
+        elif prior_type == "miller":
+            _row("alpha_0", "Exponential(log(10))", scope_alpha_0)
+
+        # log_Aprime / Aprime
+        pop_l = pop_info.get("log_Aprime") if pop_info else None
+        if pop_l is not None:
+            _row(
+                "log_Aprime",
+                f"Normal(mean={pop_l['mean']}, sigma={pop_l['sigma']})",
+                "[n_obj x n_filt]",
+            )
+        else:
+            _row("log_Aprime", "Uniform(0, log(1000))", "[n_obj x n_filt]")
+
+        # population prior summary
+        if pop_info:
+            corr_tag = " with correlations" if pop_info.get("corr") else ""
+            specified = [
+                k for k in ("t_rise", "alpha_0", "log_Aprime") if k in pop_info
+            ]
+            _row("pop. prior", f"{' + '.join(specified)}{corr_tag}", "replaces default")
+        else:
+            _row("pop. prior", "none", "")
+
+    # ── Hierarchical ────────────────────────────────────────────────────
+    elif model_structure in ("hierarchical", "hierarchical_mvn"):
+        corr_struct = prior_config.get("correlation_structure", "mvn")
+        d = 1 + 2 * n_filt
+
+        print("\n  Hyperpriors:")
+        _row("mean_t_rise", "Uniform(EPS, 40)", "")
+        _row("sigma_t_rise", "HalfCauchy(1.5)", "")
+        _row("mean_alpha_0", "Uniform(1+EPS, 4)", "[n_filt]")
+        _row("sigma_alpha_0", "HalfCauchy(0.3)", "[n_filt]")
+        _row("mean_log_Aprime", "Uniform(0, log(1000))", "[n_filt]")
+        _row("sigma_log_Aprime", "HalfCauchy(0.5)", "[n_filt]")
+
+        if corr_struct == "mvn":
+            _row("chol_corr", f"LKJCholesky({d}, concentration=1.0)", "")
+        else:
+            _row("corr", "none (diagonal)", "")
+
+        print("\n  Per-object conditionals:")
+        tag = f"MVN({d}-dim, µ, Σ)" if corr_struct == "mvn" else "independent Normals"
+        _row("theta", tag, "[n_obj]")
+        _row("t_rise", "TruncatedNormal(µ₁, σ₁, low=EPS)", "[n_obj]")
+        _row("alpha_0", "TruncatedNormal(µ₂₋₃, σ₂₋₃, low=1+EPS)", "[n_obj x n_filt]")
+        _row("log_Aprime", "Normal(µ₄₋₅, σ₄₋₅, low=0, high=log(1000))", "[n_obj x n_filt]")
+
+    print(f"{'=' * 80}\n")
+
+
+def build_population_informed_params(prior_config: dict, n_filt: int) -> dict:
+    """
+    Parse ``population_priors`` from *prior_config* and return a structured
+    dict that describes how the unpooled model should set its per-object
+    priors.
+
+    Parameters
+    ----------
+    prior_config : dict
+        Configuration dict (may contain ``population_priors`` key).
+    n_filt : int
+        Number of filters (required for expanding per-filter params).
+
+    Returns
+    -------
+    result : dict
+        One of three forms:
+
+        - ``{"type": "none"}`` -- no population priors specified; caller
+          should fall through to existing flat priors.
+        - ``{"type": "independent",
+            "params": {"t_rise": {"mean": scalar, "sigma": scalar}, ...}}``
+          -- independent truncated-Normal priors per parameter.
+        - ``{"type": "mvn",
+            "mu": jnp.ndarray, "L": jnp.ndarray,
+            "param_order": [(name, is_per_filter, n_elements), ...]}``
+          -- joint multivariate-Normal prior over all specified parameters.
+    """
+    pop = prior_config.get("population_priors", None)
+    if not pop:
+        return {"type": "none"}
+
+    # Collect specified parameters in canonical order: scalar first, then
+    # per-filter parameters expanded across filters.
+    param_order = []  # list of (name, is_per_filter, n_elements)
+    means_flat = []
+    sigmas_flat = []
+
+    def _add_scalar(name):
+        spec = pop.get(name)
+        if spec is None:
+            return
+        param_order.append((name, False, 1))
+        means_flat.append(spec["mean"])
+        sigmas_flat.append(spec["sigma"])
+
+    def _add_per_filter(name):
+        spec = pop.get(name)
+        if spec is None:
+            return
+        param_order.append((name, True, n_filt))
+        means_flat.extend(spec["mean"])
+        sigmas_flat.extend(spec["sigma"])
+
+    _add_scalar("t_rise")
+    _add_per_filter("alpha_0")
+    _add_per_filter("log_Aprime")
+
+    if not param_order:
+        return {"type": "none"}
+
+    mu = jnp.array(means_flat, dtype=float)
+    sigma = jnp.array(sigmas_flat, dtype=float)
+    n_mvn_dim = len(mu)
+
+    corr_raw = pop.get("corr", None)
+
+    if corr_raw is not None:
+        corr = jnp.array(corr_raw, dtype=float)
+        cov = jnp.outer(sigma, sigma) * corr
+        L = jnp.linalg.cholesky(cov)
+        return {
+            "type": "mvn",
+            "mu": mu,
+            "L": L,
+            "param_order": param_order,
+        }
+    else:
+        # Independent: return per-param means and sigmas
+        params = {}
+        idx = 0
+        for name, is_per_filter, n_elem in param_order:
+            if is_per_filter:
+                params[name] = {
+                    "mean": mu[idx : idx + n_elem],
+                    "sigma": sigma[idx : idx + n_elem],
+                }
+            else:
+                params[name] = {
+                    "mean": mu[idx],
+                    "sigma": sigma[idx],
+                }
+            idx += n_elem
+        return {"type": "independent", "params": params}

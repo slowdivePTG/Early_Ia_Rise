@@ -3,9 +3,8 @@ from pathlib import Path
 
 import jax
 import numpyro
-import xarray as xr
 
-from snia_rise._utils import set_best_platform
+from snia_rise._utils import load_population_prior_config, set_best_platform
 from snia_rise.simulate.simulator import RedbackLightCurveLib
 
 numpyro.enable_x64()
@@ -47,11 +46,10 @@ if __name__ == "__main__":
             "pooled",
             "unpooled",
             "hierarchical",
-            "hierarchical_trise",
             "hierarchical_mvn",
         ],
         default="hierarchical_mvn",
-        help="Select sampling model: 'pooled', 'unpooled', or 'hierarchical (including _trise and _mvn)' (default: 'hierarchical_mvn')",
+        help="Select sampling model: 'pooled', 'unpooled', or 'hierarchical (including _mvn)' (default: 'hierarchical_mvn')",
     )
     parser.add_argument(
         "--prior_type",
@@ -118,6 +116,20 @@ if __name__ == "__main__":
         action="store_true",
         help="Only fit light curves that pass the early-time coverage cut",
     )
+    parser.add_argument(
+        "--baseline_coverage",
+        action="store_true",
+        help="Only fit light curves that pass the baseline-time coverage cut",
+    )
+    parser.add_argument(
+        "--prior-config",
+        type=str,
+        default=None,
+        help=(
+            "YAML file with population prior configuration for the "
+            "unpooled model (see docs/ for schema)"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -165,6 +177,8 @@ if __name__ == "__main__":
             prior_type=args.prior_type.lower(),
             true_param_dependence=args.true_param_dependence,
             early_coverage=args.early_coverage,
+            baseline_coverage=args.baseline_coverage,
+            pop_prior=(args.prior_config is not None),
         )
 
         # Align result directory with input directory structure that may include param dependence
@@ -182,25 +196,35 @@ if __name__ == "__main__":
         )
         os.makedirs(result_dir, exist_ok=True)
 
+        # Load population prior config if provided
+        prior_config = {
+            "rise_model": model,
+            "prior_type": args.prior_type.lower(),
+        }
+        if args.prior_config is not None:
+            config_path = Path(args.prior_config)
+            if not config_path.is_absolute():
+                config_path = result_dir / "config" / config_path
+            pop_config = load_population_prior_config(str(config_path))
+            prior_config.update(pop_config)
+
         # Sampling
         lib.sampling(
-            prior_config={
-                "rise_model": model,
-                "prior_type": args.prior_type.lower(),
-            },
+            prior_config=prior_config,
             num_warmup=args.num_warmup,
             num_samples=args.num_samples,
             num_chains=args.num_chains,
             thinning=args.thinning,
-            nuts_params=dict(max_tree_depth=12, target_accept_prob=0.85),
+            nuts_params=dict(max_tree_depth=12, target_accept_prob=0.8),
         )
 
         # Save the posterior for the hierarchical model
-        post_sample = xr.Dataset(lib.post_sample)
-        if args.sampling_model in ["hierarchical_trise", "unpooled", "pooled"]:
+        if args.sampling_model in ["unpooled", "pooled"]:
             sampling_model_str = f"{args.sampling_model}_{args.prior_type.lower()}"
         else:
             sampling_model_str = args.sampling_model
-        post_sample.to_netcdf(
+        if lib.pop_prior:
+            sampling_model_str += "_pop_prior"
+        lib.save_post_sample(
             result_dir / f"post_sample_{sampling_model_str}_{args.num_lc}.nc"
         )

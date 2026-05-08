@@ -131,15 +131,18 @@ def show_kde_posterior(
         print(f"Warning: No data for parameter '{param}' in range {x_range}")
         return
 
-    bw_adjust = kwargs.get("bw_adjust", 1)
-    params = dict(fill=True, alpha=0.25, lw=2, **kwargs)
+    bw_adjust = kwargs.pop("bw_adjust", 1)
+    params = dict(fill=True, alpha=0.25, lw=2)
+    params.update(**kwargs)
 
     sns.kdeplot(x=param_1d, ax=ax, bw_adjust=bw_adjust, **params)
     ax.set_xlim(x_range)
     ax.set_ylabel("")
 
 
-def show_t_rise_value_comparison(mock_libs, colors, labels, truths=None, ax=None):
+def show_t_rise_value_comparison(
+    mock_libs, colors, labels, truths=None, ax=None, sublibs=None
+):
     n_lib = len(mock_libs)
 
     if ax is None:  # Create subplots if no axes are provided
@@ -169,7 +172,7 @@ def show_t_rise_value_comparison(mock_libs, colors, labels, truths=None, ax=None
             mock_lib,
             param="sigma_t_rise",
             ax=ax[1],
-            x_range=(0.5, 2.5),
+            x_range=(0.5, 3.5),
             color=color,
             label=label,
         )
@@ -178,13 +181,37 @@ def show_t_rise_value_comparison(mock_libs, colors, labels, truths=None, ax=None
         for _ax in ax:
             _ax.set_yticks([])
 
+    if sublibs is not None:
+        for k in range(n_lib):
+            if sublibs[k] is not None:
+                show_kde_posterior(
+                    sublibs[k],
+                    param="mean_t_rise",
+                    ax=ax[0],
+                    x_range=(15, 25),
+                    color=colors[k],
+                    linestyle="--",
+                    alpha=0.1,
+                )
+                show_kde_posterior(
+                    sublibs[k],
+                    param="sigma_t_rise",
+                    ax=ax[1],
+                    x_range=(0.5, 3.5),
+                    color=colors[k],
+                    linestyle="--",
+                    alpha=0.1,
+                )
+
     ax[0].set_xlabel(r"$\mu_{t_\mathrm{rise}}\ [\mathrm{day}]$")
     ax[1].set_xlabel(r"$\sigma_{t_\mathrm{rise}}\ [\mathrm{day}]$")
 
     return ax
 
 
-def show_alpha_value_comparison(mock_libs, colors, labels, truths=None, ax=None):
+def show_alpha_value_comparison(
+    mock_libs, colors, labels, truths=None, ax=None, sublibs=None
+):
     n_lib = len(mock_libs)
 
     if ax is None:  # Create subplots if no axes are provided
@@ -214,7 +241,7 @@ def show_alpha_value_comparison(mock_libs, colors, labels, truths=None, ax=None)
             mock_lib,
             param="sigma_alpha_flt2",
             ax=ax[1],
-            x_range=(0, 1),
+            x_range=(0, 2),
             color=color,
             label=label,
         )
@@ -223,13 +250,37 @@ def show_alpha_value_comparison(mock_libs, colors, labels, truths=None, ax=None)
         for _ax in ax:
             _ax.set_yticks([])
 
+    if sublibs is not None:
+        for k in range(n_lib):
+            if sublibs[k] is not None:
+                show_kde_posterior(
+                    sublibs[k],
+                    param="mean_alpha_flt2",
+                    ax=ax[0],
+                    x_range=(1, 5),
+                    color=colors[k],
+                    linestyle="--",
+                    alpha=0.1,
+                )
+                show_kde_posterior(
+                    sublibs[k],
+                    param="sigma_alpha_flt2",
+                    ax=ax[1],
+                    x_range=(0, 2),
+                    color=colors[k],
+                    linestyle="--",
+                    alpha=0.1,
+                )
+
     ax[0].set_xlabel(r"$\mu_{\alpha_r}$")
     ax[1].set_xlabel(r"$\sigma_{\alpha_r}$")
 
     return ax
 
 
-def show_log_Aprime_value_comparison(mock_libs, colors, labels, truths=None, ax=None):
+def show_log_Aprime_value_comparison(
+    mock_libs, colors, labels, truths=None, ax=None, sublibs=None
+):
     n_lib = len(mock_libs)
 
     if ax is None:  # Create subplots if no axes are provided
@@ -259,7 +310,7 @@ def show_log_Aprime_value_comparison(mock_libs, colors, labels, truths=None, ax=
             mock_lib,
             param="sigma_log_Aprime_flt2",
             ax=ax[1],
-            x_range=(0, 1),
+            x_range=(0, 2),
             color=color,
             label=label,
         )
@@ -267,6 +318,28 @@ def show_log_Aprime_value_comparison(mock_libs, colors, labels, truths=None, ax=
             _ax.set_ylabel("")
         for _ax in ax:
             _ax.set_yticks([])
+
+    if sublibs is not None:
+        for k in range(n_lib):
+            if sublibs[k] is not None:
+                show_kde_posterior(
+                    sublibs[k],
+                    param="mean_log_Aprime_flt2",
+                    ax=ax[0],
+                    x_range=(3, 4.5),
+                    color=colors[k],
+                    linestyle="--",
+                    alpha=0.1,
+                )
+                show_kde_posterior(
+                    sublibs[k],
+                    param="sigma_log_Aprime_flt2",
+                    ax=ax[1],
+                    x_range=(0, 2),
+                    color=colors[k],
+                    linestyle="--",
+                    alpha=0.1,
+                )
 
     ax[0].set_xlabel(r"$\mu_{\ln A_r}$")
     ax[1].set_xlabel(r"$\sigma_{\ln A_r}$")
@@ -315,6 +388,69 @@ def show_color_value_comparison(mock_libs, colors, labels, truths=None, ax=None)
 
     ax[0].set_xlabel(r"$\mu_{\alpha_g - \alpha_r}$")
     ax[1].set_xlabel(r"$\sigma_{\alpha_g - \alpha_r}$")
+    return ax
+
+
+def show_corr_comparison(mock_libs, colors, labels, truths=None, ax=None, sublibs=None):
+    if ax is None:  # Create subplots if no axes are provided
+        fix, ax = plt.subplots(
+            1, 4, figsize=(14, 4), constrained_layout=True, sharey="col", sharex="col"
+        )
+    n_lib = len(mock_libs)
+
+    if truths is not None:
+        for j in range(len(ax)):
+            ax[j].axvline(
+                truths[j], color="0.5", linestyle=":", lw=5, alpha=0.5, zorder=-1
+            )
+
+    params = [
+        "corr_t_rise_alpha_flt2",
+        "corr_t_rise_log_Aprime_flt2",
+        "corr_alpha_log_Aprime_flt2",
+        "corr_alpha_flt1_flt2",
+    ]
+    for k in range(n_lib):
+        mock_lib = mock_libs[k]
+        color = colors[k]
+        label = labels[k]
+        for i in range(len(ax)):
+            param = params[i]
+            show_kde_posterior(
+                mock_lib,
+                param=param,
+                ax=ax[i],
+                x_range=(-1, 1),
+                color=color,
+                label=label,
+            )
+        for _ax in ax[1:]:
+            _ax.set_ylabel("")
+        for _ax in ax:
+            _ax.set_yticks([])
+
+    if sublibs is not None:
+        for k in range(n_lib):
+            if sublibs[k] is not None:
+                for i in range(len(ax)):
+                    show_kde_posterior(
+                        sublibs[k],
+                        param=params[i],
+                        ax=ax[i],
+                        x_range=(-1, 1),
+                        color=colors[k],
+                        linestyle="--",
+                        alpha=0.1,
+                    )
+
+    try:
+        ax[0].set_xlabel(r"$\rho(t_\mathrm{rise}, \alpha_r)$")
+        ax[1].set_xlabel(r"$\rho(t_\mathrm{rise}, \ln A_r)$")
+        ax[2].set_xlabel(r"$\rho(\alpha_r, \ln A_r)$")
+        ax[3].set_xlabel(r"$\rho(\alpha_g, \alpha_r)$")
+    except IndexError:
+        pass
+
     return ax
 
 

@@ -571,6 +571,7 @@ class ZTFLib(SNLightCurveLib):
         early_threshold: float = 0.4,
         rise_model: str = "power_law",
         sampling_model: str = "hierarchical_mvn",
+        pop_prior: bool = False,
         **kwargs,
     ) -> None:
         """
@@ -642,6 +643,14 @@ class ZTFLib(SNLightCurveLib):
         )
         filename = f"post_sample_{sampling_model}{config.get_filename_suffix()}.nc"
         post_sample_file = post_sample_dir / filename
+
+        if pop_prior:
+            post_sample_file = Path(
+                str(post_sample_file).replace(
+                    f"{sampling_model}", f"{sampling_model}_pop_prior"
+                )
+            )
+
         # print(post_sample_file)
 
         if os.path.exists(post_sample_file):
@@ -659,4 +668,7 @@ class ZTFLib(SNLightCurveLib):
             **kwargs,
         )
         self.post_sample = post_sample
+        self.pop_prior = pop_prior
+        if self.post_sample is not None and "pop_prior" in self.post_sample.attrs:
+            self.pop_prior = self.post_sample.attrs["pop_prior"] == "True"
         self.decode_post_sample()

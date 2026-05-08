@@ -8,3 +8,4 @@ from ._numpyro_utils import (
     set_best_platform,
 )
 from ._plt import plot_box_spec, plt, show_kde_posterior
+from ._config import load_population_prior_config
