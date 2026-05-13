@@ -262,13 +262,16 @@ if __name__ == "__main__":
                 x1_subsample=x1_subsample,
                 sn_type=args.sn_type,
             )
+            pop_prior_config = (
+                Path(args.prior_config).stem if args.prior_config else None
+            )
             ztflib = ZTFLib(
                 ztfid_lib=tab_info[ztfid_col][idx_sub],
                 config=config,
                 early_threshold=early_threshold,
                 rise_model=args.model,
                 sampling_model=args.sampling_model,
-                pop_prior=(args.prior_config is not None),
+                pop_prior_config=pop_prior_config,
             )
 
             if args.no_t0_err:
@@ -304,7 +307,7 @@ if __name__ == "__main__":
             # Save the posterior
             model_tag = args.sampling_model
             if ztflib.pop_prior:
-                model_tag += "_pop_prior"
+                model_tag += f"_pop_prior_{ztflib.pop_prior}"
             outfile = (
                 f"post_sample_{model_tag}{config.get_filename_suffix()}.nc"
             )

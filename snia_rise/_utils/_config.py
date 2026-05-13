@@ -18,8 +18,8 @@ def load_population_prior_config(file_path: str) -> dict:
     Returns
     -------
     dict
-        A ``prior_config``-compatible dictionary containing ``rise_model``
-        and ``population_priors``.
+        A ``prior_config``-compatible dictionary containing ``rise_model``,
+        ``population_priors``, and ``config_stem``.
     """
     import yaml
 
@@ -36,6 +36,7 @@ def load_population_prior_config(file_path: str) -> dict:
         _validate_population_priors(pop)
         _print_population_priors(pop, file_path)
         prior_config["population_priors"] = pop
+        prior_config["config_stem"] = Path(file_path).stem
 
     return prior_config
 
@@ -45,34 +46,49 @@ def _validate_population_priors(pop: dict):
 
     n_total = 0
     param_keys = ["t_rise", "alpha_0", "log_Aprime"]
+    per_filter_lengths = []
 
     for key in param_keys:
         spec = pop.get(key)
         if spec is not None:
             mean = spec.get("mean")
             sigma = spec.get("sigma")
-            if mean is None or sigma is None:
-                raise ValueError(
-                    f"population_priors.{key} must provide both 'mean' and 'sigma'."
-                )
+
             if key == "t_rise":
-                if np.ndim(mean) != 0 or np.ndim(sigma) != 0:
-                    raise ValueError(
-                        f"population_priors.t_rise: 'mean' and 'sigma' must be scalars."
-                    )
-                n_total += 1
+                if mean is None and sigma is None:
+                    n_total += 1
+                else:
+                    if mean is None or sigma is None:
+                        raise ValueError(
+                            f"population_priors.{key}: 'mean' and 'sigma' must both be "
+                            "specified or both be None."
+                        )
+                    if np.ndim(mean) != 0 or np.ndim(sigma) != 0:
+                        raise ValueError(
+                            f"population_priors.t_rise: 'mean' and 'sigma' must be scalars."
+                        )
+                    n_total += 1
             else:
-                mean_arr = np.atleast_1d(np.array(mean))
-                sigma_arr = np.atleast_1d(np.array(sigma))
-                if mean_arr.ndim != 1 or sigma_arr.ndim != 1:
+                if mean is None and sigma is None:
                     raise ValueError(
-                        f"population_priors.{key}: 'mean' and 'sigma' must be 1-D arrays."
+                        f"population_priors.{key}: must be an array (possibly with null entries), "
+                        "not bare null. Use e.g. mean: [null, null] for per-filter params."
                     )
-                if len(mean_arr) != len(sigma_arr):
+                mean_list = list(mean)
+                sigma_list = list(sigma)
+                if len(mean_list) != len(sigma_list):
                     raise ValueError(
                         f"population_priors.{key}: 'mean' and 'sigma' must have the same length."
                     )
-                n_total += len(mean_arr)
+                per_filter_lengths.append(len(mean_list))
+                n_total += len(mean_list)
+
+    # Check all per-filter param arrays have consistent length
+    if per_filter_lengths and len(set(per_filter_lengths)) > 1:
+        raise ValueError(
+            "population_priors: all per-filter params (alpha_0, log_Aprime) "
+            f"must have the same length. Got lengths {per_filter_lengths}."
+        )
 
     corr = pop.get("corr")
     if corr is not None:
@@ -83,7 +99,7 @@ def _validate_population_priors(pop: dict):
             raise ValueError(
                 f"population_priors.corr shape ({corr_arr.shape[0]}, "
                 f"{corr_arr.shape[1]}) does not match the total number of "
-                f"specified parameter elements ({n_total}). "
+                f"parameter elements ({n_total}). "
                 f"Parameters contribute in order: "
                 f"[t_rise, alpha_0 (per filter), log_Aprime (per filter)]."
             )
@@ -98,11 +114,21 @@ def _print_population_priors(pop: dict, source: str):
     for key in ["t_rise", "alpha_0", "log_Aprime"]:
         spec = pop.get(key)
         if spec is not None:
-            mean = np.asarray(spec["mean"])
-            sigma = np.asarray(spec["sigma"])
-            mean_str = np.array2string(mean, precision=4, suppress_small=True)
-            sigma_str = np.array2string(sigma, precision=4, suppress_small=True)
-            print(f"  {key}:  mean = {mean_str}   sigma = {sigma_str}")
+            mean_raw = spec["mean"]
+            sigma_raw = spec["sigma"]
+            if mean_raw is None and sigma_raw is None:
+                print(f"  {key}:  uniform (no hyperparameters)")
+            else:
+                mean_arr = np.asarray(mean_raw, dtype=float)
+                sigma_arr = np.asarray(sigma_raw, dtype=float)
+                _fmt = lambda x: 'null' if np.isnan(float(x)) else f'{x:.4g}'
+                mean_str = np.array2string(
+                    mean_arr, formatter={'float_kind': _fmt}, suppress_small=True,
+                )
+                sigma_str = np.array2string(
+                    sigma_arr, formatter={'float_kind': _fmt}, suppress_small=True,
+                )
+                print(f"  {key}:  mean = {mean_str}   sigma = {sigma_str}")
 
     corr = pop.get("corr")
     if corr is not None:

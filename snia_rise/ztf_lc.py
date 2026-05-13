@@ -571,7 +571,7 @@ class ZTFLib(SNLightCurveLib):
         early_threshold: float = 0.4,
         rise_model: str = "power_law",
         sampling_model: str = "hierarchical_mvn",
-        pop_prior: bool = False,
+        pop_prior_config: str | None = None,
         **kwargs,
     ) -> None:
         """
@@ -587,6 +587,8 @@ class ZTFLib(SNLightCurveLib):
             Rise model: "power_law" or "curved_power_law".
         sampling_model : str
             Sampling model: "pooled", "unpooled", "hierarchical", "hierarchical_trise", or "hierarchical_mvn".
+        pop_prior_config : str or None
+            Stem of the YAML population prior config file, or None.
         x1_subsample : str or None
             Optional tag appended to the output filename to identify the x1
             subsample, e.g. ``"x1lo"`` or ``"x1hi"`` (default: None, no tag).
@@ -642,16 +644,11 @@ class ZTFLib(SNLightCurveLib):
             f"./data/ztf_snia_{config.source.lower()}/results/frac{int(early_threshold * 100)}_{rise_model}"
         )
         filename = f"post_sample_{sampling_model}{config.get_filename_suffix()}.nc"
-        post_sample_file = post_sample_dir / filename
-
-        if pop_prior:
-            post_sample_file = Path(
-                str(post_sample_file).replace(
-                    f"{sampling_model}", f"{sampling_model}_pop_prior"
-                )
+        if pop_prior_config:
+            filename = filename.replace(
+                sampling_model, f"{sampling_model}_pop_prior_{pop_prior_config}"
             )
-
-        # print(post_sample_file)
+        post_sample_file = post_sample_dir / filename
 
         if os.path.exists(post_sample_file):
             print("Loading existing .nc file...")
@@ -668,7 +665,13 @@ class ZTFLib(SNLightCurveLib):
             **kwargs,
         )
         self.post_sample = post_sample
-        self.pop_prior = pop_prior
+        self.pop_prior = pop_prior_config
         if self.post_sample is not None and "pop_prior" in self.post_sample.attrs:
-            self.pop_prior = self.post_sample.attrs["pop_prior"] == "True"
+            val = self.post_sample.attrs["pop_prior"]
+            if val == "True":
+                self.pop_prior = "pop_prior"
+            elif val in ("False", ""):
+                self.pop_prior = None
+            else:
+                self.pop_prior = val
         self.decode_post_sample()

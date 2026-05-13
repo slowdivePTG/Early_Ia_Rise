@@ -79,7 +79,7 @@ def hierarchical_linear_model(x_mean, x_err, y_mean, y_err):
 
 
 def hierarchical_broken_linear_model(
-    x_mean, x_err, y_mean, y_err, xb_mu=0.0, xb_sigma=0.5
+    x_mean, x_err, y_mean, y_err, xb_mu=None, xb_sigma=None, xb_min=0, xb_max=1
 ):
     N = len(x_mean)
 
@@ -99,7 +99,10 @@ def hierarchical_broken_linear_model(
     )
     beta1 = numpyro.sample("beta1", dist.Uniform(-5, 5))
     beta2 = numpyro.sample("beta2", dist.Uniform(-5, 5))
-    xb = numpyro.sample("xb", dist.TruncatedNormal(xb_mu, xb_sigma, low=-1, high=1))
+    if xb_mu is None or xb_sigma is None:
+        xb = numpyro.sample("xb", dist.Uniform(xb_min, xb_max))
+    else:
+        xb = numpyro.sample("xb", dist.TruncatedNormal(xb_mu, xb_sigma, xb_min, xb_max))
 
     # --- Physical Model Parameters (Scatter) ---
     sigma = numpyro.sample("sigma", dist.HalfNormal(1))

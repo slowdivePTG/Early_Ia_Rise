@@ -168,6 +168,9 @@ if __name__ == "__main__":
             else f"{true_model}_z_{args.z_fixed:.2f}".replace(".", "_")
         )
 
+        pop_prior_config = (
+            Path(args.prior_config).stem if args.prior_config else None
+        )
         lib = RedbackLightCurveLib(
             n_lc=args.num_lc,
             early_threshold=early_threshold,
@@ -178,7 +181,7 @@ if __name__ == "__main__":
             true_param_dependence=args.true_param_dependence,
             early_coverage=args.early_coverage,
             baseline_coverage=args.baseline_coverage,
-            pop_prior=(args.prior_config is not None),
+            pop_prior_config=pop_prior_config,
         )
 
         # Align result directory with input directory structure that may include param dependence
@@ -219,12 +222,12 @@ if __name__ == "__main__":
         )
 
         # Save the posterior for the hierarchical model
-        if args.sampling_model in ["unpooled", "pooled"]:
+        if lib.pop_prior:
+            sampling_model_str = f"{args.sampling_model}_pop_prior_{lib.pop_prior}"
+        elif args.sampling_model in ["unpooled", "pooled"]:
             sampling_model_str = f"{args.sampling_model}_{args.prior_type.lower()}"
         else:
             sampling_model_str = args.sampling_model
-        if lib.pop_prior:
-            sampling_model_str += "_pop_prior"
         lib.save_post_sample(
             result_dir / f"post_sample_{sampling_model_str}_{args.num_lc}.nc"
         )

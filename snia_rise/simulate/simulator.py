@@ -49,7 +49,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
         true_param_dependence: str | None = None,
         early_coverage: bool = False,
         baseline_coverage: bool = False,
-        pop_prior: bool = False,
+        pop_prior_config: str | None = None,
     ) -> None:
         if (true_param_dependence is not None) and ("power_law" in true_model):
             file_dir = Path(f"./data/mock/{true_model}_{true_param_dependence}")
@@ -76,20 +76,15 @@ class RedbackLightCurveLib(SNLightCurveLib):
             )
 
         post_sample_dir = Path(file_dir) / f"{model}_frac{int(early_threshold * 100)}"
-        if sampling_model in ["unpooled", "pooled"]:
+        if pop_prior_config:
+            sampling_model_str = f"{sampling_model}_pop_prior_{pop_prior_config}"
+        elif sampling_model in ["unpooled", "pooled"]:
             sampling_model_str = f"{sampling_model}_{prior_type.lower()}"
         else:
             sampling_model_str = sampling_model
         post_sample_full_file = (
             post_sample_dir / f"post_sample_{sampling_model_str}_{n_lc}.nc"
         )
-
-        if pop_prior:
-            post_sample_full_file = Path(
-                str(post_sample_full_file).replace(
-                    f"{sampling_model_str}_", f"{sampling_model_str}_pop_prior_"
-                )
-            )
 
         if n_lc is None:
             n_lc = len(peak_files)
@@ -161,9 +156,15 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 }
 
         self.post_sample = post_sample
-        self.pop_prior = pop_prior
+        self.pop_prior = pop_prior_config
         if self.post_sample is not None and "pop_prior" in self.post_sample.attrs:
-            self.pop_prior = self.post_sample.attrs["pop_prior"] == "True"
+            val = self.post_sample.attrs["pop_prior"]
+            if val == "True":
+                self.pop_prior = "pop_prior"
+            elif val in ("False", ""):
+                self.pop_prior = None
+            else:
+                self.pop_prior = val
         self.decode_post_sample()
 
     @classmethod
@@ -394,6 +395,7 @@ class RedbackLightCurveLib(SNLightCurveLib):
             or "shen" in model.lower()
             or "observation" in model.lower()
         ):
+            num_tot = n_lc  # no oversampling — all template transients accepted
             # Resolve template model ID
             if template_model_id is None:
                 raise ValueError(
@@ -416,8 +418,9 @@ class RedbackLightCurveLib(SNLightCurveLib):
                 n_angles = photometry_engine.get_num_viewing_angles()
                 params_sim["n_shen_angles"] = np.full(num_tot, n_angles)
 
-                # Draw random viewing angle indices for each simulated transient
-                angle_idxs = np.random.randint(0, n_angles, num_tot)
+                # Assign viewing angles in balanced order, then shuffle
+                angle_idxs = np.tile(np.arange(n_angles), num_tot // n_angles + 1)[:num_tot]
+                np.random.shuffle(angle_idxs)
                 params_sim["shen_angle_idx"] = angle_idxs
 
                 # Precompute peak for each angle (since n_angles is small, e.g. ~14)

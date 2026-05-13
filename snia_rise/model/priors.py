@@ -1,6 +1,7 @@
 """Helper functions for hierarchical Bayesian models of supernova light curves."""
 
 import jax.numpy as jnp
+import numpy as np
 import numpyro
 import numpyro.distributions as dist
 
@@ -473,78 +474,156 @@ def summarize_priors(model_structure: str, prior_config: dict, n_filt: int, n_ob
             scope_alpha_0 = "[n_obj x n_filt]"
         else:
             scope_alpha_0 = "[n_filt] (shared)"
-        # t_rise
-        pop_t = pop_info.get("t_rise") if pop_info else None
-        if pop_t is not None:
-            _row("t_rise", f"Normal({pop_t['mean']}, {pop_t['sigma']})", "[n_obj]")
-        elif prior_config.get("prior_type", "uniform").lower() in (
-            "gaussian",
-            "normal",
-        ):
-            mt = prior_config.get("mean_t_rise", 18)
-            st = prior_config.get("sigma_t_rise", 1.5)
-            _row("t_rise", f"TruncatedNormal({mt}, {st})", "[n_obj]")
-        else:
-            _row(
-                "t_rise",
-                f"Uniform(EPS, {prior_config.get('t_rise_max', 40)})",
-                "[n_obj]",
-            )
 
-        # alpha_0
-        pop_a = pop_info.get("alpha_0") if pop_info else None
-        if pop_a is not None:
-            _row(
-                "alpha_0",
-                f"Normal(mean={pop_a['mean']}, sigma={pop_a['sigma']})",
-                scope_alpha_0,
-            )
-        elif prior_type == "uniform":
-            mn = prior_config.get("min_alpha_0", 1)
-            mx = prior_config.get("max_alpha_0", 5)
-            _row("alpha_0", f"Uniform({mn}, {mx})", scope_alpha_0)
-        elif prior_type == "maximum_entropy":
-            me = prior_config.get("mean_alpha_0", 2)
-            se = prior_config.get("sigma_alpha_0", None)
-            if se is None:
+        # ── Copula display (all three keys + corr) ──
+        copula_mode = (
+            pop_info is not None
+            and all(k in pop_info for k in ("t_rise", "alpha_0", "log_Aprime"))
+            and pop_info.get("corr") is not None
+        )
+
+        if copula_mode:
+            t_mean = pop_info["t_rise"].get("mean")
+            t_sigma = pop_info["t_rise"].get("sigma")
+            if t_mean is not None:
+                _row("t_rise", f"Normal(μ={t_mean}, σ={t_sigma}) via Copula", "[n_obj]")
+            else:
+                t_min = prior_config.get("t_rise_min", EPS)
+                t_max = prior_config.get("t_rise_max", 40)
                 _row(
-                    "alpha_0",
-                    f"MaxEnt Exponential(rate={1 / (me - 1):.2f}) + 1",
-                    scope_alpha_0,
+                    "t_rise", f"Uniform({t_min:.4g}, {t_max:.4g}) via Copula", "[n_obj]"
                 )
+
+            a_means = np.atleast_1d(np.array(pop_info["alpha_0"]["mean"], dtype=float))
+            a_sigmas = np.atleast_1d(
+                np.array(pop_info["alpha_0"]["sigma"], dtype=float)
+            )
+            for i in range(len(a_means)):
+                label = f"alpha_0[{i}]"
+                if not np.isnan(a_means[i]):
+                    _row(
+                        label,
+                        f"Normal(μ={a_means[i]:.3g}, σ={a_sigmas[i]:.3g}) via Copula",
+                        scope_alpha_0,
+                    )
+                else:
+                    a_min = 1.0 + EPS
+                    a_max = float(prior_config.get("max_alpha_0", 5))
+                    _row(
+                        label,
+                        f"Uniform({a_min:.3g}, {a_max:.3g}) via Copula",
+                        scope_alpha_0,
+                    )
+
+            l_means = np.atleast_1d(
+                np.array(pop_info["log_Aprime"]["mean"], dtype=float)
+            )
+            l_sigmas = np.atleast_1d(
+                np.array(pop_info["log_Aprime"]["sigma"], dtype=float)
+            )
+            logA_high = float(np.log(1000))
+            for i in range(len(l_means)):
+                label = f"log_Aprime[{i}]"
+                if not np.isnan(l_means[i]):
+                    _row(
+                        label,
+                        f"Normal(μ={l_means[i]:.3g}, σ={l_sigmas[i]:.3g}) via Copula",
+                        "[n_obj x n_filt]",
+                    )
+                else:
+                    _row(
+                        label,
+                        f"Uniform(0, {logA_high:.3g}) via Copula",
+                        "[n_obj x n_filt]",
+                    )
+
+            # Correlation matrix
+            corr_arr = jnp.array(pop_info["corr"])
+            corr_str = np.array2string(
+                np.asarray(corr_arr), precision=2, separator="  ", suppress_small=True
+            )
+            corr_lines = corr_str.split("\n")
+            _row("corr", corr_lines[0], f"[{corr_arr.shape[0]}×{corr_arr.shape[1]}]")
+            for line in corr_lines[1:]:
+                print(f"  {'':20s} {line}")
+
+        else:
+            # t_rise
+            pop_t = pop_info.get("t_rise") if pop_info else None
+            if pop_t is not None:
+                _row("t_rise", f"Normal({pop_t['mean']}, {pop_t['sigma']})", "[n_obj]")
+            elif prior_config.get("prior_type", "uniform").lower() in (
+                "gaussian",
+                "normal",
+            ):
+                mt = prior_config.get("mean_t_rise", 18)
+                st = prior_config.get("sigma_t_rise", 1.5)
+                _row("t_rise", f"TruncatedNormal({mt}, {st})", "[n_obj]")
             else:
                 _row(
+                    "t_rise",
+                    f"Uniform(EPS, {prior_config.get('t_rise_max', 40)})",
+                    "[n_obj]",
+                )
+
+            # alpha_0
+            pop_a = pop_info.get("alpha_0") if pop_info else None
+            if pop_a is not None:
+                _row(
                     "alpha_0",
-                    "MaxEnt Gamma(concentration=..., rate=...) + 1",
+                    f"Normal(mean={pop_a['mean']}, sigma={pop_a['sigma']})",
                     scope_alpha_0,
                 )
-        elif prior_type == "normal":
-            me = prior_config.get("mean_alpha_0", 2)
-            se = prior_config.get("sigma_alpha_0")  # user must provide
-            _row("alpha_0", f"TruncatedNormal({me}, {se})", scope_alpha_0)
-        elif prior_type == "miller":
-            _row("alpha_0", "Exponential(log(10))", scope_alpha_0)
+            elif prior_type == "uniform":
+                mn = prior_config.get("min_alpha_0", 1)
+                mx = prior_config.get("max_alpha_0", 5)
+                _row("alpha_0", f"Uniform({mn}, {mx})", scope_alpha_0)
+            elif prior_type == "maximum_entropy":
+                me = prior_config.get("mean_alpha_0", 2)
+                se = prior_config.get("sigma_alpha_0", None)
+                if se is None:
+                    _row(
+                        "alpha_0",
+                        f"MaxEnt Exponential(rate={1 / (me - 1):.2f}) + 1",
+                        scope_alpha_0,
+                    )
+                else:
+                    _row(
+                        "alpha_0",
+                        "MaxEnt Gamma(concentration=..., rate=...) + 1",
+                        scope_alpha_0,
+                    )
+            elif prior_type == "normal":
+                me = prior_config.get("mean_alpha_0", 2)
+                se = prior_config.get("sigma_alpha_0")
+                _row("alpha_0", f"TruncatedNormal({me}, {se})", scope_alpha_0)
+            elif prior_type == "miller":
+                _row("alpha_0", "Exponential(log(10))", scope_alpha_0)
 
-        # log_Aprime / Aprime
-        pop_l = pop_info.get("log_Aprime") if pop_info else None
-        if pop_l is not None:
-            _row(
-                "log_Aprime",
-                f"Normal(mean={pop_l['mean']}, sigma={pop_l['sigma']})",
-                "[n_obj x n_filt]",
-            )
-        else:
-            _row("log_Aprime", "Uniform(0, log(1000))", "[n_obj x n_filt]")
+            # log_Aprime / Aprime
+            pop_l = pop_info.get("log_Aprime") if pop_info else None
+            if pop_l is not None:
+                _row(
+                    "log_Aprime",
+                    f"Normal(mean={pop_l['mean']}, sigma={pop_l['sigma']})",
+                    "[n_obj x n_filt]",
+                )
+            else:
+                _row("log_Aprime", "Uniform(0, log(1000))", "[n_obj x n_filt]")
 
-        # population prior summary
-        if pop_info:
-            corr_tag = " with correlations" if pop_info.get("corr") else ""
-            specified = [
-                k for k in ("t_rise", "alpha_0", "log_Aprime") if k in pop_info
-            ]
-            _row("pop. prior", f"{' + '.join(specified)}{corr_tag}", "replaces default")
-        else:
-            _row("pop. prior", "none", "")
+            # population prior summary
+            if pop_info:
+                corr_tag = " with correlations" if pop_info.get("corr") else ""
+                specified = [
+                    k for k in ("t_rise", "alpha_0", "log_Aprime") if k in pop_info
+                ]
+                _row(
+                    "pop. prior",
+                    f"{' + '.join(specified)}{corr_tag}",
+                    "replaces default",
+                )
+            else:
+                _row("pop. prior", "none", "")
 
     # ── Hierarchical ────────────────────────────────────────────────────
     elif model_structure in ("hierarchical", "hierarchical_mvn"):
@@ -552,7 +631,7 @@ def summarize_priors(model_structure: str, prior_config: dict, n_filt: int, n_ob
         d = 1 + 2 * n_filt
 
         print("\n  Hyperpriors:")
-        _row("mean_t_rise", "Uniform(EPS, 40)", "")
+        _row("mean_t_rise", "Uniform(5.0, 35.0)", "")
         _row("sigma_t_rise", "HalfCauchy(1.5)", "")
         _row("mean_alpha_0", "Uniform(1+EPS, 4)", "[n_filt]")
         _row("sigma_alpha_0", "HalfCauchy(0.3)", "[n_filt]")
@@ -569,7 +648,7 @@ def summarize_priors(model_structure: str, prior_config: dict, n_filt: int, n_ob
         _row("theta", tag, "[n_obj]")
         _row("t_rise", "TruncatedNormal(µ₁, σ₁, low=EPS)", "[n_obj]")
         _row("alpha_0", "TruncatedNormal(µ₂₋₃, σ₂₋₃, low=1+EPS)", "[n_obj x n_filt]")
-        _row("log_Aprime", "Normal(µ₄₋₅, σ₄₋₅, low=0, high=log(1000))", "[n_obj x n_filt]")
+        _row("log_Aprime", "Normal(µ₄₋₅, σ₄₋₅)", "[n_obj x n_filt]")
 
     print(f"{'=' * 80}\n")
 
@@ -590,7 +669,7 @@ def build_population_informed_params(prior_config: dict, n_filt: int) -> dict:
     Returns
     -------
     result : dict
-        One of three forms:
+        One of four forms:
 
         - ``{"type": "none"}`` -- no population priors specified; caller
           should fall through to existing flat priors.
@@ -601,11 +680,20 @@ def build_population_informed_params(prior_config: dict, n_filt: int) -> dict:
             "mu": jnp.ndarray, "L": jnp.ndarray,
             "param_order": [(name, is_per_filter, n_elements), ...]}``
           -- joint multivariate-Normal prior over all specified parameters.
+        - ``{"type": "copula",
+            "L_corr": jnp.ndarray, "specs": list[dict], "n_filt": int}``
+          -- Gaussian copula with mixed normal/uniform marginals.
     """
     pop = prior_config.get("population_priors", None)
     if not pop:
         return {"type": "none"}
 
+    # ── Copula mode: all three param keys present + correlation matrix ──
+    has_all_keys = all(k in pop for k in ("t_rise", "alpha_0", "log_Aprime"))
+    if has_all_keys and pop.get("corr") is not None:
+        return _build_copula_params(pop, prior_config, n_filt)
+
+    # ── Legacy modes: independent or MVN over specified params ──
     # Collect specified parameters in canonical order: scalar first, then
     # per-filter parameters expanded across filters.
     param_order = []  # list of (name, is_per_filter, n_elements)
@@ -668,3 +756,63 @@ def build_population_informed_params(prior_config: dict, n_filt: int) -> dict:
                 }
             idx += n_elem
         return {"type": "independent", "params": params}
+
+
+def _build_copula_params(pop: dict, prior_config: dict, n_filt: int) -> dict:
+    """Build a Gaussian-copula population prior over all dims (mixed normal/uniform marginals)."""
+
+    n_filt_config = len(list(pop["alpha_0"]["mean"]))
+    if n_filt != n_filt_config:
+        raise ValueError(
+            f"n_filt mismatch: config has {n_filt_config}, data has {n_filt}"
+        )
+
+    specs = []
+
+    # ── t_rise (1 scalar dim) ──
+    t_mean = pop["t_rise"].get("mean")
+    t_sigma = pop["t_rise"].get("sigma")
+    if t_mean is not None:
+        specs.append({"type": "normal", "mean": float(t_mean), "sigma": float(t_sigma)})
+    else:
+        t_min = prior_config.get("t_rise_min", EPS)
+        t_max = prior_config.get("t_rise_max", 40)
+        specs.append({"type": "uniform", "low": float(t_min), "high": float(t_max)})
+
+    # ── alpha_0 (n_filt dims) ──
+    alpha_means = list(pop["alpha_0"]["mean"])
+    alpha_sigmas = list(pop["alpha_0"]["sigma"])
+    for m, s in zip(alpha_means, alpha_sigmas):
+        if m is not None:
+            specs.append({"type": "normal", "mean": float(m), "sigma": float(s)})
+        else:
+            a_min = 1.0 + EPS
+            a_max = float(prior_config.get("max_alpha_0", 5))
+            specs.append({"type": "uniform", "low": a_min, "high": a_max})
+
+    # ── log_Aprime (n_filt dims) ──
+    logA_means = list(pop["log_Aprime"]["mean"])
+    logA_sigmas = list(pop["log_Aprime"]["sigma"])
+    logA_high = float(np.log(1000))
+    for m, s in zip(logA_means, logA_sigmas):
+        if m is not None:
+            specs.append({"type": "normal", "mean": float(m), "sigma": float(s)})
+        else:
+            specs.append({"type": "uniform", "low": 0.0, "high": logA_high})
+
+    # ── Correlation matrix ──
+    corr_raw = pop.get("corr")
+    corr = jnp.array(corr_raw, dtype=float)
+    if corr.shape != (len(specs), len(specs)):
+        raise ValueError(
+            f"Corr matrix shape {corr.shape} does not match "
+            f"the total number of dimensions ({len(specs)}). "
+        )
+    L_corr = jnp.linalg.cholesky(corr)
+
+    return {
+        "type": "copula",
+        "L_corr": L_corr,
+        "specs": specs,
+        "n_filt": n_filt,
+    }

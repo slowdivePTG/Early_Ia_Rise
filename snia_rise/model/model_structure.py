@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import numpyro
+from jax.scipy.special import ndtr
 from numpy.typing import ArrayLike
 from numpyro import distributions as dist
 
@@ -339,6 +340,51 @@ def unpooled_model(
                     amp_prime = numpyro.deterministic("Aprime", jnp.exp(log_amp))
                 else:
                     amp_prime = sample_amp_prime()
+
+    elif pop_info["type"] == "copula":
+        # Gaussian copula with mixed normal/uniform marginals
+        specs = pop_info["specs"]
+        L_corr = pop_info["L_corr"]
+        n_copula_dim = len(specs)
+
+        with numpyro.plate("obj", n_obj):
+            theta_raw = numpyro.sample(
+                "theta_raw",
+                dist.Normal(0, 1).expand([n_copula_dim]).to_event(1),
+            )
+        z = theta_raw @ L_corr.T
+
+        # Apply per-dimension transforms
+        theta = jnp.zeros_like(z)
+        for i, spec in enumerate(specs):
+            if spec["type"] == "normal":
+                theta = theta.at[..., i].set(
+                    spec["mean"] + spec["sigma"] * z[..., i]
+                )
+            else:
+                u = ndtr(z[..., i])
+                theta = theta.at[..., i].set(
+                    spec["low"] + (spec["high"] - spec["low"]) * u
+                )
+
+        t_rise = numpyro.deterministic(
+            "t_rise", jnp.clip(theta[..., 0], EPS, None)
+        )
+
+        alpha_0_slice = theta[..., 1 : 1 + n_filt]
+        log_Ap_slice = theta[..., 1 + n_filt :]
+
+        with numpyro.plate("obj", n_obj, dim=-2):
+            with numpyro.plate("filt", n_filt, dim=-1):
+                alpha_0 = numpyro.deterministic(
+                    "alpha_0",
+                    jnp.clip(alpha_0_slice, 1 + EPS, None),
+                )
+                log_amp = numpyro.deterministic(
+                    "log_Aprime",
+                    jnp.clip(log_Ap_slice, 0, jnp.log(1e3)),
+                )
+                amp_prime = numpyro.deterministic("Aprime", jnp.exp(log_amp))
 
     elif pop_info["type"] == "independent":
         pp = pop_info["params"]

@@ -7,7 +7,6 @@ from numpy.typing import ArrayLike
 if TYPE_CHECKING:
     from ..model.lightcurve import SNLightCurveLib
 
-
 def set_plot_style():
     """
     Set a consistent plot style for matplotlib plots.
@@ -109,6 +108,7 @@ def show_kde_posterior(
     lib: "SNLightCurveLib",
     param: str,
     ax: plt.Axes | list[plt.Axes],
+    idx_filt: int = None,
     x_range=None,
     **kwargs,
 ):
@@ -117,13 +117,11 @@ def show_kde_posterior(
 
     sample = lib.post_sample.copy()
 
-    for k in range(len(np.unique(lib.idx_filt))):
-        sample[f"mean_alpha_flt{k + 1}"] = sample["mean_alpha_0"][..., k]
-        sample[f"sigma_alpha_flt{k + 1}"] = sample["sigma_alpha_0"][..., k]
-        sample[f"mean_log_Aprime_flt{k + 1}"] = sample["mean_log_Aprime"][..., k]
-        sample[f"sigma_log_Aprime_flt{k + 1}"] = sample["sigma_log_Aprime"][..., k]
+    if idx_filt is None:
+        param_1d = sample[param].values.flatten()
+    else:
+        param_1d = sample[param].values[..., idx_filt].flatten()
 
-    param_1d = sample[param].values.flatten()
     if x_range is not None:
         param_1d = param_1d[(param_1d >= x_range[0]) & (param_1d <= x_range[1])]
 
@@ -140,13 +138,24 @@ def show_kde_posterior(
     ax.set_ylabel("")
 
 
-def show_t_rise_value_comparison(
-    mock_libs, colors, labels, truths=None, ax=None, sublibs=None
+def show_param_comparison(
+    mock_libs,
+    colors,
+    labels,
+    param,
+    x_range_mean=None,
+    x_range_sigma=None,
+    idx_filt=None,
+    truths=None,
+    ax=None,
+    sublibs=None,
 ):
+    """Generic two-panel KDE comparison for a parameter's mean and sigma."""
+
     n_lib = len(mock_libs)
 
-    if ax is None:  # Create subplots if no axes are provided
-        fix, ax = plt.subplots(
+    if ax is None:
+        fig, ax = plt.subplots(
             1, 2, figsize=(12, 3), constrained_layout=True, sharey="col", sharex="col"
         )
 
@@ -156,23 +165,28 @@ def show_t_rise_value_comparison(
                 truths[j], color="0.5", linestyle=":", lw=5, alpha=0.5, zorder=-1
             )
 
+    param_mean = f"mean_{param}"
+    param_sigma = f"sigma_{param}"
+
     for k in range(n_lib):
         mock_lib = mock_libs[k]
         color = colors[k]
         label = labels[k]
         show_kde_posterior(
             mock_lib,
-            param="mean_t_rise",
+            param=param_mean,
+            idx_filt=idx_filt,
             ax=ax[0],
-            x_range=(15, 25),
+            x_range=x_range_mean,
             color=color,
             label=label,
         )
         show_kde_posterior(
             mock_lib,
-            param="sigma_t_rise",
+            param=param_sigma,
+            idx_filt=idx_filt,
             ax=ax[1],
-            x_range=(0.5, 3.5),
+            x_range=x_range_sigma,
             color=color,
             label=label,
         )
@@ -186,65 +200,113 @@ def show_t_rise_value_comparison(
             if sublibs[k] is not None:
                 show_kde_posterior(
                     sublibs[k],
-                    param="mean_t_rise",
+                    param=param_mean,
+                    idx_filt=idx_filt,
                     ax=ax[0],
-                    x_range=(15, 25),
+                    x_range=x_range_mean,
                     color=colors[k],
                     linestyle="--",
                     alpha=0.1,
                 )
                 show_kde_posterior(
                     sublibs[k],
-                    param="sigma_t_rise",
+                    param=param_sigma,
+                    idx_filt=idx_filt,
                     ax=ax[1],
-                    x_range=(0.5, 3.5),
+                    x_range=x_range_sigma,
                     color=colors[k],
                     linestyle="--",
                     alpha=0.1,
                 )
 
-    ax[0].set_xlabel(r"$\mu_{t_\mathrm{rise}}\ [\mathrm{day}]$")
-    ax[1].set_xlabel(r"$\sigma_{t_\mathrm{rise}}\ [\mathrm{day}]$")
-
     return ax
 
 
-def show_alpha_value_comparison(
-    mock_libs, colors, labels, truths=None, ax=None, sublibs=None
+def show_weighted_mean_comparison(
+    mock_libs,
+    colors,
+    labels,
+    param,
+    x_range_mean=None,
+    x_range_weighted=None,
+    idx_filt=None,
+    truth=None,
+    ax=None,
+    sublibs=None,
+    param_weighted=None,
 ):
+    """Two-panel KDE: naive population mean (left) vs weighted bootstrap mean (right).
+
+    Parameters
+    ----------
+    mock_libs : list
+        List of SNLightCurveLib objects.
+    colors : list
+        Colors for each library.
+    labels : list
+        Labels for each library.
+    param : str
+        Base parameter name.  The left panel shows ``mean_{param}``.
+        The right panel shows ``weighted_{param}`` (or *param_weighted*
+        if provided), falling back to ``mean_{param}`` when the weighted
+        variable is absent from a library's post_sample.
+    x_range_mean, x_range_weighted : tuple or None
+        x-axis limits for each panel.
+    idx_filt : int or None
+        Filter index for per-filter parameters.  Passed through to
+        :func:`show_kde_posterior`.
+    truth : float or None
+        Vertical reference line.
+    ax : array of Axes or None
+        Pre-existing axes (1×2 layout expected).
+    sublibs : list or None
+        Sublibraries for faint overlay (same length as mock_libs).
+    param_weighted : str or None
+        Explicit name for the weighted parameter.  If None,
+        ``weighted_{param}`` is used.
+    """
     n_lib = len(mock_libs)
 
-    if ax is None:  # Create subplots if no axes are provided
-        fix, ax = plt.subplots(
+    if ax is None:
+        fig, ax = plt.subplots(
             1, 2, figsize=(12, 3), constrained_layout=True, sharey="col", sharex="col"
         )
 
-    if truths is not None:
+    if truth is not None:
         for j in range(len(ax)):
             ax[j].axvline(
-                truths[j], color="0.5", linestyle=":", lw=5, alpha=0.5, zorder=-1
+                truth, color="0.5", linestyle=":", lw=5, alpha=0.5, zorder=-1
             )
+
+    param_naive = f"mean_{param}"
+    param_w = param_weighted if param_weighted is not None else f"weighted_{param}"
 
     for k in range(n_lib):
         mock_lib = mock_libs[k]
         color = colors[k]
         label = labels[k]
+
         show_kde_posterior(
             mock_lib,
-            param="mean_alpha_flt2",
+            param=param_naive,
+            idx_filt=idx_filt,
             ax=ax[0],
-            x_range=(1, 5),
+            x_range=x_range_mean,
             color=color,
             label=label,
         )
+
+        p_right = param_w if param_w in mock_lib.post_sample else param_naive
         show_kde_posterior(
             mock_lib,
-            param="sigma_alpha_flt2",
+            param=p_right,
+            idx_filt=idx_filt,
             ax=ax[1],
-            x_range=(0, 2),
+            x_range=x_range_weighted,
             color=color,
             label=label,
         )
+
         for _ax in ax[1:]:
             _ax.set_ylabel("")
         for _ax in ax:
@@ -255,139 +317,30 @@ def show_alpha_value_comparison(
             if sublibs[k] is not None:
                 show_kde_posterior(
                     sublibs[k],
-                    param="mean_alpha_flt2",
+                    param=param_naive,
+                    idx_filt=idx_filt,
                     ax=ax[0],
-                    x_range=(1, 5),
+                    x_range=x_range_mean,
                     color=colors[k],
                     linestyle="--",
                     alpha=0.1,
                 )
+                p_right = (
+                    param_w
+                    if param_w in sublibs[k].post_sample
+                    else param_naive
+                )
                 show_kde_posterior(
                     sublibs[k],
-                    param="sigma_alpha_flt2",
+                    param=p_right,
+                    idx_filt=idx_filt,
                     ax=ax[1],
-                    x_range=(0, 2),
+                    x_range=x_range_weighted,
                     color=colors[k],
                     linestyle="--",
                     alpha=0.1,
                 )
 
-    ax[0].set_xlabel(r"$\mu_{\alpha_r}$")
-    ax[1].set_xlabel(r"$\sigma_{\alpha_r}$")
-
-    return ax
-
-
-def show_log_Aprime_value_comparison(
-    mock_libs, colors, labels, truths=None, ax=None, sublibs=None
-):
-    n_lib = len(mock_libs)
-
-    if ax is None:  # Create subplots if no axes are provided
-        fix, ax = plt.subplots(
-            1, 2, figsize=(12, 3), constrained_layout=True, sharey="col", sharex="col"
-        )
-
-    if truths is not None:
-        for j in range(len(ax)):
-            ax[j].axvline(
-                truths[j], color="0.5", linestyle=":", lw=5, alpha=0.5, zorder=-1
-            )
-
-    for k in range(n_lib):
-        mock_lib = mock_libs[k]
-        color = colors[k]
-        label = labels[k]
-        show_kde_posterior(
-            mock_lib,
-            param="mean_log_Aprime_flt2",
-            ax=ax[0],
-            x_range=(3, 4.5),
-            color=color,
-            label=label,
-        )
-        show_kde_posterior(
-            mock_lib,
-            param="sigma_log_Aprime_flt2",
-            ax=ax[1],
-            x_range=(0, 2),
-            color=color,
-            label=label,
-        )
-        for _ax in ax[1:]:
-            _ax.set_ylabel("")
-        for _ax in ax:
-            _ax.set_yticks([])
-
-    if sublibs is not None:
-        for k in range(n_lib):
-            if sublibs[k] is not None:
-                show_kde_posterior(
-                    sublibs[k],
-                    param="mean_log_Aprime_flt2",
-                    ax=ax[0],
-                    x_range=(3, 4.5),
-                    color=colors[k],
-                    linestyle="--",
-                    alpha=0.1,
-                )
-                show_kde_posterior(
-                    sublibs[k],
-                    param="sigma_log_Aprime_flt2",
-                    ax=ax[1],
-                    x_range=(0, 2),
-                    color=colors[k],
-                    linestyle="--",
-                    alpha=0.1,
-                )
-
-    ax[0].set_xlabel(r"$\mu_{\ln A_r}$")
-    ax[1].set_xlabel(r"$\sigma_{\ln A_r}$")
-
-    return ax
-
-
-def show_color_value_comparison(mock_libs, colors, labels, truths=None, ax=None):
-    n_lib = len(mock_libs)
-
-    if ax is None:  # Create subplots if no axes are provided
-        fix, ax = plt.subplots(
-            1, 2, figsize=(12, 3), constrained_layout=True, sharey="col", sharex="col"
-        )
-
-    if truths is not None:
-        for j in range(len(ax)):
-            ax[j].axvline(
-                truths[j], color="0.5", linestyle=":", lw=5, alpha=0.5, zorder=-1
-            )
-
-    for k in range(n_lib):
-        mock_lib = mock_libs[k]
-        color = colors[k]
-        label = labels[k]
-        show_kde_posterior(
-            mock_lib,
-            param="mean_alpha_flt1-flt2",
-            ax=ax[0],
-            x_range=(-1, 1),
-            color=color,
-            label=label,
-        )
-        show_kde_posterior(
-            mock_lib,
-            param="sigma_alpha_flt1-flt2",
-            ax=ax[1],
-            x_range=(0, 1),
-            color=color,
-            label=label,
-        )
-        for _ax in ax[1:]:
-            _ax.set_ylabel("")
-        for _ax in ax:
-            _ax.set_yticks([])
-
-    ax[0].set_xlabel(r"$\mu_{\alpha_g - \alpha_r}$")
-    ax[1].set_xlabel(r"$\sigma_{\alpha_g - \alpha_r}$")
     return ax
 
 

@@ -636,20 +636,13 @@ class SNLightCurveLib(object):
                             dim="obj",
                         )
 
-        # Post-calculate t_thresh, xi_thresh and the related correlations
+        # Post-calculate t_thresh
         exponent = sample["alpha_0"]  # only for power-law model right now
         log_t_thresh = (
             np.log10(f_thresh * 100) - np.log10(sample["Aprime"])
         ) / exponent
         sample["t_thresh"] = 10**log_t_thresh * t_pivot
-        sample["xi"] = sample["t_thresh"] / sample["t_rise"]
-        n_filt = sample.sizes["filt"]
-        for j in range(n_filt):
-            sample[f"corr_t_rise_xi_flt{j + 1}"] = xr.corr(
-                sample["t_rise"],
-                sample["xi"][..., j],
-                dim="obj",
-            )
+        sample["t_from_thresh"] = sample["t_rise"] - sample["t_thresh"]
 
         return sample
 
@@ -704,11 +697,22 @@ class SNLightCurveLib(object):
 
             # A: (n_chains, n_samples, n_obj, n_filt)
             lc.post_sample["Aprime"] = self.post_sample["Aprime"][..., k, filt_in_obj]
-            # lc.post_sample["A"] = self.post_sample["A"][..., k, :]
+            if "log_Aprime" in self.post_sample.keys():
+                lc.post_sample["log_Aprime"] = self.post_sample["log_Aprime"][
+                    ..., k, filt_in_obj
+                ]
 
             # t_fl: (n_chains, n_samples, n_obj)
             lc.post_sample["t_rise"] = self.post_sample["t_rise"][..., k]
             lc.post_sample["t_fl"] = self.post_sample["t_fl"][..., k]
+            if "t_thresh" in self.post_sample.keys():
+                lc.post_sample["t_thresh"] = self.post_sample["t_thresh"][
+                    ..., k, filt_in_obj
+                ]
+            if "t_from_thresh" in self.post_sample.keys():
+                lc.post_sample["t_from_thresh"] = self.post_sample["t_from_thresh"][
+                    ..., k, filt_in_obj
+                ]
 
             if model_structure == "pooled":  # Pooled:  all objects share alpha_0
                 # alpha_0: (n_chains, n_samples, n_filt)
@@ -1554,7 +1558,7 @@ class SNLightCurveLib(object):
             Path for the output ``.nc`` file.
         """
         ds = xr.Dataset(self.post_sample)
-        ds.attrs["pop_prior"] = str(self.pop_prior)
+        ds.attrs["pop_prior"] = self.pop_prior if self.pop_prior else ""
         ds.to_netcdf(file_path)
         print(f"Saved posterior samples to: {file_path}")
 
@@ -1919,6 +1923,191 @@ class SNLightCurveLib(object):
         aggregated_post = _aggregate_samples("post_sample")
         if aggregated_post is not None:
             self.post_sample = self.decode_sample(aggregated_post)
+
+    def bootstrap_weighted_mean(
+        self, n_bootstrap: int = 2000, rng_seed: int = None, debug: bool = False
+    ):
+        """
+        Estimate the population weighted mean via inverse-variance-weighted bootstrapping.
+
+        For each key parameter (t\\_rise, alpha\\_0, log\\_Aprime), the 68% ETI
+        (P84 -- P16) is computed from each object's per-object posterior.  The
+        inverse-square of this width defines the per-object weight for that
+        parameter.  A bootstrap then resamples objects with probability
+        proportional to these weights and computes the simple mean of their
+        posterior draws, repeated ``n_bootstrap`` times.
+
+        The resulting bootstrap distributions are stored in ``self.post_sample``
+        as new variables prefixed with ``weighted_``.  When ``debug=True`` the
+        per-object ETI widths and normalized weights are also stored.
+
+        Parameters
+        ----------
+        n_bootstrap : int
+            Number of bootstrap iterations (default 2000).
+        rng_seed : int or None
+            Seed for the RNG (default None).
+        debug : bool
+            If True, store per-object ETI widths and weights as diagnostic
+            variables in ``self.post_sample``.
+        """
+        import numpy as np
+
+        if self.model_structure != "unpooled":
+            raise ValueError(
+                "bootstrap_weighted_mean is only available for unpooled models. "
+                f"Current model: {self.model_structure}"
+            )
+
+        if self.post_sample is None:
+            raise ValueError("No post_sample found. Run aggregate_samples() first.")
+
+        rng = np.random.default_rng(rng_seed)
+
+        if "obj" not in self.post_sample.dims or self.post_sample.sizes["obj"] == 0:
+            raise ValueError(
+                "post_sample has no obj dimension. Run aggregate_samples() first."
+            )
+        n_obj = self.post_sample.sizes["obj"]
+
+        # Key parameters (log_Aprime may be absent for curved/broken models)
+        key_params = [
+            p for p in ["t_rise", "alpha_0", "log_Aprime"] if p in self.post_sample
+        ]
+        n_filt = self.post_sample.sizes.get("filt", 0)
+
+        # ── Helper: bootstrap one parameter array ──
+        def _bs_one(arr):
+            """Bootstrap one parameter.
+            arr : (n_obj, n_total) or (n_obj, n_total, n_filt)
+            Returns (eti, weight, bstr) with shapes:
+              eti/weight : (n_obj,) or (n_obj, n_filt)
+              bstr       : (n_bootstrap,) or (n_bootstrap, n_filt)
+            """
+            is_scalar = arr.ndim == 2
+            n_obj_local, n_total = arr.shape[:2]
+            lo = np.percentile(arr, 16, axis=1)
+            hi = np.percentile(arr, 84, axis=1)
+            eti = hi - lo
+            w = 1.0 / eti**2
+            w[~np.isfinite(w)] = 0.0
+            s = w.sum(axis=0, keepdims=True)
+            s[s == 0] = 1.0
+            weight = w / s
+            if is_scalar:
+                out = np.empty(n_bootstrap)
+                for b in range(n_bootstrap):
+                    sel = rng.choice(n_obj_local, size=n_obj_local, p=weight)
+                    di = rng.integers(0, n_total, size=n_obj_local)
+                    out[b] = np.mean(arr[sel, di])
+            else:
+                n_flt = arr.shape[2]
+                out = np.empty((n_bootstrap, n_flt))
+                for f in range(n_flt):
+                    if weight[:, f].sum() == 0:
+                        out[:, f] = np.nan
+                        continue
+                    wf = weight[:, f]
+                    for b in range(n_bootstrap):
+                        sel = rng.choice(n_obj_local, size=n_obj_local, p=wf)
+                        di = rng.integers(0, n_total, size=n_obj_local)
+                        out[b, f] = np.mean(arr[sel, di, f])
+            return eti, weight, out
+
+        # ── Pre-collect key-parameter draws & bootstrap ──
+        eti = {}
+        weight = {}
+        bstr = {}
+        for p in key_params:
+            vals = []
+            for k in range(n_obj):
+                arr = self.post_sample[p].isel(obj=k).values
+                if p == "t_rise":
+                    vals.append(arr.ravel())
+                else:
+                    vals.append(arr.reshape(-1, n_filt))
+            eti[p], weight[p], bstr[p] = _bs_one(np.array(vals))
+
+        # ── t_from_thresh ──
+        has_tfth = "t_from_thresh" in self.post_sample
+        if has_tfth:
+            vals = [
+                self.post_sample["t_from_thresh"].isel(obj=k).values.reshape(-1, n_filt)
+                for k in range(n_obj)
+            ]
+            eti_tfth, weight_tfth, bstr_tfth = _bs_one(np.array(vals))
+
+        # ── alpha_j - alpha_k for colors (j < k) ──
+        has_alpha_pairs = n_filt >= 2 and "alpha_0" in self.post_sample
+        if has_alpha_pairs:
+            alpha_pairs = [(j, k) for j in range(n_filt) for k in range(j + 1, n_filt)]
+            eti_ajk_list = []
+            weight_ajk_list = []
+            bstr_ajk_list = []
+            for j, k in alpha_pairs:
+                vals = [
+                    (
+                        self.post_sample["alpha_0"]
+                        .isel(obj=idx)
+                        .values.reshape(-1, n_filt)[:, j]
+                        - self.post_sample["alpha_0"]
+                        .isel(obj=idx)
+                        .values.reshape(-1, n_filt)[:, k]
+                    )
+                    for idx in range(n_obj)
+                ]
+                eti_ajk, w_ajk, bstr_ajk = _bs_one(np.array(vals))
+                eti_ajk_list.append(eti_ajk)
+                weight_ajk_list.append(w_ajk)
+                bstr_ajk_list.append(bstr_ajk)
+
+        # ── Store in self.post_sample ──
+        self.post_sample = self.post_sample.assign_coords(
+            bootstrap=np.arange(n_bootstrap)
+        )
+
+        for p in key_params:
+            if p == "t_rise":
+                self.post_sample[f"weighted_{p}"] = (("bootstrap",), bstr[p])
+            else:
+                self.post_sample[f"weighted_{p}"] = (("bootstrap", "filt"), bstr[p])
+
+        if has_tfth:
+            self.post_sample["weighted_t_from_thresh"] = (
+                ("bootstrap", "filt"),
+                bstr_tfth,
+            )
+
+        if has_alpha_pairs:
+            for (j, k), b in zip(alpha_pairs, bstr_ajk_list):
+                self.post_sample[f"weighted_alpha_{j + 1}_{k + 1}"] = (
+                    ("bootstrap",),
+                    b,
+                )
+
+        if debug:
+            for p in key_params:
+                if p == "t_rise":
+                    self.post_sample[f"eti_{p}"] = (("obj",), eti[p])
+                    self.post_sample[f"weight_{p}"] = (("obj",), weight[p])
+                else:
+                    self.post_sample[f"eti_{p}"] = (("obj", "filt"), eti[p])
+                    self.post_sample[f"weight_{p}"] = (("obj", "filt"), weight[p])
+            if has_tfth:
+                self.post_sample["eti_t_from_thresh"] = (("obj", "filt"), eti_tfth)
+                self.post_sample["weight_t_from_thresh"] = (
+                    ("obj", "filt"),
+                    weight_tfth,
+                )
+            if has_alpha_pairs:
+                for (j, k), e, w in zip(alpha_pairs, eti_ajk_list, weight_ajk_list):
+                    self.post_sample[f"eti_alpha_{j + 1}_{k + 1}"] = (("obj",), e)
+                    self.post_sample[f"weight_alpha_{j + 1}_{k + 1}"] = (("obj",), w)
+
+        if debug:
+            print(f"Bootstrap weighted mean complete ({n_bootstrap} iterations).")
+            print(f"  Parameters: {key_params}")
+            print("  Diagnostics (ETI widths, weights) stored.")
 
     def plot_corner(
         self,
