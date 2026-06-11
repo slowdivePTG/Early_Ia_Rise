@@ -102,7 +102,7 @@ def hierarchical_broken_linear_model(
     if xb_mu is None or xb_sigma is None:
         xb = numpyro.sample("xb", dist.Uniform(xb_min, xb_max))
     else:
-        xb = numpyro.sample("xb", dist.TruncatedNormal(xb_mu, xb_sigma, xb_min, xb_max))
+        xb = numpyro.sample("xb", dist.TruncatedNormal(xb_mu, xb_sigma, low=xb_min, high=xb_max))
 
     # --- Physical Model Parameters (Scatter) ---
     sigma = numpyro.sample("sigma", dist.HalfNormal(1))
@@ -221,3 +221,151 @@ def run_comparison(idata_lin, idata_brok):
         return comp_df, xb_posterior
     else:
         return comp_df, None
+
+
+####### Posterior predictive checks and plotting functions #######
+def _flatten_posterior(idata):
+    """
+    Convert (chain, draw) dimensions into a single sample dimension.
+    """
+    posterior = {}
+
+    for var in idata.posterior.data_vars:
+        posterior[var] = idata.posterior[var].stack(sample=("chain", "draw")).values
+
+    return posterior
+
+
+def _evaluate_linear(samples, x_grid):
+
+    beta0 = samples["beta0"][:, None]
+    beta1 = samples["beta1"][:, None]
+
+    return beta0 + beta1 * x_grid[None, :]
+
+
+def _evaluate_broken(samples, x_grid):
+
+    beta0 = samples["beta0"][:, None]
+    beta1 = samples["beta1"][:, None]
+    beta2 = samples["beta2"][:, None]
+    xb = samples["xb"][:, None]
+
+    left = beta0 + beta1 * x_grid[None, :]
+    right = beta0 + beta1 * xb + beta2 * (x_grid[None, :] - xb)
+
+    return np.where(x_grid[None, :] < xb, left, right)
+
+
+def posterior_predictive(
+    idata,
+    model="lin",
+    x_grid=None,
+    include_intrinsic_scatter=True,
+):
+    """
+    Returns posterior predictive draws evaluated on x_grid.
+
+    Shape:
+        (n_draws, len(x_grid))
+    """
+
+    samples = _flatten_posterior(idata)
+
+    if model == "lin":
+        mu = _evaluate_linear(samples, x_grid)
+
+    elif model == "brok":
+        mu = _evaluate_broken(samples, x_grid)
+
+    else:
+        raise ValueError(model)
+
+    if include_intrinsic_scatter:
+        sigma = samples["sigma"][:, None]
+        rng = np.random.default_rng(1234)
+        y = mu + rng.normal(scale=sigma, size=mu.shape)
+
+        return y
+
+    return mu
+
+
+def plot_posterior_predictive(
+    idata,
+    model="lin",
+    include_intrinsic_scatter=True,
+    ax=None,
+    color="C0",
+    x_grid=None,
+):
+    """
+    Plot posterior predictive relation.
+
+    Parameters
+    ----------
+    idata : arviz.InferenceData
+
+    model : {"lin", "brok"}
+
+    include_intrinsic_scatter : bool
+        If True, band includes sigma_int.
+
+    ax : matplotlib axis
+
+    color : str
+
+    x_grid : array-like
+        Grid on which predictions are evaluated.
+    """
+
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        fig, ax = plt.subplots()
+
+    samples = _flatten_posterior(idata)
+
+    if x_grid is None:
+        if model == "brok":
+            x0 = np.median(samples["xb"])
+            x_grid = np.linspace(x0 - 3, x0 + 3, 500)
+        else:
+            x_grid = np.linspace(-3, 3, 500)
+
+    # --------------------------------------------------
+    # posterior predictive draws
+    # --------------------------------------------------
+
+    draws = posterior_predictive(
+        idata,
+        model=model,
+        x_grid=x_grid,
+        include_intrinsic_scatter=include_intrinsic_scatter,
+    )
+
+    n_draws = draws.shape[0]
+    rng = np.random.default_rng(42)
+    idx = rng.choice(n_draws, size=min(50, n_draws), replace=False)
+
+    # --------------------------------------------------
+    # median-parameter model
+    # --------------------------------------------------
+
+    median_samples = {k: np.array([np.median(v)]) for k, v in samples.items()}
+
+    if model == "lin":
+        model_line = _evaluate_linear(median_samples, x_grid)[0]
+
+    else:
+        model_line = _evaluate_broken(median_samples, x_grid)[0]
+
+    # --------------------------------------------------
+    # plotting
+    # --------------------------------------------------
+
+    for i in idx:
+        ax.plot(x_grid, draws[i], "-", color=color, lw=0.75, alpha=0.2, zorder=9)
+    ax.plot(x_grid, model_line, "--", color=color, lw=3.0, zorder=11)
+
+    return ax

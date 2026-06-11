@@ -6,7 +6,7 @@ import numpy as np
 import numpyro
 from astropy.table import Table
 
-from snia_rise._utils import set_best_platform, load_population_prior_config
+from snia_rise._utils import load_population_prior_config, set_best_platform
 from snia_rise.ztf_lc import SampleConfig, ZTFLib
 
 numpyro.enable_x64()
@@ -209,8 +209,8 @@ if __name__ == "__main__":
             source = "EDR"
 
         elif dr == "early_late":
-            dr_dir = "ztf_early_late"
-            tab_info = Table.read("./data/ztf_early_late/ztf_early_Ia.csv")
+            dr_dir = "ztf_snia_early_late"
+            tab_info = Table.read("./data/ztf_snia_early_late/ztf_early_Ia.csv")
             idx = tab_info["not_obs"].mask  # boolean mask already
             ztfid_col = "ztfid"
             x1_col = None  # x1-cut not supported for early_late
@@ -308,8 +308,6 @@ if __name__ == "__main__":
             model_tag = args.sampling_model
             if ztflib.pop_prior:
                 model_tag += f"_pop_prior_{ztflib.pop_prior}"
-            outfile = (
-                f"post_sample_{model_tag}{config.get_filename_suffix()}.nc"
-            )
+            outfile = f"post_sample_{model_tag}{config.get_filename_suffix()}.nc"
             ztflib.save_post_sample(file_dir / outfile)
             print(f"Saved posterior samples to: {file_dir / outfile}")

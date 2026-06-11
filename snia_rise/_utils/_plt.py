@@ -347,7 +347,7 @@ def show_weighted_mean_comparison(
 def show_corr_comparison(mock_libs, colors, labels, truths=None, ax=None, sublibs=None):
     if ax is None:  # Create subplots if no axes are provided
         fix, ax = plt.subplots(
-            1, 4, figsize=(14, 4), constrained_layout=True, sharey="col", sharex="col"
+            1, 4, figsize=(14, 3.6), constrained_layout=True, sharey="col", sharex="col"
         )
     n_lib = len(mock_libs)
 
@@ -377,10 +377,10 @@ def show_corr_comparison(mock_libs, colors, labels, truths=None, ax=None, sublib
                 color=color,
                 label=label,
             )
-        for _ax in ax[1:]:
-            _ax.set_ylabel("")
-        for _ax in ax:
-            _ax.set_yticks([])
+        # for _ax in ax[1:]:
+        #     _ax.set_ylabel("")
+        # for _ax in ax:
+        #     _ax.set_yticks([])
 
     if sublibs is not None:
         for k in range(n_lib):

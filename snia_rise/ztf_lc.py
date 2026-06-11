@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import xarray as xr
+from astropy.stats import mad_std
 from astropy.table import Table
 
 from ._utils import data_binning
@@ -122,7 +123,7 @@ class ZTFIaEarlyLate(SNLightCurve):
     ZTF SNe Ia with early light curves and nebular spectra
     """
 
-    late_dir: str = "./data/ztf_early_late/"
+    late_dir: str = "./data/ztf_snia_early_late/"
     meta_data_path: str = "ztf_early_Ia_meta.csv"
     salt_path: str = "ztf_early_Ia_salt.csv"
     lc_path: str = "light_curve_fps_ztf/*fnu.csv"
@@ -131,13 +132,19 @@ class ZTFIaEarlyLate(SNLightCurve):
     def __init__(self, ztfid: str, early_threshold: float = 0.4) -> None:
         meta_data = Table.read(self.late_dir + self.meta_data_path)
         salt_data = Table.read(self.late_dir + self.salt_path)
+        meta_data = meta_data[np.isin(meta_data["objid"], salt_data["ztfid"])]
         lc_list = sorted(glob.glob(self.late_dir + self.lc_path))
-        ztfid_list = meta_data["objid"].data
+        ztfid_list = [lc.split("/")[-1].split("_")[0] for lc in lc_list]
+        # ztfid_list = meta_data["objid"].data
         if ztfid not in ztfid_list:
             raise ValueError(f"ZTF ID {ztfid} not found in early light curves.")
-        tab_lc = pd.read_csv(
-            lc_list[ztfid_list.tolist().index(ztfid)], sep="\s+", comment="#"
-        )
+        try:
+            tab_lc = pd.read_csv(
+                lc_list[ztfid_list.index(ztfid)], sep="\s+", comment="#"
+            )
+        except:
+            print(ztfid_list, ztfid)
+            raise
         tab_lc = tab_lc.rename(
             columns={key: key.replace(",", "") for key in tab_lc.columns}
         )
@@ -171,18 +178,44 @@ class ZTFIaEarlyLate(SNLightCurve):
             10 ** (-0.4 * delta_zp)
         )
 
-        # Quality mask
-        # https://github.com/BrightTransientSurvey/ztf_forced_phot/tree/main/explanation#-flags-bitmask
-        mask = np.isfinite(
-            tab_lc["flux"]
-        )  # tab_lc["infobitssci"] <= 33554432 #TODO: Figure out why some fluxes are NaN
-
-        data = tab_lc[mask]
         t0 = salt_data[salt_data["ztfid"] == ztfid]["t0"].data[0]
-        t0_err = None  # salt_data[salt_data["ztfid"] == ztfid]["t0_err"].data[0]
+        t0_err = salt_data[salt_data["ztfid"] == ztfid]["t0_err"].data[0]
         z = meta_data[salt_data["ztfid"] == ztfid]["z"].data[0]
         flux_g_max = salt_data[salt_data["ztfid"] == ztfid]["ztfg_flux_max"].data[0]
         flux_r_max = salt_data[salt_data["ztfid"] == ztfid]["ztfr_flux_max"].data[0]
+
+        # Quality mask
+        # https://github.com/BrightTransientSurvey/ztf_forced_phot/tree/main/explanation#-flags-bitmask
+        mask = np.isfinite(tab_lc["flux"]) & (tab_lc["flux_err"] > 0)
+        # tab_lc["infobitssci"] <= 33554432 #TODO: Figure out why some fluxes are NaN
+
+        # Baseline outlier rejection (same as DR2, Liu et al. 2026)
+        phase_full = (tab_lc["jd"].to_numpy() - 2400000.5 - t0) / (1 + z)
+        idx_baseline = (phase_full < -30) & (phase_full > -100) & mask
+        if idx_baseline.sum() > 0:
+            bad_baseline = (
+                np.abs(
+                    tab_lc["flux"].to_numpy(dtype=np.float32)
+                    / tab_lc["flux_err"].to_numpy(dtype=np.float32)
+                )
+                > 10
+            ) & idx_baseline
+
+            for _fcqfid in np.unique(tab_lc["fcqfid"]):
+                idx_fcqfid = (tab_lc["fcqfid"] == _fcqfid).to_numpy()
+                idx_baseline_fcqfid = idx_baseline & idx_fcqfid
+                if idx_baseline_fcqfid.sum() > 0:
+                    n_bad = (bad_baseline & idx_fcqfid).sum()
+                    n_total = idx_baseline_fcqfid.sum()
+                    if n_bad > 0.5 * n_total:
+                        mask &= ~idx_fcqfid
+                        print(
+                            f"{ztfid}: {n_bad} bad points ({n_bad / n_total * 100:.1f}%) in {_fcqfid}: mask the field"
+                        )
+                    else:
+                        mask &= ~(bad_baseline & idx_fcqfid)
+
+        data = tab_lc[mask]
         flux = data["flux"]
         flux_err = data["flux_err"]
         phase = (data["jd"] - 2400000.5 - t0) / (1 + z)
@@ -229,6 +262,34 @@ class ZTFIaEarlyLate(SNLightCurve):
             tab_atlas_lc = tab_atlas_lc.rename(
                 columns={key: key.replace(",", "") for key in tab_atlas_lc.columns}
             )
+
+            # Sigma clipping in time bins to remove outliers
+            mjd = tab_atlas_lc["MJD"].values
+            flux = tab_atlas_lc["uJy"].values
+
+            mask_atlas = np.ones(len(tab_atlas_lc), dtype=bool)
+            min_mjd_bin = 1.8  # < 2 day
+            n_points = len(tab_atlas_lc)
+            i = 0
+            while i < n_points:
+                j = np.searchsorted(mjd, mjd[i] + min_mjd_bin, side="left")
+
+                if j - i > 1:
+                    bin_flux = flux[i:j]
+
+                    median_flux = np.median(bin_flux)
+                    robust_std = mad_std(bin_flux)
+
+                    # Prevent clipping if the scatter is artificially zero
+                    if robust_std > 0:
+                        mask_atlas[i:j] = np.abs(bin_flux - median_flux) <= (
+                            3 * robust_std
+                        )
+
+                i = j
+
+            # mask_atlas & = tab_atlas_lc["duJy"] > 1
+            tab_atlas_lc = tab_atlas_lc[mask_atlas]
             tab_atlas_lc["filter_id"] = np.select(
                 [
                     tab_atlas_lc["F"] == "c",
@@ -314,7 +375,7 @@ class ZTFIaEarlyLate(SNLightCurve):
                 "filt": np.concatenate((lc_peak["filt"], lc_peak_atlas["filt"])),
             }
 
-        super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid)
+        super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid, t0_err=t0_err)
 
 
 class ZTFIaDR2(SNLightCurve):
@@ -550,7 +611,7 @@ class SampleConfig:
         suffix = ""
         if self.volume_complete:
             suffix += "_volume_complete"
-        if self.early_coverage or self.source.lower() in ["early_late", "edr"]:
+        if self.early_coverage:
             suffix += "_early"
         if self.baseline_coverage:
             suffix += "_baseline"

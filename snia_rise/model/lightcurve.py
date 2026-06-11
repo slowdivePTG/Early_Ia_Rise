@@ -35,6 +35,7 @@ class SNLightCurve(object):
         lc_peak: dict = None,
         t0_err: float = None,
         ztfid: str = None,
+        filt_classes_global: list = None,
     ) -> None:
         try:
             self.ID = ztfid
@@ -52,7 +53,11 @@ class SNLightCurve(object):
             self.idx_fcqfid = fcqfid_encoder.fit_transform(fcqfid)
 
             filt_encoder = LabelEncoder()
-            self.idx_filt = filt_encoder.fit_transform(filt)
+            if filt_classes_global is not None:
+                filt_encoder.fit(filt_classes_global)
+                self.idx_filt = filt_encoder.transform(filt)
+            else:
+                self.idx_filt = filt_encoder.fit_transform(filt)
 
             # observations between -100 days and peak
             self.lc_peak = self._init_lc_package(lc_peak, fcqfids=np.unique(fcqfid))
@@ -164,6 +169,7 @@ class SNLightCurve(object):
             "idx_obj": jnp.zeros_like(self.idx_fcqfid, dtype=int),
             "idx_fcqfid": jnp.array(self.idx_fcqfid),
             "idx_filt": jnp.array(self.idx_filt),
+            "n_global_filt": prior_config.get("n_global_filt", len(np.unique(self.idx_filt))),
         }
 
         # --- DEFINE DIMENSIONS AND COORDINATES ---
@@ -182,9 +188,10 @@ class SNLightCurve(object):
         }
 
         # Local coordinates for this specific object run
+        n_filt_model = prior_config.get("n_global_filt", len(np.unique(self.idx_filt)))
         coords = {
-            "obj": [0],  # Single object, index 0
-            "filt": np.arange(len(np.unique(self.idx_filt))),
+            "obj": [0],
+            "filt": np.arange(n_filt_model),
             "fcqfid": np.arange(len(np.unique(self.idx_fcqfid))),
         }
 
@@ -295,7 +302,7 @@ class SNLightCurve(object):
                     self.lc_early["phase"][idx],
                     self.lc_early["flux"][idx]
                     - base_[idx]
-                    - (flt - 0.5 * (n_color - 1)) * offset,
+                    - (k - 0.5 * (n_color - 1)) * offset,
                     yerr=self.lc_early["flux_err"][idx] * beta_[idx],
                     color="w",
                     markeredgecolor=colors[k],
@@ -312,7 +319,7 @@ class SNLightCurve(object):
                         self.lc_peak["phase"][idx_peak],
                         self.lc_peak["flux"][idx_peak]
                         - base_[idx][0]
-                        - (flt - 0.5 * (n_color - 1)) * offset,
+                        - (k - 0.5 * (n_color - 1)) * offset,
                         yerr=self.lc_peak["flux_err"][idx_peak] * beta_[idx][0],
                         color="w",
                         markeredgecolor=colors[k],
@@ -327,10 +334,10 @@ class SNLightCurve(object):
             ax.set_ylim(-offset * (max(n_color, 2) - 1), 100 + offset)
 
             if post_sample is not None:
-                amp_prime_ = np.ravel(post_sample["Aprime"][..., flt])
-                alpha_0_ = np.ravel(post_sample["alpha_0"][..., flt])
+                amp_prime_ = np.ravel(post_sample["Aprime"][..., k])
+                alpha_0_ = np.ravel(post_sample["alpha_0"][..., k])
                 if "alpha_1" in post_sample.keys():
-                    alpha_1_ = np.ravel(post_sample["alpha_1"][..., flt])
+                    alpha_1_ = np.ravel(post_sample["alpha_1"][..., k])
                 else:
                     alpha_1_ = np.zeros_like(alpha_0_)
                 t_pred = jnp.linspace(-35, 1, 500)
@@ -346,7 +353,7 @@ class SNLightCurve(object):
                             alpha_1_[i],
                             t_pivot=T_PIVOT,
                         )
-                        - (flt - 0.5 * (n_color - 1)) * offset,
+                        - (k - 0.5 * (n_color - 1)) * offset,
                         color="0.5",
                         alpha=0.2,
                         lw=1,
@@ -435,6 +442,13 @@ class SNLightCurveLib(object):
         if t0_err is None:
             t0_err = [None] * len(lc_early_lib)
 
+        # Determine global filter classes from the union across all objects
+        all_filt_ids = np.unique(np.concatenate([
+            lc.get("filt", np.array([])) for lc in lc_early_lib if lc is not None
+        ]))
+        filt_classes_global = sorted(all_filt_ids) if len(all_filt_ids) > 0 else None
+        self.n_filt_global = len(filt_classes_global) if filt_classes_global is not None else 0
+
         if (lc_peak_lib is not None) and (ztfid_lib is not None):
             for k, lc_early in enumerate(lc_early_lib):
                 self.lc_library.append(
@@ -443,30 +457,41 @@ class SNLightCurveLib(object):
                         lc_peak=lc_peak_lib[k],
                         ztfid=ztfid_lib[k],
                         t0_err=t0_err[k],
+                        filt_classes_global=filt_classes_global,
                     )
                 )
         elif lc_peak_lib is not None:
             for k, lc_early in enumerate(lc_early_lib):
                 self.lc_library.append(
                     SNLightCurve(
-                        lc_early=lc_early, lc_peak=lc_peak_lib[k], t0_err=t0_err[k]
+                        lc_early=lc_early,
+                        lc_peak=lc_peak_lib[k],
+                        t0_err=t0_err[k],
+                        filt_classes_global=filt_classes_global,
                     )
                 )
         elif ztfid_lib is not None:
             for k, lc_early in enumerate(lc_early_lib):
                 self.lc_library.append(
                     SNLightCurve(
-                        lc_early=lc_early, ztfid=ztfid_lib[k], t0_err=t0_err[k]
+                        lc_early=lc_early,
+                        ztfid=ztfid_lib[k],
+                        t0_err=t0_err[k],
+                        filt_classes_global=filt_classes_global,
                     )
                 )
         else:
             for k, lc_early in enumerate(lc_early_lib):
                 self.lc_library.append(
-                    SNLightCurve(lc_early=lc_early), t0_err=t0_err[k]
+                    SNLightCurve(
+                        lc_early=lc_early,
+                        t0_err=t0_err[k],
+                        filt_classes_global=filt_classes_global,
+                    )
                 )
 
-        # Identify n_filt: number of unique filters across all objects
-        n_filt = max([len(np.unique(lc.idx_filt)) for lc in self.lc_library])
+        # Identify n_filt: number of filter slots globally
+        n_filt = self.n_filt_global
 
         for k, lc in enumerate(self.lc_library):
             if lc.n_obs == 0:
@@ -505,9 +530,7 @@ class SNLightCurveLib(object):
             print("Warning: Indexing gap found in idx_fcqfid. Re-indexing...")
             _, self.idx_fcqfid = np.unique(self.idx_fcqfid, return_inverse=True)
 
-        if len(self.idx_filt) > 0 and n_filt != self.idx_filt.max() + 1:
-            print("Warning: Indexing gap found in idx_filt. Re-indexing...")
-            _, self.idx_filt = np.unique(self.idx_filt, return_inverse=True)
+        # Filter indices use global encoding by design — gaps are expected and preserved.
         print("Number of objects:", n_obj)
         print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
         print("Number of filters:", n_filt)
@@ -796,11 +819,11 @@ class SNLightCurveLib(object):
 
             n_obj = len(np.unique(self.idx_obj))
             n_fcqfid = len(np.unique(self.idx_fcqfid))
-            n_filt = len(np.unique(self.idx_filt))
+            n_filt = getattr(self, 'n_filt_global', len(np.unique(self.idx_filt)))
 
             assert n_obj == self.idx_obj.max() + 1, "Indexing error: idx_obj"
             assert n_fcqfid == self.idx_fcqfid.max() + 1, "Indexing error: idx_fcqfid"
-            assert n_filt == self.idx_filt.max() + 1, "Indexing error: idx_filt"
+            # Filter indices use global encoding by design; gaps are expected
             print("Number of objects:", n_obj)
             print("Number of unique fcqfid:", len(np.unique(self.idx_fcqfid)))
             print("Number of filters:", n_filt)
@@ -935,6 +958,10 @@ class SNLightCurveLib(object):
     ):
         """Perform sampling for unpooled model using parallel processing."""
         from joblib import Parallel, delayed
+
+        # Inject global filter count for per-SN fits
+        prior_config = dict(prior_config)
+        prior_config["n_global_filt"] = getattr(self, 'n_filt_global', 0)
 
         run_params = {
             "num_samples": num_samples,
@@ -1305,7 +1332,7 @@ class SNLightCurveLib(object):
 
         from .priors import summarize_priors
 
-        n_filt = len(np.unique(self.idx_filt))
+        n_filt = getattr(self, 'n_filt_global', len(np.unique(self.idx_filt)))
         n_obj = len(np.unique(self.idx_obj))
         summarize_priors(model_structure, prior_config, n_filt, n_obj)
 
@@ -1320,6 +1347,7 @@ class SNLightCurveLib(object):
             "idx_obj": self.idx_obj,
             "idx_fcqfid": self.idx_fcqfid,
             "idx_filt": self.idx_filt,
+            "n_global_filt": n_filt,
         }
 
         rng_key = jax.random.PRNGKey(random_seed)

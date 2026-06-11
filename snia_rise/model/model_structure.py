@@ -109,6 +109,7 @@ def hierarchical_model(
     idx_fcqfid: list = None,
     idx_filt: list = None,
     prior_config: dict = {},
+    n_global_filt: int = None,
 ):
     """
     Unified hierarchical Bayesian model for supernova early-time light curves.
@@ -171,7 +172,10 @@ def hierarchical_model(
     correlation_structure = prior_config.get("correlation_structure", "mvn")
 
     n_fcqfid = len(np.unique(idx_fcqfid))
-    n_filt = len(np.unique(idx_filt))
+    if n_global_filt is not None:
+        n_filt = n_global_filt
+    else:
+        n_filt = len(np.unique(idx_filt))
     n_obj = len(np.unique(idx_obj))
 
     # Observation-level parameters (n_fcqfid,)
@@ -182,10 +186,8 @@ def hierarchical_model(
     if sample_beta_flag:
         beta_fcqfid = sample_beta(n_fcqfid, prior_config)
     else:
-        # Use provided beta values or default to ones
         if beta is None:
             beta = np.ones_like(flux)
-        # beta is per observation, no need to index by fcqfid
         beta_obs_provided = beta
 
     # Hierarchical structure for t_rise, amp and alpha_0
@@ -253,6 +255,7 @@ def unpooled_model(
     idx_fcqfid: list = None,
     idx_filt: list = None,
     prior_config: dict = {},
+    n_global_filt: int = None,
 ):
     """
     Unpooled model:  each object independent, no hierarchical structure.
@@ -265,7 +268,10 @@ def unpooled_model(
     """
 
     n_fcqfid = len(np.unique(idx_fcqfid))
-    n_filt = len(np.unique(idx_filt))
+    if n_global_filt is not None:
+        n_filt = n_global_filt
+    else:
+        n_filt = len(np.unique(idx_filt))
     n_obj = len(np.unique(idx_obj))
 
     # base, beta: shape (n_fcqfid,)
@@ -482,6 +488,7 @@ def pooled_model(
     idx_fcqfid: list = None,
     idx_filt: list = None,
     prior_config: dict = {},
+    n_global_filt: int = None,
 ):
     """
     Pooled model: all objects share alpha, while t_rise varies per object.
@@ -491,7 +498,10 @@ def pooled_model(
     # Setup
     n_obj = len(np.unique(idx_obj))
     n_fcqfid = len(np.unique(idx_fcqfid))
-    n_filt = len(np.unique(idx_filt))
+    if n_global_filt is not None:
+        n_filt = n_global_filt
+    else:
+        n_filt = len(np.unique(idx_filt))
 
     # base, beta: shape (n_fcqfid,)
     base = sample_base(n_fcqfid)
