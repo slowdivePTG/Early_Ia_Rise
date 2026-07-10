@@ -181,3 +181,6 @@ requirements.lock
 uv.lock
 
 submit*.sh
+
+# codegraph
+.codegraph
