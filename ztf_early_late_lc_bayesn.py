@@ -25,11 +25,20 @@ DATA_DIR = Path("data/ztf_snia_early_late")
 BAYESN_FILTER_YAML = DATA_DIR / "bayesn_filters" / "atlas_filters.yaml"
 DIAG_DIR = DATA_DIR / "bayesn_diagnostics"
 EXTERNAL_DIR = DATA_DIR / "light_curve_external"
+LOCAL_FILTER_DIR = DATA_DIR / "sncosmo_filters"
+LOCAL_BAYESN_FILTER_DIR = LOCAL_FILTER_DIR / "bayesn"
 BAYESN_ZPT = 27.5
-MODEL_PHASE_MIN = -15.0
+MODEL_PHASE_MIN = -10.0
 MODEL_PHASE_MAX = 40.0
 PEAK_PHASE_STEP = 0.25
 PEAK_POSTERIOR_SAMPLES = 80
+MIN_OBS_PER_FILTER = 3
+EXCLUDED_FILTERS = {
+    "swope2u", "sdssu", "ps1::u", "bessellu", "u",
+    "sdssz", "ps1::z", "z",
+    "ps1::y", "y",
+}
+EXCLUDED_BAYESN_FILTERS = {"u_CSP2", "u_prime", "u", "z_prime", "z_PS1", "y_PS1", "z", "y"}
 BAYESN_FILT_MAP = {
     "ztfg": "p48g",
     "ztfr": "p48r",
@@ -96,6 +105,35 @@ def log(message: str) -> None:
     """Print a timestamped progress message to the terminal."""
 
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {message}", flush=True)
+
+
+def register_salt2_screen_filters() -> None:
+    """Register all local sncosmo filters needed by the pre-BayeSN SALT2 screen."""
+
+    import sncosmo
+
+    filter_files = {
+        "ztfg": LOCAL_FILTER_DIR / "ztf" / "ztfg.dat",
+        "ztfr": LOCAL_FILTER_DIR / "ztf" / "ztfr.dat",
+        "ztfi": LOCAL_FILTER_DIR / "ztf" / "ztfi.dat",
+        "sdssg": LOCAL_FILTER_DIR / "sdss" / "sdssg.dat",
+        "sdssr": LOCAL_FILTER_DIR / "sdss" / "sdssr.dat",
+        "sdssi": LOCAL_FILTER_DIR / "sdss" / "sdssi.dat",
+        "ps1::g": LOCAL_FILTER_DIR / "ps1" / "ps1_g.dat",
+        "ps1::r": LOCAL_FILTER_DIR / "ps1" / "ps1_r.dat",
+        "ps1::i": LOCAL_FILTER_DIR / "ps1" / "ps1_i.dat",
+        "swope2g": LOCAL_BAYESN_FILTER_DIR / "swope2g.dat",
+        "swope2r": LOCAL_BAYESN_FILTER_DIR / "swope2r.dat",
+        "swope2i": LOCAL_BAYESN_FILTER_DIR / "swope2i.dat",
+    }
+    missing = [str(path) for path in filter_files.values() if not path.exists()]
+    if missing:
+        raise FileNotFoundError("Missing local SALT2-screen filter files: " + ", ".join(missing))
+
+    for name, path in filter_files.items():
+        wave, trans = np.loadtxt(path, unpack=True)
+        sncosmo.registry.register(sncosmo.Bandpass(wave, trans, name=name), name=name, force=True)
+    log(f"Registered {len(filter_files)} local SALT2-screen sncosmo filters")
 
 
 def parse_ztf_lc(filename: Path) -> pd.DataFrame:
@@ -170,6 +208,13 @@ def parse_external_lc(objid: str) -> pd.DataFrame:
 
     lc = pd.read_csv(filename)
     lc = lc[np.isfinite(lc["flux"]) & np.isfinite(lc["fluxerr"]) & (lc["fluxerr"] > 0)].copy()
+    before = len(lc)
+    exclude = lc["filter"].isin(EXCLUDED_FILTERS)
+    if "bayesn_filter" in lc:
+        exclude |= lc["bayesn_filter"].isin(EXCLUDED_BAYESN_FILTERS)
+    lc = lc[~exclude].copy()
+    if before > len(lc):
+        log(f"{objid}: excluded {before - len(lc)} external u/z/y-band rows from BayeSN input")
     if not lc.empty:
         counts = lc.groupby(["source", "raw_filter", "filter", "bayesn_filter"]).size().to_dict()
         log(f"{objid}: loaded external photometry from {filename} ({len(lc)} rows; {counts})")
@@ -192,6 +237,19 @@ def to_bayesn_fluxcal(lc: pd.DataFrame) -> pd.DataFrame:
     lc["bayesn_fluxerr"] = lc["fluxerr"] * scale
     lc["bayesn_filter"] = lc["filter"].replace(BAYESN_FILT_MAP)
     return lc
+
+
+def drop_sparse_bayesn_filters_after_phase_cut(sn: pd.DataFrame, objid: str) -> pd.DataFrame:
+    """Drop fitted BayeSN filters with fewer than the required observations."""
+
+    counts = sn["bayesn_filter"].value_counts()
+    dropped = counts[counts < MIN_OBS_PER_FILTER]
+    if dropped.empty:
+        return sn
+
+    dropped_msg = ", ".join(f"{band}={count}" for band, count in dropped.items())
+    log(f"{objid}: dropping BayeSN filters with <{MIN_OBS_PER_FILTER} points after phase cut: {dropped_msg}")
+    return sn[sn["bayesn_filter"].isin(counts[counts >= MIN_OBS_PER_FILTER].index)].copy()
 
 
 def posterior_summary(samples: dict, key: str) -> tuple[float, float, float]:
@@ -354,6 +412,75 @@ def save_diagnostic_plot(
     log(f"{objid}: saved BayeSN diagnostic figure to {fig_path}")
 
 
+def drop_salt2_screened_outliers(sn_raw: pd.DataFrame, z: float, t0_salt: float, objid: str) -> pd.DataFrame:
+    """Use a quick SALT2 g/r/i fit to remove catastrophic outliers before BayeSN."""
+
+    import ztf_early_late_lc_salt as salt2_fit
+
+    register_salt2_screen_filters()
+    salt_df = salt2_fit.keep_salt2_gri_filters(sn_raw.copy(), objid)
+    if salt_df.empty:
+        log(f"{objid}: skipping pre-BayeSN SALT2 outlier screen; no g/r/i data available")
+        return sn_raw
+
+    removed_ids: set[int] = set()
+    salt_source = salt2_fit.make_salt2_source()
+    for iteration in range(1, salt2_fit.SALT2_OUTLIER_MAX_ITER + 1):
+        salt_table = Table.from_pandas(salt_df)
+        sn_fit = salt2_fit.select_salt2_modeling_photometry(salt_table, z, t0_salt, objid)
+        model = salt2_fit.sncosmo.Model(source=salt_source)
+        model.set(z=z, t0=t0_salt)
+        result, fitted_model = salt2_fit.fit_salt2_lc(
+            sn_fit,
+            model,
+            t0_bounds=(sn_fit["mjd"].min(), sn_fit["mjd"].max()),
+            x1_bounds=salt2_fit.SALT2_X1_FINAL_BOUNDS,
+            t0_init=t0_salt,
+        )
+        final_sn_fit = salt2_fit.select_salt2_modeling_photometry(
+            salt_table, z, result["parameters"][1], objid
+        )
+        if len(final_sn_fit) != len(sn_fit) or set(final_sn_fit["filter"]) != set(sn_fit["filter"]):
+            model = salt2_fit.sncosmo.Model(source=salt_source)
+            model.set(z=z, t0=result["parameters"][1])
+            sn_fit = final_sn_fit
+            result, fitted_model = salt2_fit.fit_salt2_lc(
+                sn_fit,
+                model,
+                t0_bounds=(sn_fit["mjd"].min(), sn_fit["mjd"].max()),
+                x1_bounds=salt2_fit.SALT2_X1_FINAL_BOUNDS,
+                t0_init=result["parameters"][1],
+            )
+
+        pred = fitted_model.bandflux(
+            sn_fit["filter"], sn_fit["mjd"], zp=sn_fit["zp"], zpsys=sn_fit["magsys"]
+        )
+        resid_sigma = (np.asarray(sn_fit["flux"], dtype=float) - pred) / np.asarray(sn_fit["fluxerr"], dtype=float)
+        bad = np.isfinite(resid_sigma) & (np.abs(resid_sigma) > salt2_fit.SALT2_OUTLIER_SIGMA)
+        if not np.any(bad):
+            break
+
+        bad_ids = {int(row_id) for row_id in np.asarray(sn_fit["_row_id"])[bad]}
+        details = []
+        for idx in np.flatnonzero(bad):
+            details.append(
+                f"{sn_fit['filter'][idx]}@{float(sn_fit['mjd'][idx]):.5f}={resid_sigma[idx]:.1f}sigma"
+            )
+        log(
+            f"{objid}: pre-BayeSN SALT2 screen dropping outliers "
+            f">{salt2_fit.SALT2_OUTLIER_SIGMA:g} sigma iteration {iteration}: {', '.join(details)}"
+        )
+        removed_ids.update(bad_ids)
+        salt_df = salt_df[~salt_df["_row_id"].isin(bad_ids)].copy()
+
+    if not removed_ids:
+        return sn_raw
+
+    clipped = sn_raw[~sn_raw["_row_id"].isin(removed_ids)].copy()
+    log(f"{objid}: removed {len(sn_raw) - len(clipped)} SALT2-screened outliers before BayeSN sampling")
+    return clipped
+
+
 def fit_one(
     objid: str,
     sn_info: pd.DataFrame,
@@ -381,13 +508,22 @@ def fit_one(
     sn_ztf = parse_ztf_lc(DATA_DIR / "light_curve_fps_ztf" / f"{objid}_fnu.csv")
     sn_atlas = parse_atlas_lc(DATA_DIR / "light_curve_fps_atlas" / f"{objid}_fnu.csv")
     sn_external = parse_external_lc(objid)
-    sn_raw = pd.concat([sn_ztf, sn_atlas, sn_external], ignore_index=True)
+    frames = [frame for frame in [sn_ztf, sn_atlas, sn_external] if not frame.empty]
+    if not frames:
+        raise ValueError("No photometry available for BayeSN fit.")
+    sn_raw = pd.concat(frames, ignore_index=True)
     sn_raw = sn_raw[np.isfinite(sn_raw["flux"]) & np.isfinite(sn_raw["fluxerr"])]
     sn_raw = sn_raw[sn_raw["fluxerr"] > 0]
+    sn_raw = sn_raw.reset_index(drop=True)
+    sn_raw["_row_id"] = np.arange(len(sn_raw))
+    sn_raw = drop_salt2_screened_outliers(sn_raw, z, t0_salt, objid)
     sn_bayesn = to_bayesn_fluxcal(sn_raw)
     sn_bayesn["phase"] = (sn_bayesn["mjd"] - t0_salt) / (1 + z)
     phase_mask = (sn_bayesn["phase"] >= MODEL_PHASE_MIN) & (sn_bayesn["phase"] <= MODEL_PHASE_MAX)
     sn_bayesn = sn_bayesn[phase_mask].copy()
+    sn_bayesn = drop_sparse_bayesn_filters_after_phase_cut(sn_bayesn, objid)
+    if sn_bayesn.empty:
+        raise ValueError("No photometry remains after sparse-filter cut.")
     log(
         f"{objid}: loaded photometry "
         f"(ZTF={len(sn_ztf)}, ATLAS={len(sn_atlas)}, external={len(sn_external)}, usable={len(sn_bayesn)} "

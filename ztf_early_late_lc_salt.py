@@ -18,12 +18,31 @@ from scipy.optimize import least_squares
 
 
 DATA_DIR = Path("data/ztf_snia_early_late")
-SALT2_2021_DIR = Path("SALT2-2021/data/salt2-2021")
+SALT2_SOURCE_NAME = "salt2"
+SALT2_SOURCE_VERSION = "T21"
+SALT2_LOCAL_DIR = DATA_DIR / "salt2_models" / "salt2-T21"
 DIAG_DIR = DATA_DIR / "salt_diagnostics"
 MCMC_CHAIN_DIR = DATA_DIR / "salt_mcmc_chains"
 EXTERNAL_DIR = DATA_DIR / "light_curve_external"
-MODEL_PHASE_MIN = -15.0
+LOCAL_ZTF_FILTER_DIR = DATA_DIR / "sncosmo_filters" / "ztf"
+LOCAL_SDSS_FILTER_DIR = DATA_DIR / "sncosmo_filters" / "sdss"
+LOCAL_PS1_FILTER_DIR = DATA_DIR / "sncosmo_filters" / "ps1"
+MODEL_PHASE_MIN = -10.0
 MODEL_PHASE_MAX = 40.0
+MIN_OBS_PER_FILTER = 3
+SALT2_X1_ROUND1_BOUNDS = (-3.0, 3.0)
+SALT2_X1_FINAL_BOUNDS = (-3.0, 10.0)
+SALT2_X1_MCMC_BOUNDS = (-5.0, 10.0)
+SALT2_C_BOUNDS = (-1.0, 2.0)
+SALT2_OUTLIER_SIGMA = 30.0
+SALT2_OUTLIER_MAX_ITER = 2
+EXCLUDED_FILTERS = {"swope2u", "sdssu", "ps1::u", "bessellu", "u"}
+SALT2_ALLOWED_FILTERS = {
+    "ztfg", "ztfr", "ztfi",
+    "sdssg", "sdssr", "sdssi",
+    "ps1::g", "ps1::r", "ps1::i",
+    "swope2g", "swope2r", "swope2i",
+}
 
 
 def log(message: str) -> None:
@@ -111,6 +130,10 @@ def parse_external_lc(objid: str) -> pd.DataFrame:
 
     lc = pd.read_csv(filename)
     lc = lc[np.isfinite(lc["flux"]) & np.isfinite(lc["fluxerr"]) & (lc["fluxerr"] > 0)].copy()
+    before = len(lc)
+    lc = lc[~lc["filter"].isin(EXCLUDED_FILTERS)].copy()
+    if before > len(lc):
+        log(f"{objid}: excluded {before - len(lc)} external u-band rows from SALT2 input")
     if not lc.empty:
         counts = lc.groupby(["source", "raw_filter", "filter"]).size().to_dict()
         log(f"{objid}: loaded external photometry from {filename} ({len(lc)} rows; {counts})")
@@ -120,6 +143,7 @@ def parse_external_lc(objid: str) -> pd.DataFrame:
 def register_external_filters() -> None:
     """Register local sncosmo filters needed by normalized external photometry."""
 
+    register_local_ztf_filters()
     try:
         sys.path.insert(0, str(EXTERNAL_DIR))
         from register_bayesn_sncosmo_filters import register_bayesn_sncosmo_filters
@@ -134,6 +158,91 @@ def register_external_filters() -> None:
     log(f"Registered {len(manifest)} local sncosmo filters for external photometry")
 
 
+def register_local_ztf_filters() -> None:
+    """Register local g/r/i passbands to avoid sncosmo network downloads."""
+
+    filter_files = {
+        "ztfg": LOCAL_ZTF_FILTER_DIR / "ztfg.dat",
+        "ztfr": LOCAL_ZTF_FILTER_DIR / "ztfr.dat",
+        "ztfi": LOCAL_ZTF_FILTER_DIR / "ztfi.dat",
+        "sdssg": LOCAL_SDSS_FILTER_DIR / "sdssg.dat",
+        "sdssr": LOCAL_SDSS_FILTER_DIR / "sdssr.dat",
+        "sdssi": LOCAL_SDSS_FILTER_DIR / "sdssi.dat",
+        "ps1::g": LOCAL_PS1_FILTER_DIR / "ps1_g.dat",
+        "ps1::r": LOCAL_PS1_FILTER_DIR / "ps1_r.dat",
+        "ps1::i": LOCAL_PS1_FILTER_DIR / "ps1_i.dat",
+    }
+    for name, path in filter_files.items():
+        if not path.exists():
+            raise FileNotFoundError(f"Missing local ZTF filter file: {path}")
+        wave, trans = np.loadtxt(path, unpack=True)
+        sncosmo.registry.register(sncosmo.Bandpass(wave, trans, name=name), name=name, force=True)
+    log(f"Registered {len(filter_files)} local g/r/i sncosmo filters")
+
+
+def drop_sparse_filters_after_phase_cut(sn: Table, objid: str) -> Table:
+    """Drop fitted filters with fewer than the required number of observations."""
+
+    filters = np.asarray(sn["filter"])
+    counts = pd.Series(filters).value_counts()
+    dropped = counts[counts < MIN_OBS_PER_FILTER]
+    if dropped.empty:
+        return sn
+
+    dropped_msg = ", ".join(f"{band}={count}" for band, count in dropped.items())
+    log(f"{objid}: dropping SALT2 filters with <{MIN_OBS_PER_FILTER} points after phase cut: {dropped_msg}")
+    keep = np.isin(filters, counts[counts >= MIN_OBS_PER_FILTER].index.to_numpy())
+    return sn[keep]
+
+
+def keep_salt2_gri_filters(lc: pd.DataFrame, objid: str) -> pd.DataFrame:
+    """Restrict SALT2 fitting photometry to g/r/i-like filters only."""
+
+    before = len(lc)
+    if before == 0:
+        return lc
+    dropped = lc.loc[~lc["filter"].isin(SALT2_ALLOWED_FILTERS), "filter"].value_counts()
+    lc = lc[lc["filter"].isin(SALT2_ALLOWED_FILTERS)].copy()
+    if not dropped.empty:
+        dropped_msg = ", ".join(f"{band}={count}" for band, count in dropped.items())
+        log(f"{objid}: excluding non-gri filters from SALT2 input: {dropped_msg}")
+    return lc
+
+
+def select_salt2_modeling_photometry(sn_tot_raw: Table, z: float, t0_ref: float, objid: str) -> Table:
+    """Apply the SALT2 phase and sparse-filter cuts for a reference peak date."""
+
+    sn = sn_tot_raw[
+        (sn_tot_raw["mjd"] > t0_ref + MODEL_PHASE_MIN * (1 + z))
+        & (sn_tot_raw["mjd"] < t0_ref + MODEL_PHASE_MAX * (1 + z))
+    ]
+    sn = drop_sparse_filters_after_phase_cut(sn, objid)
+    if len(sn) == 0:
+        raise ValueError("No photometry remains after phase and sparse-filter cuts.")
+    return sn
+
+
+def drop_salt2_flux_outliers(sn: Table, model: sncosmo.Model, objid: str) -> Table:
+    """Drop catastrophic SALT2 flux residual outliers while preserving filter viability."""
+
+    pred = model.bandflux(sn["filter"], sn["mjd"], zp=sn["zp"], zpsys=sn["magsys"])
+    flux = np.asarray(sn["flux"], dtype=float)
+    fluxerr = np.asarray(sn["fluxerr"], dtype=float)
+    resid_sigma = (flux - pred) / fluxerr
+    bad = np.isfinite(resid_sigma) & (np.abs(resid_sigma) > SALT2_OUTLIER_SIGMA)
+    if not np.any(bad):
+        return sn
+
+    details = []
+    for idx in np.flatnonzero(bad):
+        details.append(
+            f"{sn['filter'][idx]}@{float(sn['mjd'][idx]):.5f}={resid_sigma[idx]:.1f}sigma"
+        )
+    log(f"{objid}: dropping SALT2 flux outliers >{SALT2_OUTLIER_SIGMA:g} sigma: {', '.join(details)}")
+    sn = sn[~bad]
+    return drop_sparse_filters_after_phase_cut(sn, objid)
+
+
 def load_sample() -> Table:
     """Load the observed early/late SN Ia sample after removing unobserved targets."""
 
@@ -142,11 +251,19 @@ def load_sample() -> Table:
 
 
 def make_salt2_source():
-    """Return the local SALT2-2021 source when present, otherwise sncosmo's default."""
+    """Return the explicitly selected local T21 SALT2 source."""
 
-    if SALT2_2021_DIR.exists():
-        return sncosmo.SALT2Source(str(SALT2_2021_DIR))
-    return "salt2"
+    if SALT2_LOCAL_DIR.exists():
+        source = sncosmo.SALT2Source(str(SALT2_LOCAL_DIR), name=SALT2_SOURCE_NAME, version=SALT2_SOURCE_VERSION)
+        source_label = str(SALT2_LOCAL_DIR)
+    else:
+        source = sncosmo.get_source(SALT2_SOURCE_NAME, version=SALT2_SOURCE_VERSION)
+        source_label = f"{SALT2_SOURCE_NAME} version {SALT2_SOURCE_VERSION} from sncosmo registry"
+    log(
+        f"Using SALT2 source '{source_label}' "
+        f"with wavelength range {source.minwave():.1f}-{source.maxwave():.1f} A"
+    )
+    return source
 
 
 def _as_lc_dataframe(lc: Table | pd.DataFrame) -> pd.DataFrame:
@@ -212,8 +329,8 @@ def fit_salt2_lc(
 
     p0 = np.array([t0_init, np.log(x0_init), 0.0, 0.0])
     bounds = (
-        np.array([t0_bounds[0], np.log(1e-12), x1_bounds[0], -1.0]),
-        np.array([t0_bounds[1], np.log(10.0), x1_bounds[1], 1.0]),
+        np.array([t0_bounds[0], np.log(1e-12), x1_bounds[0], SALT2_C_BOUNDS[0]]),
+        np.array([t0_bounds[1], np.log(10.0), x1_bounds[1], SALT2_C_BOUNDS[1]]),
     )
     opt = least_squares(residual, p0, bounds=bounds, max_nfev=10000)
     t0, log_x0, x1, color = opt.x
@@ -271,8 +388,8 @@ def run_salt2_mcmc(
     bounds = {
         "t0": (t0 - t0_window, t0 + t0_window),
         "x0": (max(x0 / 100.0, 1e-12), min(x0 * 100.0, 10.0)),
-        "x1": (-5.0, 10.0),
-        "c": (-1.0, 1.0),
+        "x1": SALT2_X1_MCMC_BOUNDS,
+        "c": SALT2_C_BOUNDS,
     }
     log(
         f"{objid}: starting SALT2 MCMC "
@@ -334,10 +451,14 @@ def fit_one(
     sn_ztf = parse_ztf_lc(DATA_DIR / "light_curve_fps_ztf" / f"{objid}_fnu.csv")
     sn_atlas = parse_atlas_lc(DATA_DIR / "light_curve_fps_atlas" / f"{objid}_fnu.csv")
     sn_external = parse_external_lc(objid)
-    sn_tot_raw = Table.from_pandas(pd.concat([sn_ztf, sn_atlas, sn_external], ignore_index=True))
+    sn_tot_df = pd.concat([sn_ztf, sn_atlas, sn_external], ignore_index=True)
+    sn_tot_df = keep_salt2_gri_filters(sn_tot_df, objid)
+    if sn_tot_df.empty:
+        raise ValueError("No g/r/i photometry available for SALT2 fit.")
+    sn_tot_raw = Table.from_pandas(sn_tot_df)
     log(
         f"{objid}: loaded photometry "
-        f"(ZTF={len(sn_ztf)}, ATLAS={len(sn_atlas)}, external={len(sn_external)}, total={len(sn_tot_raw)})"
+        f"(ZTF={len(sn_ztf)}, ATLAS={len(sn_atlas)}, external={len(sn_external)}, SALT2_gri={len(sn_tot_raw)})"
     )
 
     info_idx = sn_info.objid == objid
@@ -358,16 +479,12 @@ def fit_one(
         sn_round1,
         model_r1,
         t0_bounds=(sn_round1["mjd"].min(), sn_round1["mjd"].max()),
-        x1_bounds=(-3, 3),
+        x1_bounds=SALT2_X1_ROUND1_BOUNDS,
     )
     t0_guess = res1["parameters"][1]
     log(f"{objid}: round 1 complete, t0_guess={t0_guess:.5f}")
 
-    sn_tot = sn_tot_raw[
-        (sn_tot_raw["mjd"] > t0_guess + MODEL_PHASE_MIN * (1 + z))
-        & (sn_tot_raw["mjd"] < t0_guess + MODEL_PHASE_MAX * (1 + z))
-    ]
-
+    sn_tot = select_salt2_modeling_photometry(sn_tot_raw, z, t0_guess, objid)
     model_r2 = sncosmo.Model(source=t21_source)
     model_r2.set(z=z, t0=t0_guess)
     log(f"{objid}: starting SALT2 round 2 deterministic fit with {len(sn_tot)} points")
@@ -375,9 +492,45 @@ def fit_one(
         sn_tot,
         model_r2,
         t0_bounds=(sn_tot["mjd"].min(), sn_tot["mjd"].max()),
-        x1_bounds=(-3, 10),
+        x1_bounds=SALT2_X1_FINAL_BOUNDS,
         t0_init=t0_guess,
     )
+
+    final_sn_tot = select_salt2_modeling_photometry(sn_tot_raw, z, result["parameters"][1], objid)
+    if len(final_sn_tot) != len(sn_tot) or set(final_sn_tot["filter"]) != set(sn_tot["filter"]):
+        log(
+            f"{objid}: refitting SALT2 after final-t0 phase/sparse-filter selection "
+            f"({len(sn_tot)} -> {len(final_sn_tot)} points)"
+        )
+        sn_tot = final_sn_tot
+        model_r2 = sncosmo.Model(source=t21_source)
+        model_r2.set(z=z, t0=result["parameters"][1])
+        result, fitted_model = fit_salt2_lc(
+            sn_tot,
+            model_r2,
+            t0_bounds=(sn_tot["mjd"].min(), sn_tot["mjd"].max()),
+            x1_bounds=SALT2_X1_FINAL_BOUNDS,
+            t0_init=result["parameters"][1],
+        )
+
+    for iteration in range(1, SALT2_OUTLIER_MAX_ITER + 1):
+        clipped_sn_tot = drop_salt2_flux_outliers(sn_tot, fitted_model, objid)
+        if len(clipped_sn_tot) == len(sn_tot):
+            break
+        log(
+            f"{objid}: refitting SALT2 after outlier clipping iteration {iteration} "
+            f"({len(sn_tot)} -> {len(clipped_sn_tot)} points)"
+        )
+        sn_tot = clipped_sn_tot
+        model_r2 = sncosmo.Model(source=t21_source)
+        model_r2.set(z=z, t0=result["parameters"][1])
+        result, fitted_model = fit_salt2_lc(
+            sn_tot,
+            model_r2,
+            t0_bounds=(sn_tot["mjd"].min(), sn_tot["mjd"].max()),
+            x1_bounds=SALT2_X1_FINAL_BOUNDS,
+            t0_init=result["parameters"][1],
+        )
     log(
         f"{objid}: round 2 complete, "
         f"t0={result['parameters'][1]:.5f}, x0={result['parameters'][2]:.6g}, "
