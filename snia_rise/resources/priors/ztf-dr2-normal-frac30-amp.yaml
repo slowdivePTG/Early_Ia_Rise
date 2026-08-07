@@ -1,0 +1,19 @@
+schema_version: 1
+name: ztf-dr2-normal-frac30-amp
+description: DR2 normal SNe, 30 percent threshold, amplitude population prior.
+rise_model: power_law
+filter_order: [ztfg, ztfr]
+population_priors:
+  t_rise: {mean: null, sigma: null}
+  alpha_0:
+    mean: [null, null]
+    sigma: [null, null]
+  log_Aprime:
+    mean: [3.496650218963623, 3.52144718170166]
+    sigma: [0.2852354943752289, 0.2671538293361664]
+  corr:
+    - [1.0, 0.0, 0.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.9679676294326782, 0.0, 0.0]
+    - [0.0, 0.9679676294326782, 1.0, 0.0, 0.0]
+    - [0.0, 0.0, 0.0, 1.0, 0.9764482378959656]
+    - [0.0, 0.0, 0.0, 0.9764482378959656, 1.0]

@@ -1,0 +1,7 @@
+schema_version: 1
+name: ztf-dr2-normal-frac50-t-rise
+description: DR2 normal SNe, 50 percent threshold, t_rise population prior only.
+rise_model: power_law
+filter_order: [ztfg, ztfr]
+population_priors:
+  t_rise: {mean: 18.33, sigma: 1.59}

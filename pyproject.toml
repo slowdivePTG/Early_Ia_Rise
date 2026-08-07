@@ -20,11 +20,22 @@ dependencies = [
   "redback>=1.12.1",
   "statsmodels>=0.14.6",
   "graphviz>=0.21",
+  "pyyaml",
 ]
+
+[project.scripts]
+snia-rise-calibrate = "snia_rise.cli.calibrate_single:main"
+export-ztf-early-late-bundle = "snia_rise.cli.export_ztf_early_late:main"
+snia-rise-fit = "snia_rise.cli.fit_single:main"
 
 [project.optional-dependencies]
 cuda = [
   "jax[cuda12]>=0.8.0",
+]
+calibration = [
+  "bayesn>=0.4.0",
+  "sncosmo>=2.12.1",
+  "emcee>=3.1.6",
 ]
 
 [[tool.uv.index]]
@@ -39,5 +50,8 @@ dev = [
     "jupyter>=1.1.1",
 ]
 
-[tool.setuptools]
-packages = ["snia_rise"]
+[tool.setuptools.packages.find]
+include = ["snia_rise*"]
+
+[tool.setuptools.package-data]
+snia_rise = ["resources/priors/*.yaml"]

@@ -1,0 +1,12 @@
+schema_version: 1
+name: ztf-dr2-normal-frac50-amp
+description: DR2 normal SNe, 50 percent threshold, amplitude population prior.
+rise_model: power_law
+filter_order: [ztfg, ztfr]
+population_priors:
+  log_Aprime:
+    mean: [3.581063747406006, 3.6161575317382812]
+    sigma: [0.2919487953186035, 0.280811071395874]
+  corr:
+    - [1.0, 0.9840304851531982]
+    - [0.9840304851531982, 1.0]

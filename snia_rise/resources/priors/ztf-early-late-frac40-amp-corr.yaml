@@ -1,0 +1,19 @@
+schema_version: 1
+name: ztf-early-late-frac40-amp-corr
+description: Early/late ZTF-normalized sample, 40 percent threshold, amplitude prior with DR2 correlations.
+rise_model: power_law
+filter_order: [ztfg, ztfr]
+population_priors:
+  t_rise: {mean: null, sigma: null}
+  alpha_0:
+    mean: [null, null]
+    sigma: [null, null]
+  log_Aprime:
+    mean: [3.514707565307617, 3.5535030364990234]
+    sigma: [0.29352569580078125, 0.28599658608436584]
+  corr:
+    - [1.0, 0.26240110397338867, 0.2880179286003113, -0.7799168825149536, -0.792641282081604]
+    - [0.26240110397338867, 1.0, 0.9543037414550781, -0.5446228384971619, -0.4894406795501709]
+    - [0.2880179286003113, 0.9543037414550781, 1.0, -0.5890857577323914, -0.5279817581176758]
+    - [-0.7799168825149536, -0.5446228384971619, -0.5890857577323914, 1.0, 0.9880374670028687]
+    - [-0.792641282081604, -0.4894406795501709, -0.5279817581176758, 0.9880374670028687, 1.0]
