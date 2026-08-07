@@ -129,8 +129,22 @@ if __name__ == "__main__":
         default=None,
         help="YAML file with population prior configuration for the unpooled model",
     )
+    parser.add_argument(
+        "--include-external-gr",
+        default=False,
+        action="store_true",
+        help="For early_late, include normalized external g/r photometry as additional fcqfID streams",
+    )
+    parser.add_argument(
+        "--external-noise-floor",
+        type=float,
+        default=0.05,
+        help="Fractional flux noise floor for external g/r photometry when --include-external-gr is set (default: 0.05)",
+    )
     args = parser.parse_args()
     dr = args.dr.lower()
+    if args.include_external_gr and dr != "early_late":
+        parser.error("--include-external-gr is only supported for dr=early_late")
 
     # Configure JAX/NumPyro platform
     print("\n" + "=" * 70)
@@ -167,6 +181,13 @@ if __name__ == "__main__":
             f"Volume-complete: {args.volume_complete}, Early-coverage: {args.early_coverage}, Baseline-coverage: {args.baseline_coverage}"
         )
         print(f"Model: {args.model}, Sampling model: {args.sampling_model}")
+        if args.include_external_gr:
+            print(
+                "External g/r photometry: enabled "
+                f"(noise floor={args.external_noise_floor:.1%})"
+            )
+        if dr == "early_late":
+            print("Early/Late photometric calibration: ztf_early_Ia_phot.csv")
 
         # ------------------------------------------------------------------ #
         # Load the metadata table and build the base boolean selection mask.  #
@@ -261,6 +282,8 @@ if __name__ == "__main__":
                 no_t0_err=args.no_t0_err,
                 x1_subsample=x1_subsample,
                 sn_type=args.sn_type,
+                include_external_gr=args.include_external_gr,
+                external_noise_floor=args.external_noise_floor,
             )
             pop_prior_config = (
                 Path(args.prior_config).stem if args.prior_config else None

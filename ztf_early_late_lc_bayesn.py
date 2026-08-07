@@ -22,7 +22,8 @@ from astropy.table import Table
 
 
 DATA_DIR = Path("data/ztf_snia_early_late")
-BAYESN_FILTER_YAML = DATA_DIR / "bayesn_filters" / "atlas_filters.yaml"
+BAYESN_FILTER_YAML = DATA_DIR / "bayesn_filters" / "external_filters.yaml"
+BAYESN_MODEL_NAME = "W22_model"
 DIAG_DIR = DATA_DIR / "bayesn_diagnostics"
 EXTERNAL_DIR = DATA_DIR / "light_curve_external"
 LOCAL_FILTER_DIR = DATA_DIR / "sncosmo_filters"
@@ -38,48 +39,67 @@ EXCLUDED_FILTERS = {
     "sdssz", "ps1::z", "z",
     "ps1::y", "y",
 }
+SALT2_SCREEN_ALLOWED_FILTERS = {
+    "ztfg", "ztfr", "ztfi",
+    "sdssg", "sdssr", "sdssi",
+    "ps1::g", "ps1::r", "ps1::i",
+    "swope2g", "swope2r", "swope2i",
+}
 EXCLUDED_BAYESN_FILTERS = {"u_CSP2", "u_prime", "u", "z_prime", "z_PS1", "y_PS1", "z", "y"}
-BAYESN_FILT_MAP = {
-    "ztfg": "p48g",
-    "ztfr": "p48r",
-    "ztfi": "p48i",
-    "atlaso": "atlaso",
-    "atlasc": "atlasc",
-    "bessellb": "B",
-    "bessellv": "V",
-    "sdssg": "g_prime",
-    "sdssr": "r_prime",
-    "sdssi": "i_prime",
-    "sdssz": "z_prime",
-    "ps1::g": "g_PS1",
-    "ps1::r": "r_PS1",
-    "ps1::i": "i_PS1",
-    "ps1::z": "z_PS1",
-    "ps1::y": "y_PS1",
-    "swope2u": "u_CSP2",
-    "swope2b": "B_CSP2",
-    "swope2v": "V_CSP2",
-    "swope2g": "g_CSP2",
-    "swope2r": "r_CSP2",
-    "swope2i": "i_CSP2",
+BAYESN_FILTER_BY_SYSTEM = {
+    ("ztfg", "ab"): "p48g",
+    ("ztfr", "ab"): "p48r",
+    ("ztfi", "ab"): "p48i",
+    ("bessellb", "vega"): "B",
+    ("bessellv", "vega"): "V",
+    ("bessellb", "ab"): "B_AB",
+    ("bessellv", "ab"): "V_AB",
+    ("sdssg", "bd17"): "g_prime",
+    ("sdssr", "bd17"): "r_prime",
+    ("sdssi", "bd17"): "i_prime",
+    ("sdssg", "ab"): "sdssg_AB",
+    ("sdssr", "ab"): "sdssr_AB",
+    ("sdssi", "ab"): "sdssi_AB",
+    ("sdssz", "bd17"): "z_prime",
+    ("ps1::g", "ab"): "g_PS1",
+    ("ps1::r", "ab"): "r_PS1",
+    ("ps1::i", "ab"): "i_PS1",
+    ("ps1::z", "ab"): "z_PS1",
+    ("ps1::y", "ab"): "y_PS1",
+    ("swope2u", "bd17"): "u_CSP2",
+    ("swope2b", "vega"): "B_CSP2",
+    ("swope2v", "vega"): "V_CSP2",
+    ("swope2g", "bd17"): "g_CSP2",
+    ("swope2r", "bd17"): "r_CSP2",
+    ("swope2i", "bd17"): "i_CSP2",
+    ("swope2b", "ab"): "B_CSP2_AB",
+    ("swope2v", "ab"): "V_CSP2_AB",
+    ("swope2g", "ab"): "g_CSP2_AB",
+    ("swope2r", "ab"): "r_CSP2_AB",
+    ("swope2i", "ab"): "i_CSP2_AB",
 }
 PLOT_BANDS = [
-    "p48g", "p48r", "p48i", "atlaso", "atlasc",
-    "B", "V", "g_prime", "r_prime", "i_prime", "z_prime",
+    "p48g", "p48r", "p48i",
+    "B", "V", "B_AB", "V_AB", "g_prime", "r_prime", "i_prime",
+    "sdssg_AB", "sdssr_AB", "sdssi_AB", "z_prime",
     "g_PS1", "r_PS1", "i_PS1", "z_PS1", "y_PS1",
     "u_CSP2", "B_CSP2", "V_CSP2", "g_CSP2", "r_CSP2", "i_CSP2",
+    "B_CSP2_AB", "V_CSP2_AB", "g_CSP2_AB", "r_CSP2_AB", "i_CSP2_AB",
 ]
 PLOT_COLORS = {
     "p48g": "tab:green",
     "p48r": "tab:red",
     "p48i": "tab:orange",
-    "atlaso": "tab:brown",
-    "atlasc": "tab:cyan",
     "B": "tab:blue",
     "V": "tab:purple",
+    "B_AB": "tab:blue",
+    "V_AB": "tab:purple",
     "g_prime": "tab:green",
     "r_prime": "tab:red",
     "i_prime": "tab:orange",
+    "sdssg_AB": "tab:green",
+    "sdssr_AB": "tab:red",
+    "sdssi_AB": "tab:orange",
     "z_prime": "saddlebrown",
     "g_PS1": "limegreen",
     "r_PS1": "crimson",
@@ -92,12 +112,21 @@ PLOT_COLORS = {
     "g_CSP2": "seagreen",
     "r_CSP2": "firebrick",
     "i_CSP2": "peru",
+    "B_CSP2_AB": "royalblue",
+    "V_CSP2_AB": "mediumpurple",
+    "g_CSP2_AB": "seagreen",
+    "r_CSP2_AB": "firebrick",
+    "i_CSP2_AB": "peru",
 }
 PEAK_FLUX_BANDS = {
     "ztfg": {"bayesn_filter": "p48g", "zp": 30.0},
     "ztfr": {"bayesn_filter": "p48r", "zp": 30.0},
-    "atlaso": {"bayesn_filter": "atlaso", "zp": 2.5 * np.log10(3631.0) + 15.0},
-    "atlasc": {"bayesn_filter": "atlasc", "zp": 2.5 * np.log10(3631.0) + 15.0},
+    "sdssg_AB": {"bayesn_filter": "sdssg_AB", "zp": 30.0},
+    "sdssr_AB": {"bayesn_filter": "sdssr_AB", "zp": 30.0},
+    "g_PS1": {"bayesn_filter": "g_PS1", "zp": 30.0},
+    "r_PS1": {"bayesn_filter": "r_PS1", "zp": 30.0},
+    "g_CSP2_AB": {"bayesn_filter": "g_CSP2_AB", "zp": 30.0},
+    "r_CSP2_AB": {"bayesn_filter": "r_CSP2_AB", "zp": 30.0},
 }
 
 
@@ -122,9 +151,6 @@ def register_salt2_screen_filters() -> None:
         "ps1::g": LOCAL_FILTER_DIR / "ps1" / "ps1_g.dat",
         "ps1::r": LOCAL_FILTER_DIR / "ps1" / "ps1_r.dat",
         "ps1::i": LOCAL_FILTER_DIR / "ps1" / "ps1_i.dat",
-        "swope2g": LOCAL_BAYESN_FILTER_DIR / "swope2g.dat",
-        "swope2r": LOCAL_BAYESN_FILTER_DIR / "swope2r.dat",
-        "swope2i": LOCAL_BAYESN_FILTER_DIR / "swope2i.dat",
     }
     missing = [str(path) for path in filter_files.values() if not path.exists()]
     if missing:
@@ -133,7 +159,39 @@ def register_salt2_screen_filters() -> None:
     for name, path in filter_files.items():
         wave, trans = np.loadtxt(path, unpack=True)
         sncosmo.registry.register(sncosmo.Bandpass(wave, trans, name=name), name=name, force=True)
-    log(f"Registered {len(filter_files)} local SALT2-screen sncosmo filters")
+    swope_aliases = {
+        "swope2g": LOCAL_BAYESN_FILTER_DIR / "swope2g.dat",
+        "swope2r": LOCAL_BAYESN_FILTER_DIR / "swope2r.dat",
+        "swope2i": LOCAL_BAYESN_FILTER_DIR / "swope2i.dat",
+    }
+    missing_swope = [str(path) for path in swope_aliases.values() if not path.exists()]
+    if missing_swope:
+        raise FileNotFoundError("Missing local Swope alias filter files: " + ", ".join(missing_swope))
+    for name, path in swope_aliases.items():
+        wave, trans = np.loadtxt(path, unpack=True)
+        sncosmo.registry.register(sncosmo.Bandpass(wave, trans, name=name), name=name, force=True)
+    log(f"Registered {len(filter_files) + len(swope_aliases)} local SALT2-screen sncosmo filters")
+
+
+def resolve_bayesn_filter(filter_name: str, magsys: str) -> str:
+    """Return the BayeSN filter alias matching both passband and magnitude system."""
+
+    key = (str(filter_name).strip().lower(), str(magsys).strip().lower())
+    try:
+        return BAYESN_FILTER_BY_SYSTEM[key]
+    except KeyError as exc:
+        raise ValueError(f"No BayeSN filter mapping for filter={filter_name!r}, magsys={magsys!r}") from exc
+
+
+def assign_bayesn_filters(lc: pd.DataFrame) -> pd.DataFrame:
+    """Attach system-aware BayeSN filter aliases to parsed photometry rows."""
+
+    lc = lc.copy()
+    lc["bayesn_filter"] = [
+        resolve_bayesn_filter(filter_name, magsys)
+        for filter_name, magsys in zip(lc["filter"], lc["magsys"], strict=True)
+    ]
+    return lc
 
 
 def parse_ztf_lc(filename: Path) -> pd.DataFrame:
@@ -161,53 +219,21 @@ def parse_ztf_lc(filename: Path) -> pd.DataFrame:
     ) * 10 ** (-0.4 * delta_zp)
 
     lc_dat["filter"] = lc_dat["filter"].replace({"ZTF_g": "ztfg", "ZTF_r": "ztfr", "ZTF_i": "ztfi"})
-    return lc_dat[["mjd", "filter", "flux", "fluxerr", "zp", "magsys"]]
+    lc_dat = assign_bayesn_filters(lc_dat)
+    return lc_dat[["mjd", "filter", "flux", "fluxerr", "zp", "magsys", "bayesn_filter"]]
 
 
-def parse_atlas_lc(filename: Path) -> pd.DataFrame:
-    """Parse one ATLAS forced-photometry file into the common light-curve schema."""
-
-    from astropy.stats import mad_std
-
-    if not filename.exists():
-        return pd.DataFrame(columns=["mjd", "filter", "flux", "fluxerr", "zp", "magsys"])
-
-    lc = pd.read_csv(filename)
-    lc_dat = lc[lc["err"] == 0].copy()
-    lc_dat["magsys"] = "ab"
-
-    mjd = lc_dat["MJD"].values
-    flux = lc_dat["uJy"].values
-    mask = np.ones(len(lc_dat), dtype=bool)
-    i = 0
-    while i < len(lc_dat):
-        j = np.searchsorted(mjd, mjd[i] + 1.8, side="left")
-        if j - i > 1:
-            bin_flux = flux[i:j]
-            median_flux = np.median(bin_flux)
-            robust_std = mad_std(bin_flux)
-            if robust_std > 0:
-                mask[i:j] = np.abs(bin_flux - median_flux) <= (3 * robust_std)
-        i = j
-
-    lc_dat = lc_dat.rename(
-        columns={"MJD": "mjd", "uJy": "flux", "duJy": "fluxerr", "F": "filter"}
-    )
-    lc_dat["zp"] = 2.5 * np.log10(3631.0) + 15.0
-    lc_dat["filter"] = lc_dat["filter"].replace({"o": "atlaso", "c": "atlasc"})
-    return lc_dat[["mjd", "filter", "flux", "fluxerr", "zp", "magsys"]][mask]
-
-
-def parse_external_lc(objid: str) -> pd.DataFrame:
+def parse_external_lc(objid: str, external_sources: set[str] | None = None) -> pd.DataFrame:
     """Load normalized external photometry for one object when available."""
 
     filename = EXTERNAL_DIR / f"{objid}_external.csv"
-    columns = ["mjd", "filter", "flux", "fluxerr", "zp", "magsys"]
+    columns = ["mjd", "filter", "flux", "fluxerr", "zp", "magsys", "bayesn_filter"]
     if not filename.exists():
         return pd.DataFrame(columns=columns)
 
     lc = pd.read_csv(filename)
     lc = lc[np.isfinite(lc["flux"]) & np.isfinite(lc["fluxerr"]) & (lc["fluxerr"] > 0)].copy()
+    lc = assign_bayesn_filters(lc)
     before = len(lc)
     exclude = lc["filter"].isin(EXCLUDED_FILTERS)
     if "bayesn_filter" in lc:
@@ -215,6 +241,14 @@ def parse_external_lc(objid: str) -> pd.DataFrame:
     lc = lc[~exclude].copy()
     if before > len(lc):
         log(f"{objid}: excluded {before - len(lc)} external u/z/y-band rows from BayeSN input")
+    if external_sources is not None:
+        before_source = len(lc)
+        lc = lc[lc["source"].isin(external_sources)].copy()
+        if before_source > len(lc):
+            log(
+                f"{objid}: excluded {before_source - len(lc)} external rows outside requested "
+                f"sources={sorted(external_sources)}"
+            )
     if not lc.empty:
         counts = lc.groupby(["source", "raw_filter", "filter", "bayesn_filter"]).size().to_dict()
         log(f"{objid}: loaded external photometry from {filename} ({len(lc)} rows; {counts})")
@@ -235,21 +269,33 @@ def to_bayesn_fluxcal(lc: pd.DataFrame) -> pd.DataFrame:
     scale = 10 ** (0.4 * (BAYESN_ZPT - lc["zp"]))
     lc["bayesn_flux"] = lc["flux"] * scale
     lc["bayesn_fluxerr"] = lc["fluxerr"] * scale
-    lc["bayesn_filter"] = lc["filter"].replace(BAYESN_FILT_MAP)
+    lc = assign_bayesn_filters(lc)
     return lc
 
 
 def drop_sparse_bayesn_filters_after_phase_cut(sn: pd.DataFrame, objid: str) -> pd.DataFrame:
-    """Drop fitted BayeSN filters with fewer than the required observations."""
+    """Drop sparse external filters while retaining all ZTF filters."""
 
-    counts = sn["bayesn_filter"].value_counts()
+    if "_survey" not in sn:
+        counts = sn["bayesn_filter"].value_counts()
+        dropped = counts[counts < MIN_OBS_PER_FILTER]
+        if dropped.empty:
+            return sn
+        dropped_msg = ", ".join(f"{band}={count}" for band, count in dropped.items())
+        log(f"{objid}: dropping BayeSN filters with <{MIN_OBS_PER_FILTER} points after phase cut: {dropped_msg}")
+        return sn[sn["bayesn_filter"].isin(counts[counts >= MIN_OBS_PER_FILTER].index)].copy()
+
+    external = sn[sn["_survey"] != "ZTF"]
+    if external.empty:
+        return sn
+    counts = external["bayesn_filter"].value_counts()
     dropped = counts[counts < MIN_OBS_PER_FILTER]
     if dropped.empty:
         return sn
 
     dropped_msg = ", ".join(f"{band}={count}" for band, count in dropped.items())
-    log(f"{objid}: dropping BayeSN filters with <{MIN_OBS_PER_FILTER} points after phase cut: {dropped_msg}")
-    return sn[sn["bayesn_filter"].isin(counts[counts >= MIN_OBS_PER_FILTER].index)].copy()
+    log(f"{objid}: dropping external BayeSN filters with <{MIN_OBS_PER_FILTER} points after phase cut: {dropped_msg}")
+    return sn[(sn["_survey"] == "ZTF") | ~sn["bayesn_filter"].isin(dropped.index)].copy()
 
 
 def posterior_summary(samples: dict, key: str) -> tuple[float, float, float]:
@@ -304,6 +350,7 @@ def summarize_bayesn_observed_peaks(
 
         row[f"bayesn_{band}_flux_max"] = np.nanmedian(peak_flux)
 
+    row["bayesn_peak_flux_zp"] = 30.0
     return row
 
 
@@ -318,11 +365,9 @@ def subset_chains_for_plot(samples: dict, n_samples: int = 80) -> dict:
             continue
         n_chains, n_draws = arr.shape[:2]
         n_keep = min(n_samples, n_chains * n_draws)
-        if n_keep <= n_draws:
-            subset[key] = arr[:1, :n_keep, ...]
-        else:
-            n_draws_keep = int(np.ceil(n_keep / n_chains))
-            subset[key] = arr[:, :n_draws_keep, ...]
+        flat = arr.reshape((n_chains * n_draws, *arr.shape[2:]))
+        flat_idx = np.linspace(0, len(flat) - 1, n_keep, dtype=int)
+        subset[key] = flat[flat_idx, ...].reshape((1, n_keep, *arr.shape[2:]))
     return subset
 
 
@@ -333,6 +378,8 @@ def save_diagnostic_plot(
     samples: dict,
     z: float,
     ebv_mw: float,
+    model_name: str,
+    config_label: str,
 ) -> None:
     """Save an observed-vs-posterior BayeSN light-curve diagnostic plot."""
 
@@ -404,9 +451,9 @@ def save_diagnostic_plot(
     ax.axvline(0, color="0.4", ls="--", lw=1)
     ax.set_xlabel("Rest-frame phase from SALT2/BayeSN peak [day]")
     ax.set_ylabel("BayeSN flux scale + offsets")
-    ax.set_title(f"{objid}: BayeSN fit, AV={av_med:.3f} -{av_lo:.3f}/+{av_hi:.3f} mag")
+    ax.set_title(f"{objid}: BayeSN {model_name}, AV={av_med:.3f} -{av_lo:.3f}/+{av_hi:.3f} mag")
     ax.legend(fontsize=8, ncol=2)
-    fig_path = DIAG_DIR / f"{objid}_bayesn_fit.png"
+    fig_path = DIAG_DIR / f"{objid}_bayesn_{config_label}_fit.png"
     fig.savefig(fig_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     log(f"{objid}: saved BayeSN diagnostic figure to {fig_path}")
@@ -418,7 +465,7 @@ def drop_salt2_screened_outliers(sn_raw: pd.DataFrame, z: float, t0_salt: float,
     import ztf_early_late_lc_salt as salt2_fit
 
     register_salt2_screen_filters()
-    salt_df = salt2_fit.keep_salt2_gri_filters(sn_raw.copy(), objid)
+    salt_df = sn_raw[sn_raw["filter"].isin(SALT2_SCREEN_ALLOWED_FILTERS)].copy()
     if salt_df.empty:
         log(f"{objid}: skipping pre-BayeSN SALT2 outlier screen; no g/r/i data available")
         return sn_raw
@@ -486,12 +533,17 @@ def fit_one(
     sn_info: pd.DataFrame,
     salt_fit: pd.DataFrame,
     model: Any,
+    model_name: str,
     save_diagnostics: bool,
+    use_ztf: bool,
+    use_external: bool,
+    external_sources: set[str] | None,
+    rv: float | None,
 ) -> dict:
     """Fit one SN with BayeSN and return host-extinction posterior summaries."""
 
     log(f"{objid}: starting BayeSN fit")
-    row = {"ztfid": objid, "status": "ok", "error": ""}
+    row = {"ztfid": objid, "status": "ok", "error": "", "bayesn_model": model_name}
 
     info_idx = sn_info.objid == objid
     if not np.any(info_idx):
@@ -505,10 +557,16 @@ def fit_one(
     t0_salt = salt_fit.loc[salt_idx, "t0"].values[0]
     log(f"{objid}: metadata z={z:.6f}, ebv_mw={ebv_mw:.5f}, t0_salt={t0_salt:.5f}")
 
-    sn_ztf = parse_ztf_lc(DATA_DIR / "light_curve_fps_ztf" / f"{objid}_fnu.csv")
-    sn_atlas = parse_atlas_lc(DATA_DIR / "light_curve_fps_atlas" / f"{objid}_fnu.csv")
-    sn_external = parse_external_lc(objid)
-    frames = [frame for frame in [sn_ztf, sn_atlas, sn_external] if not frame.empty]
+    sn_ztf = parse_ztf_lc(DATA_DIR / "light_curve_fps_ztf" / f"{objid}_fnu.csv") if use_ztf else pd.DataFrame()
+    sn_external = parse_external_lc(objid, external_sources=external_sources) if use_external else pd.DataFrame()
+    if use_external and sn_external.empty:
+        raise ValueError("External photometry requested but none is available after cuts.")
+    frames = []
+    for survey, frame in [("ZTF", sn_ztf), ("external", sn_external)]:
+        if not frame.empty:
+            frame = frame.copy()
+            frame["_survey"] = survey
+            frames.append(frame)
     if not frames:
         raise ValueError("No photometry available for BayeSN fit.")
     sn_raw = pd.concat(frames, ignore_index=True)
@@ -524,23 +582,30 @@ def fit_one(
     sn_bayesn = drop_sparse_bayesn_filters_after_phase_cut(sn_bayesn, objid)
     if sn_bayesn.empty:
         raise ValueError("No photometry remains after sparse-filter cut.")
+    usable_counts = sn_bayesn["_survey"].value_counts().to_dict()
     log(
         f"{objid}: loaded photometry "
-        f"(ZTF={len(sn_ztf)}, ATLAS={len(sn_atlas)}, external={len(sn_external)}, usable={len(sn_bayesn)} "
+        f"(ZTF={usable_counts.get('ZTF', 0)}, external={usable_counts.get('external', 0)}, "
+        f"usable={len(sn_bayesn)} "
         f"within {MODEL_PHASE_MIN:g} to +{MODEL_PHASE_MAX:g} rest-frame days)"
     )
 
-    log(f"{objid}: starting BayeSN MCMC")
+    fit_kwargs = {}
+    if rv is not None:
+        fit_kwargs["RV"] = rv
+
+    log(f"{objid}: starting BayeSN MCMC with model={model_name}, rv_kwargs={fit_kwargs}")
     samples, _ = model.fit(
         t=sn_bayesn["mjd"].values,
         flux=sn_bayesn["bayesn_flux"].values,
         flux_err=sn_bayesn["bayesn_fluxerr"].values,
-        filters=sn_bayesn["filter"].values,
+        filters=sn_bayesn["bayesn_filter"].values,
         z=z,
         ebv_mw=ebv_mw,
         peak_mjd=t0_salt,
-        filt_map=BAYESN_FILT_MAP,
+        filt_map={},
         print_summary=False,
+        **fit_kwargs,
     )
     log(f"{objid}: finished BayeSN MCMC")
 
@@ -548,9 +613,15 @@ def fit_one(
     t0_bayesn, t0_err_bayesn = posterior_median_mad_std(samples, "peak_MJD")
     if "RV" in samples:
         r_v_host = np.nanmedian(np.asarray(samples["RV"]).reshape(-1))
+    elif "Rv" in samples:
+        r_v_host = np.nanmedian(np.asarray(samples["Rv"]).reshape(-1))
     else:
         r_v_host = float(np.asarray(model.RV).reshape(-1)[0])
-    row.update({"t0_bayesn": t0_bayesn, "t0_err_bayesn": t0_err_bayesn, "R_V_host": r_v_host})
+    row.update({
+        "t0_bayesn": t0_bayesn,
+        "t0_err_bayesn": t0_err_bayesn,
+        "R_V_host": r_v_host,
+    })
     log(f"{objid}: t0_bayesn={t0_bayesn:.5f}, t0_err_bayesn={t0_err_bayesn:.5f}, R_V_host={r_v_host:.3f}")
 
     for key, prefix in [
@@ -577,12 +648,19 @@ def fit_one(
         f"{objid}: BayeSN observed peak fluxes "
         f"ztfg={row['bayesn_ztfg_flux_max']:.6g}, "
         f"ztfr={row['bayesn_ztfr_flux_max']:.6g}, "
-        f"atlaso={row['bayesn_atlaso_flux_max']:.6g}, "
-        f"atlasc={row['bayesn_atlasc_flux_max']:.6g}"
+        f"sdssg_AB={row['bayesn_sdssg_AB_flux_max']:.6g}, "
+        f"sdssr_AB={row['bayesn_sdssr_AB_flux_max']:.6g}, "
+        f"g_PS1={row['bayesn_g_PS1_flux_max']:.6g}, "
+        f"r_PS1={row['bayesn_r_PS1_flux_max']:.6g}, "
+        f"g_CSP2_AB={row['bayesn_g_CSP2_AB_flux_max']:.6g}, "
+        f"r_CSP2_AB={row['bayesn_r_CSP2_AB_flux_max']:.6g}"
     )
 
     if save_diagnostics:
-        save_diagnostic_plot(model, objid, sn_bayesn, samples, z, ebv_mw)
+        rv_label = f"RV{r_v_host:.2f}".replace(".", "p")
+        survey_label = "_".join(sorted(str(survey) for survey in sn_bayesn["_survey"].unique()))
+        config_label = f"{model_name}_{survey_label}_{rv_label}"
+        save_diagnostic_plot(model, objid, sn_bayesn, samples, z, ebv_mw, model_name, config_label)
 
     log(f"{objid}: completed BayeSN fit")
     return row
@@ -596,6 +674,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--objects", nargs="*", default=None, help="Specific ZTF IDs to fit.")
     parser.add_argument("--no-diagnostics", action="store_true", help="Do not save diagnostic figures.")
     parser.add_argument("--output", default=None, help="Output CSV path. Defaults to the full-sample BayeSN CSV.")
+    parser.add_argument("--model", default=BAYESN_MODEL_NAME, help="Built-in or custom BayeSN model to load.")
+    parser.add_argument("--no-ztf", action="store_true", help="Exclude ZTF photometry from BayeSN fits.")
+    parser.add_argument("--external", action="store_true", help="Include normalized external photometry and fit only objects with external data.")
+    parser.add_argument(
+        "--external-sources",
+        nargs="*",
+        default=None,
+        help="Restrict external photometry to these source labels, e.g. 'Las Cumbres 1m'.",
+    )
+    parser.add_argument("--rv", type=float, default=None, help="Fit with this fixed host R_V; omit to use the BayeSN model default.")
     return parser.parse_args()
 
 
@@ -603,11 +691,18 @@ def main() -> None:
     """Run BayeSN fitting for the requested sample and write the summary CSV."""
 
     args = parse_args()
+    if args.no_ztf and not args.external:
+        raise SystemExit("--no-ztf requires --external so at least one photometry source is enabled.")
     log("Starting BayeSN fitting script")
     sample = load_sample()
     objids = [str(x) for x in sample["ztfid"]]
     if args.objects:
         objids = [objid for objid in objids if objid in set(args.objects)]
+    if args.external:
+        external_objids = {path.stem.removesuffix("_external") for path in EXTERNAL_DIR.glob("*_external.csv")}
+        before_external = len(objids)
+        objids = [objid for objid in objids if objid in external_objids]
+        log(f"--external selected: {len(objids)}/{before_external} requested objects have external files")
     if args.limit is not None:
         objids = objids[: args.limit]
 
@@ -615,7 +710,8 @@ def main() -> None:
     salt_fit = pd.read_csv(DATA_DIR / "ztf_early_Ia_salt.csv")
     log(
         f"Loaded sample: {len(sample)} available objects, fitting {len(objids)} objects; "
-        f"filter_yaml={BAYESN_FILTER_YAML}; jax_platform=cpu; num_devices=4"
+        f"filter_yaml={BAYESN_FILTER_YAML}; model={args.model}; external={args.external}; "
+        f"use_ztf={not args.no_ztf}; jax_platform=cpu; num_devices=4"
     )
     log("Initializing BayeSN SEDmodel")
     try:
@@ -626,25 +722,43 @@ def main() -> None:
             "installed in .venv and that site-packages/bayesn contains bayesn_model.py."
         )
         raise exc
-    model = SEDmodel(num_devices=4, filter_yaml=str(BAYESN_FILTER_YAML))
+    model = SEDmodel(num_devices=4, load_model=args.model, filter_yaml=str(BAYESN_FILTER_YAML))
     log("BayeSN SEDmodel initialized")
+
+    external_sources = set(args.external_sources) if args.external_sources is not None else None
 
     rows = []
     for i, objid in enumerate(objids, start=1):
         log(f"Object {i}/{len(objids)}: {objid}")
         try:
-            rows.append(fit_one(objid, sn_info, salt_fit, model, not args.no_diagnostics))
+            rows.append(
+                fit_one(
+                    objid,
+                    sn_info,
+                    salt_fit,
+                    model,
+                    args.model,
+                    not args.no_diagnostics,
+                    not args.no_ztf,
+                    args.external,
+                    external_sources,
+                    args.rv,
+                )
+            )
         except Exception as exc:
             log(f"{objid}: failed with error: {exc}")
-            rows.append({"ztfid": objid, "status": "failed", "error": str(exc)})
+            rows.append({"ztfid": objid, "status": "failed", "error": str(exc), "bayesn_model": args.model})
 
-    default_output = DATA_DIR / "ztf_early_Ia_bayesn.csv"
     if args.output is not None:
         output = Path(args.output)
     elif args.limit is not None or args.objects:
         output = DATA_DIR / "ztf_early_Ia_bayesn_subset.csv"
+    elif args.external and args.no_ztf:
+        output = DATA_DIR / "ztf_early_Ia_bayesn_external_only.csv"
+    elif args.external:
+        output = DATA_DIR / "ztf_early_Ia_bayesn_ztf_external.csv"
     else:
-        output = default_output
+        output = DATA_DIR / "ztf_early_Ia_bayesn.csv"
     out = pd.DataFrame(rows)
     out.to_csv(output, index=False, float_format="%.6f")
     n_ok = int((out.get("status") == "ok").sum()) if "status" in out else 0

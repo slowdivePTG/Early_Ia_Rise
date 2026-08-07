@@ -1,10 +1,10 @@
 import glob
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import xarray as xr
-from astropy.stats import mad_std
 from astropy.table import Table
 
 from ._utils import data_binning
@@ -13,6 +13,26 @@ from .model.lightcurve import SNLightCurve, SNLightCurveLib
 
 class ZTFDataProcessor:
     """Helper class to handle common ZTF data processing operations."""
+
+    EXTERNAL_GR_FILTER_IDS = {
+        "sdssg": 1,
+        "swope2g": 1,
+        "ps1::g": 1,
+        "sdssr": 2,
+        "swope2r": 2,
+        "ps1::r": 2,
+    }
+
+    EXTERNAL_GR_PEAK_ALIASES = {
+        "sdssg_AB",
+        "sdssr_AB",
+        "g_PS1",
+        "r_PS1",
+        "g_CSP2_AB",
+        "r_CSP2_AB",
+    }
+
+    EXTERNAL_FCQFID_BASE = -900000
 
     @staticmethod
     def process_flux_normalization(
@@ -35,9 +55,9 @@ class ZTFDataProcessor:
     ):
         """Calculate 40% flux times in a filter."""
         try:
-            t, f, _ = data_binning(
-                np.array([phase, flux, flux_err]).T[filt == filtid], 0.5
-            ).T
+            data = np.array([phase, flux, flux_err]).T[filt == filtid]
+            data = data[np.argsort(data[:, 0])]
+            t, f, _ = data_binning(data, 0.5).T
         except ValueError:
             # Not enough data points
             return -np.inf, flux_max
@@ -116,6 +136,95 @@ class ZTFDataProcessor:
 
         return lc_early, lc_peak
 
+    @staticmethod
+    def sort_light_curve(lc):
+        """Return a light-curve dictionary sorted by phase."""
+
+        order = np.argsort(np.asarray(lc["phase"], dtype=np.float64))
+        return {key: np.asarray(value)[order] for key, value in lc.items()}
+
+    @staticmethod
+    def load_external_gr_photometry(
+        filename,
+        t0,
+        z,
+        peak_flux_by_filter,
+        noise_floor=0.05,
+    ):
+        """Load external g/r photometry normalized by native passband peaks."""
+
+        columns = ["phase", "flux", "flux_err", "fcqfid", "filt"]
+        filename = Path(filename)
+        if not filename.exists():
+            return pd.DataFrame(columns=columns), {}
+
+        external = pd.read_csv(filename)
+        external = external[
+            external["filter"].isin(ZTFDataProcessor.EXTERNAL_GR_FILTER_IDS)
+            & external["bayesn_filter"].isin(ZTFDataProcessor.EXTERNAL_GR_PEAK_ALIASES)
+            & np.isfinite(external["mjd"])
+            & np.isfinite(external["flux"])
+            & np.isfinite(external["fluxerr"])
+            & np.isfinite(external["zp"])
+            & external["source"].notna()
+            & (external["fluxerr"] > 0)
+        ].copy()
+        if external.empty:
+            return pd.DataFrame(columns=columns), {}
+
+        missing_peaks = sorted(set(external["bayesn_filter"]) - set(peak_flux_by_filter))
+        if missing_peaks:
+            raise ValueError(
+                "Missing peak-flux columns for external filters "
+                f"{missing_peaks}; regenerate the calibration CSV."
+            )
+
+        external["filt"] = external["filter"].map(
+            ZTFDataProcessor.EXTERNAL_GR_FILTER_IDS
+        ).astype(np.int64)
+
+        sources = sorted(external["source"].dropna().unique())
+        source_index = {source: idx + 1 for idx, source in enumerate(sources)}
+        groups = external[["source", "bayesn_filter"]].drop_duplicates()
+        fcqfid_map = {
+            (row.source, row.bayesn_filter): ZTFDataProcessor.EXTERNAL_FCQFID_BASE
+            - source_index[row.source] * 10
+            - idx
+            for idx, row in enumerate(groups.itertuples(index=False), start=1)
+        }
+        external["fcqfid"] = [
+            fcqfid_map[(row.source, row.bayesn_filter)]
+            for row in external[["source", "bayesn_filter"]].itertuples(index=False)
+        ]
+
+        peak_flux = np.array(
+            [peak_flux_by_filter[str(alias)] for alias in external["bayesn_filter"]],
+            dtype=np.float64,
+        )
+        if not np.all(np.isfinite(peak_flux)) or np.any(peak_flux <= 0):
+            bad = sorted(set(external.loc[(~np.isfinite(peak_flux)) | (peak_flux <= 0), "bayesn_filter"]))
+            raise ValueError(f"Missing finite positive external peak fluxes for filters {bad}.")
+
+        scale = 10 ** (-0.4 * (external["zp"].to_numpy(dtype=np.float64) - 30.0))
+        flux = external["flux"].to_numpy(dtype=np.float64) * scale
+        flux_err = external["fluxerr"].to_numpy(dtype=np.float64) * scale
+        floor = float(noise_floor) * np.abs(flux)
+        flux_err = np.sqrt(flux_err**2 + floor**2)
+        flux = flux / (peak_flux / 100.0)
+        flux_err = flux_err / (peak_flux / 100.0)
+
+        loaded = pd.DataFrame(
+            {
+                "phase": (external["mjd"].to_numpy(dtype=np.float64) - t0) / (1 + z),
+                "flux": flux,
+                "flux_err": flux_err,
+                "fcqfid": external["fcqfid"].to_numpy(dtype=np.int64),
+                "filt": external["filt"].to_numpy(dtype=np.int64),
+            }
+        )
+        counts = external.groupby(["source", "filter", "bayesn_filter"]).size().to_dict()
+        return loaded, counts
+
 
 class ZTFIaEarlyLate(SNLightCurve):
     """
@@ -124,15 +233,18 @@ class ZTFIaEarlyLate(SNLightCurve):
     """
 
     late_dir: str = "./data/ztf_snia_early_late/"
-    meta_data_path: str = "ztf_early_Ia_meta.csv"
-    salt_path: str = "ztf_early_Ia_salt.csv"
+    phot_path: str = "ztf_early_Ia_phot.csv"
     lc_path: str = "light_curve_fps_ztf/*fnu.csv"
-    atlas_lc_path: str = "light_curve_fps_atlas/"
+    external_lc_path: str = "light_curve_external/"
 
-    def __init__(self, ztfid: str, early_threshold: float = 0.4) -> None:
-        meta_data = Table.read(self.late_dir + self.meta_data_path)
-        salt_data = Table.read(self.late_dir + self.salt_path)
-        meta_data = meta_data[np.isin(meta_data["objid"], salt_data["ztfid"])]
+    def __init__(
+        self,
+        ztfid: str,
+        early_threshold: float = 0.4,
+        include_external_gr: bool = False,
+        external_noise_floor: float = 0.05,
+    ) -> None:
+        phot_data = Table.read(self.late_dir + self.phot_path)
         lc_list = sorted(glob.glob(self.late_dir + self.lc_path))
         ztfid_list = [lc.split("/")[-1].split("_")[0] for lc in lc_list]
         # ztfid_list = meta_data["objid"].data
@@ -140,7 +252,7 @@ class ZTFIaEarlyLate(SNLightCurve):
             raise ValueError(f"ZTF ID {ztfid} not found in early light curves.")
         try:
             tab_lc = pd.read_csv(
-                lc_list[ztfid_list.index(ztfid)], sep="\s+", comment="#"
+                lc_list[ztfid_list.index(ztfid)], sep=r"\s+", comment="#"
             )
         except:
             print(ztfid_list, ztfid)
@@ -178,11 +290,33 @@ class ZTFIaEarlyLate(SNLightCurve):
             10 ** (-0.4 * delta_zp)
         )
 
-        t0 = salt_data[salt_data["ztfid"] == ztfid]["t0"].data[0]
-        t0_err = salt_data[salt_data["ztfid"] == ztfid]["t0_err"].data[0]
-        z = meta_data[salt_data["ztfid"] == ztfid]["z"].data[0]
-        flux_g_max = salt_data[salt_data["ztfid"] == ztfid]["ztfg_flux_max"].data[0]
-        flux_r_max = salt_data[salt_data["ztfid"] == ztfid]["ztfr_flux_max"].data[0]
+        phot_row = phot_data[phot_data["ztfid"] == ztfid]
+        if len(phot_row) != 1:
+            raise ValueError(f"No unique photometric calibration row found for {ztfid}.")
+
+        t0 = phot_row["t0"].data[0]
+        t0_err = phot_row["t0_err"].data[0]
+        z = phot_row["z"].data[0]
+        flux_zp = phot_row["flux_zp"].data[0]
+        flux_scale_to_zp30 = 10 ** (-0.4 * (flux_zp - 30.0))
+        flux_g_max = phot_row["ztfg_flux_max"].data[0] * flux_scale_to_zp30
+        flux_r_max = phot_row["ztfr_flux_max"].data[0] * flux_scale_to_zp30
+        external_peak_flux = {}
+        missing_external_peak_cols = []
+        for alias in ZTFDataProcessor.EXTERNAL_GR_PEAK_ALIASES:
+            col = f"{alias}_flux_max"
+            if col not in phot_data.colnames:
+                missing_external_peak_cols.append(col)
+            else:
+                external_peak_flux[alias] = phot_row[col].data[0] * flux_scale_to_zp30
+        if include_external_gr and missing_external_peak_cols:
+            raise ValueError(
+                f"Missing external peak-flux columns in photometric calibration row for {ztfid}: "
+                + ", ".join(missing_external_peak_cols)
+            )
+        required = [t0, t0_err, z, flux_zp, flux_g_max, flux_r_max]
+        if not np.all(np.isfinite(required)) or flux_g_max <= 0 or flux_r_max <= 0:
+            raise ValueError(f"Missing finite positive photometric calibration values for {ztfid}.")
 
         # Quality mask
         # https://github.com/BrightTransientSurvey/ztf_forced_phot/tree/main/explanation#-flags-bitmask
@@ -223,6 +357,64 @@ class ZTFIaEarlyLate(SNLightCurve):
         fcqfid = data["fcqfid"]
         filt = data["filter_id"]
 
+        flux, flux_err = ZTFDataProcessor.process_flux_normalization(
+            flux, flux_err, filt, flux_g_max, flux_r_max
+        )
+
+        if include_external_gr:
+            external_filename = (
+                self.late_dir
+                + self.external_lc_path
+                + f"{ztfid}_external.csv"
+            )
+            external_lc, external_counts = ZTFDataProcessor.load_external_gr_photometry(
+                external_filename,
+                t0,
+                z,
+                external_peak_flux,
+                noise_floor=external_noise_floor,
+            )
+            if not external_lc.empty:
+                phase = np.concatenate(
+                    (np.asarray(phase, dtype=np.float64), external_lc["phase"].to_numpy())
+                )
+                flux = np.concatenate(
+                    (np.asarray(flux, dtype=np.float64), external_lc["flux"].to_numpy())
+                )
+                flux_err = np.concatenate(
+                    (
+                        np.asarray(flux_err, dtype=np.float64),
+                        external_lc["flux_err"].to_numpy(),
+                    )
+                )
+                fcqfid = np.concatenate(
+                    (
+                        np.asarray(fcqfid, dtype=np.int64),
+                        external_lc["fcqfid"].to_numpy(dtype=np.int64),
+                    )
+                )
+                filt = np.concatenate(
+                    (
+                        np.asarray(filt, dtype=np.int64),
+                        external_lc["filt"].to_numpy(dtype=np.int64),
+                    )
+                )
+                counts_msg = ", ".join(
+                    f"{source} {band} {alias}={count}"
+                    for (source, band, alias), count in external_counts.items()
+                )
+                print(
+                    f"{ztfid}: added external g/r photometry with "
+                    f"{external_noise_floor:.1%} noise floor ({counts_msg})"
+                )
+
+        phase_order = np.argsort(np.asarray(phase, dtype=np.float64))
+        phase = np.asarray(phase)[phase_order]
+        flux = np.asarray(flux)[phase_order]
+        flux_err = np.asarray(flux_err)[phase_order]
+        fcqfid = np.asarray(fcqfid)[phase_order]
+        filt = np.asarray(filt)[phase_order]
+
         # Calculate X% times and max flux from data
         t_g_early, _ = ZTFDataProcessor.calculate_early_times(
             phase,
@@ -230,7 +422,7 @@ class ZTFIaEarlyLate(SNLightCurve):
             flux_err,
             filt,
             early_threshold=early_threshold,
-            flux_max=flux_g_max,
+            flux_max=100.0,
             filtid=1,  # g filter
         )
         t_r_early, _ = ZTFDataProcessor.calculate_early_times(
@@ -239,141 +431,14 @@ class ZTFIaEarlyLate(SNLightCurve):
             flux_err,
             filt,
             early_threshold=early_threshold,
-            flux_max=flux_r_max,
+            flux_max=100.0,
             filtid=2,  # r filter
-        )
-
-        # Normalize flux
-        flux, flux_err = ZTFDataProcessor.process_flux_normalization(
-            flux, flux_err, filt, flux_g_max, flux_r_max
         )
 
         # Create light curve data
         lc_early, lc_peak = ZTFDataProcessor.create_light_curve_data(
             phase, flux, flux_err, fcqfid, filt, t_g_early, t_r_early
         )
-
-        # Handle ATLAS light curves
-        atlas_lc_list = sorted(
-            glob.glob(self.late_dir + self.atlas_lc_path + f"{ztfid}_*.csv")
-        )
-        if len(atlas_lc_list) > 0:
-            tab_atlas_lc = pd.read_csv(atlas_lc_list[0])
-            tab_atlas_lc = tab_atlas_lc.rename(
-                columns={key: key.replace(",", "") for key in tab_atlas_lc.columns}
-            )
-
-            # Sigma clipping in time bins to remove outliers
-            mjd = tab_atlas_lc["MJD"].values
-            flux = tab_atlas_lc["uJy"].values
-
-            mask_atlas = np.ones(len(tab_atlas_lc), dtype=bool)
-            min_mjd_bin = 1.8  # < 2 day
-            n_points = len(tab_atlas_lc)
-            i = 0
-            while i < n_points:
-                j = np.searchsorted(mjd, mjd[i] + min_mjd_bin, side="left")
-
-                if j - i > 1:
-                    bin_flux = flux[i:j]
-
-                    median_flux = np.median(bin_flux)
-                    robust_std = mad_std(bin_flux)
-
-                    # Prevent clipping if the scatter is artificially zero
-                    if robust_std > 0:
-                        mask_atlas[i:j] = np.abs(bin_flux - median_flux) <= (
-                            3 * robust_std
-                        )
-
-                i = j
-
-            # mask_atlas & = tab_atlas_lc["duJy"] > 1
-            tab_atlas_lc = tab_atlas_lc[mask_atlas]
-            tab_atlas_lc["filter_id"] = np.select(
-                [
-                    tab_atlas_lc["F"] == "c",
-                    tab_atlas_lc["F"] == "o",
-                ],
-                [4, 5],
-                default=0,  # Or some other default value if needed
-            )
-            data_atlas = tab_atlas_lc
-            flux_c_max = salt_data[salt_data["ztfid"] == ztfid]["atlasc_flux_max"].data[
-                0
-            ]
-            flux_o_max = salt_data[salt_data["ztfid"] == ztfid]["atlaso_flux_max"].data[
-                0
-            ]
-            flux_atlas = data_atlas["uJy"]
-            flux_err_atlas = data_atlas["duJy"]
-            phase_atlas = (data_atlas["MJD"] - t0) / (1 + z)
-
-            if (phase_atlas < 0).sum() == 0:
-                print(f"No pre-peak data for ZTF ID {ztfid}, skip ATLAS.")
-
-            fcqfid_atlas = tab_atlas_lc["filter_id"]
-            filt_atlas = tab_atlas_lc["filter_id"]
-
-            # Calculate 40% times and max flux from data
-            if (
-                (phase_atlas < max(t_g_early, t_r_early)) & (filt_atlas == 4)
-            ).sum() > 5:
-                t_c_early = max(t_g_early, t_r_early)
-            else:
-                t_c_early = -np.inf
-
-            if (
-                (phase_atlas < max(t_g_early, t_r_early)) & (filt_atlas == 5)
-            ).sum() > 5:
-                t_o_early = max(t_g_early, t_r_early)
-            else:
-                t_o_early = -np.inf
-
-            # Normalize flux
-            flux_atlas, flux_err_atlas = ZTFDataProcessor.process_flux_normalization(
-                flux_atlas,
-                flux_err_atlas,
-                filt_atlas,
-                flux_c_max,
-                flux_o_max,
-                filtids=[4, 5],
-            )
-
-            # Create light curve data
-            lc_early_atlas, lc_peak_atlas = ZTFDataProcessor.create_light_curve_data(
-                phase_atlas,
-                flux_atlas,
-                flux_err_atlas,
-                fcqfid_atlas,
-                filt_atlas,
-                t_c_early,
-                t_o_early,
-                filtids=[4, 5],
-            )
-
-            # Combine early and peak light curves
-            lc_early = {
-                "phase": np.concatenate((lc_early["phase"], lc_early_atlas["phase"])),
-                "flux": np.concatenate((lc_early["flux"], lc_early_atlas["flux"])),
-                "flux_err": np.concatenate(
-                    (lc_early["flux_err"], lc_early_atlas["flux_err"])
-                ),
-                "fcqfid": np.concatenate(
-                    (lc_early["fcqfid"], lc_early_atlas["fcqfid"])
-                ),
-                "filt": np.concatenate((lc_early["filt"], lc_early_atlas["filt"])),
-            }
-
-            lc_peak = {
-                "phase": np.concatenate((lc_peak["phase"], lc_peak_atlas["phase"])),
-                "flux": np.concatenate((lc_peak["flux"], lc_peak_atlas["flux"])),
-                "flux_err": np.concatenate(
-                    (lc_peak["flux_err"], lc_peak_atlas["flux_err"])
-                ),
-                "fcqfid": np.concatenate((lc_peak["fcqfid"], lc_peak_atlas["fcqfid"])),
-                "filt": np.concatenate((lc_peak["filt"], lc_peak_atlas["filt"])),
-            }
 
         super().__init__(lc_early=lc_early, lc_peak=lc_peak, ztfid=ztfid, t0_err=t0_err)
 
@@ -606,6 +671,8 @@ class SampleConfig:
     no_t0_err: bool = False
     x1_subsample: str | None = None
     sn_type: str = "normal"
+    include_external_gr: bool = False
+    external_noise_floor: float = 0.05
 
     def get_filename_suffix(self) -> str:
         suffix = ""
@@ -621,6 +688,10 @@ class SampleConfig:
             suffix += f"_{self.x1_subsample}"
         if self.sn_type != "normal":
             suffix += f"_{self.sn_type}"
+        if self.include_external_gr:
+            suffix += f"_external_gr_nf{int(round(self.external_noise_floor * 100))}"
+        if self.source.lower() == "early_late":
+            suffix += "_phot_ztf_norm"
         return suffix
 
 
@@ -687,7 +758,10 @@ class ZTFLib(SNLightCurveLib):
                     )
                 elif config.source.lower() == "early_late":
                     ztf_sn = ZTFIaEarlyLate(
-                        ztfid=ztfid, early_threshold=early_threshold
+                        ztfid=ztfid,
+                        early_threshold=early_threshold,
+                        include_external_gr=config.include_external_gr,
+                        external_noise_floor=config.external_noise_floor,
                     )
                 else:
                     raise ValueError("Source must be 'EDR', 'DR2', or 'Early_Late'.")
@@ -725,6 +799,24 @@ class ZTFLib(SNLightCurveLib):
             sampling_model=sampling_model,
             **kwargs,
         )
+        if post_sample is not None:
+            expected_dims = {
+                "obj": len(self.lc_library),
+                "filt": self.n_filt_global,
+                "fcqfid": len(np.unique(self.idx_fcqfid)),
+            }
+            mismatches = []
+            for dim, expected in expected_dims.items():
+                if dim in post_sample.sizes and post_sample.sizes[dim] != expected:
+                    mismatches.append(
+                        f"{dim}: file={post_sample.sizes[dim]}, current={expected}"
+                    )
+            if mismatches:
+                print(
+                    f"Ignoring incompatible posterior file {post_sample_file} "
+                    f"({'; '.join(mismatches)})."
+                )
+                post_sample = None
         self.post_sample = post_sample
         self.pop_prior = pop_prior_config
         if self.post_sample is not None and "pop_prior" in self.post_sample.attrs:
@@ -735,4 +827,5 @@ class ZTFLib(SNLightCurveLib):
                 self.pop_prior = None
             else:
                 self.pop_prior = val
-        self.decode_post_sample()
+        if self.post_sample is not None:
+            self.decode_post_sample()

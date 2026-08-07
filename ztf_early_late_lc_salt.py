@@ -21,15 +21,26 @@ DATA_DIR = Path("data/ztf_snia_early_late")
 SALT2_SOURCE_NAME = "salt2"
 SALT2_SOURCE_VERSION = "T21"
 SALT2_LOCAL_DIR = DATA_DIR / "salt2_models" / "salt2-T21"
-DIAG_DIR = DATA_DIR / "salt_diagnostics"
+DIAG_DIR = DATA_DIR / "salt2_diagnostics"
 MCMC_CHAIN_DIR = DATA_DIR / "salt_mcmc_chains"
 EXTERNAL_DIR = DATA_DIR / "light_curve_external"
 LOCAL_ZTF_FILTER_DIR = DATA_DIR / "sncosmo_filters" / "ztf"
 LOCAL_SDSS_FILTER_DIR = DATA_DIR / "sncosmo_filters" / "sdss"
 LOCAL_PS1_FILTER_DIR = DATA_DIR / "sncosmo_filters" / "ps1"
+LOCAL_BAYESN_FILTER_DIR = DATA_DIR / "sncosmo_filters" / "bayesn"
 MODEL_PHASE_MIN = -10.0
 MODEL_PHASE_MAX = 40.0
 MIN_OBS_PER_FILTER = 3
+SALT2_PEAK_FLUX_BANDS = {
+    "ztfg": "ztfg",
+    "ztfr": "ztfr",
+    "sdssg_AB": "sdssg",
+    "sdssr_AB": "sdssr",
+    "g_PS1": "ps1::g",
+    "r_PS1": "ps1::r",
+    "g_CSP2_AB": "swope2g",
+    "r_CSP2_AB": "swope2r",
+}
 SALT2_X1_ROUND1_BOUNDS = (-3.0, 3.0)
 SALT2_X1_FINAL_BOUNDS = (-3.0, 10.0)
 SALT2_X1_MCMC_BOUNDS = (-5.0, 10.0)
@@ -82,44 +93,6 @@ def parse_ztf_lc(filename: Path) -> pd.DataFrame:
     return lc_dat[["mjd", "filter", "flux", "fluxerr", "zp", "magsys"]]
 
 
-def parse_atlas_lc(filename: Path) -> pd.DataFrame:
-    """Parse one ATLAS forced-photometry file into sncosmo-compatible flux rows."""
-
-    from astropy.stats import mad_std
-
-    if not filename.exists():
-        return pd.DataFrame(columns=["mjd", "filter", "flux", "fluxerr", "zp", "magsys"])
-
-    lc = pd.read_csv(filename)
-    lc_dat = lc[lc["err"] == 0].copy()
-    lc_dat["magsys"] = "ab"
-
-    mjd = lc_dat["MJD"].values
-    flux = lc_dat["uJy"].values
-    mask = np.ones(len(lc_dat), dtype=bool)
-    min_mjd_bin = 1.8
-    n_points = len(lc_dat)
-    i = 0
-
-    while i < n_points:
-        j = np.searchsorted(mjd, mjd[i] + min_mjd_bin, side="left")
-        if j - i > 1:
-            bin_flux = flux[i:j]
-            median_flux = np.median(bin_flux)
-            robust_std = mad_std(bin_flux)
-            if robust_std > 0:
-                mask[i:j] = np.abs(bin_flux - median_flux) <= (3 * robust_std)
-        i = j
-
-    lc_dat = lc_dat.rename(
-        columns={"MJD": "mjd", "uJy": "flux", "duJy": "fluxerr", "F": "filter"}
-    )
-    lc_dat["zp"] = 2.5 * np.log10(3631.0) + 15.0
-    lc_dat["filter"] = lc_dat["filter"].replace({"o": "atlaso", "c": "atlasc"})
-
-    return lc_dat[["mjd", "filter", "flux", "fluxerr", "zp", "magsys"]][mask]
-
-
 def parse_external_lc(objid: str) -> pd.DataFrame:
     """Load normalized external photometry for one object when available."""
 
@@ -154,8 +127,31 @@ def register_external_filters() -> None:
         manifest = register_bayesn_sncosmo_filters()
     except FileNotFoundError:
         log("No local BayeSN-derived sncosmo filter manifest found; skipping external filter registration")
+        register_local_swope_aliases()
         return
     log(f"Registered {len(manifest)} local sncosmo filters for external photometry")
+
+
+def register_local_bandpass(name: str, path: Path) -> None:
+    """Register a local two-column wavelength/transmission file as a sncosmo bandpass."""
+
+    if not path.exists():
+        raise FileNotFoundError(f"Missing local sncosmo filter file: {path}")
+    wave, trans = np.loadtxt(path, unpack=True)
+    sncosmo.registry.register(sncosmo.Bandpass(wave, trans, name=name), name=name, force=True)
+
+
+def register_local_swope_aliases() -> None:
+    """Register normalized Swope filter aliases from local files."""
+
+    aliases = {
+        "swope2g": LOCAL_BAYESN_FILTER_DIR / "swope2g.dat",
+        "swope2r": LOCAL_BAYESN_FILTER_DIR / "swope2r.dat",
+        "swope2i": LOCAL_BAYESN_FILTER_DIR / "swope2i.dat",
+    }
+    for name, path in aliases.items():
+        register_local_bandpass(name, path)
+    log(f"Registered {len(aliases)} local Swope sncosmo aliases")
 
 
 def register_local_ztf_filters() -> None:
@@ -173,25 +169,30 @@ def register_local_ztf_filters() -> None:
         "ps1::i": LOCAL_PS1_FILTER_DIR / "ps1_i.dat",
     }
     for name, path in filter_files.items():
-        if not path.exists():
-            raise FileNotFoundError(f"Missing local ZTF filter file: {path}")
-        wave, trans = np.loadtxt(path, unpack=True)
-        sncosmo.registry.register(sncosmo.Bandpass(wave, trans, name=name), name=name, force=True)
+        register_local_bandpass(name, path)
     log(f"Registered {len(filter_files)} local g/r/i sncosmo filters")
 
 
 def drop_sparse_filters_after_phase_cut(sn: Table, objid: str) -> Table:
-    """Drop fitted filters with fewer than the required number of observations."""
+    """Drop sparse external filters while retaining all ZTF filters."""
 
     filters = np.asarray(sn["filter"])
-    counts = pd.Series(filters).value_counts()
+    if "_survey" in sn.colnames:
+        survey = np.asarray(sn["_survey"]).astype(str)
+        external = survey != "ZTF"
+        if not np.any(external):
+            return sn
+        counts = pd.Series(filters[external]).value_counts()
+    else:
+        survey = np.full(len(sn), "external")
+        counts = pd.Series(filters).value_counts()
     dropped = counts[counts < MIN_OBS_PER_FILTER]
     if dropped.empty:
         return sn
 
     dropped_msg = ", ".join(f"{band}={count}" for band, count in dropped.items())
-    log(f"{objid}: dropping SALT2 filters with <{MIN_OBS_PER_FILTER} points after phase cut: {dropped_msg}")
-    keep = np.isin(filters, counts[counts >= MIN_OBS_PER_FILTER].index.to_numpy())
+    log(f"{objid}: dropping external SALT2 filters with <{MIN_OBS_PER_FILTER} points after phase cut: {dropped_msg}")
+    keep = (survey == "ZTF") | ~np.isin(filters, dropped.index.to_numpy())
     return sn[keep]
 
 
@@ -440,6 +441,8 @@ def fit_one(
     nsamples: int,
     thin: int,
     t0_window: float,
+    use_ztf: bool,
+    use_external: bool,
 ) -> dict:
     """Fit one SN with SALT2 and return the final parameter summary.
 
@@ -448,17 +451,24 @@ def fit_one(
     """
 
     log(f"{objid}: starting SALT2 fit")
-    sn_ztf = parse_ztf_lc(DATA_DIR / "light_curve_fps_ztf" / f"{objid}_fnu.csv")
-    sn_atlas = parse_atlas_lc(DATA_DIR / "light_curve_fps_atlas" / f"{objid}_fnu.csv")
-    sn_external = parse_external_lc(objid)
-    sn_tot_df = pd.concat([sn_ztf, sn_atlas, sn_external], ignore_index=True)
+    sn_ztf = parse_ztf_lc(DATA_DIR / "light_curve_fps_ztf" / f"{objid}_fnu.csv") if use_ztf else pd.DataFrame()
+    sn_external = parse_external_lc(objid) if use_external else pd.DataFrame()
+    if use_external and sn_external.empty:
+        raise ValueError("External photometry requested but none is available after cuts.")
+    if not sn_ztf.empty:
+        sn_ztf = sn_ztf.copy()
+        sn_ztf["_survey"] = "ZTF"
+    if not sn_external.empty:
+        sn_external = sn_external.copy()
+        sn_external["_survey"] = "external"
+    sn_tot_df = pd.concat([sn_ztf, sn_external], ignore_index=True)
     sn_tot_df = keep_salt2_gri_filters(sn_tot_df, objid)
     if sn_tot_df.empty:
         raise ValueError("No g/r/i photometry available for SALT2 fit.")
     sn_tot_raw = Table.from_pandas(sn_tot_df)
     log(
         f"{objid}: loaded photometry "
-        f"(ZTF={len(sn_ztf)}, ATLAS={len(sn_atlas)}, external={len(sn_external)}, SALT2_gri={len(sn_tot_raw)})"
+        f"(ZTF={len(sn_ztf)}, external={len(sn_external)}, SALT2_gri={len(sn_tot_raw)})"
     )
 
     info_idx = sn_info.objid == objid
@@ -467,7 +477,7 @@ def fit_one(
     z = sn_info.loc[info_idx, "z"].values[0]
     log(f"{objid}: metadata z={z:.6f}")
 
-    t_peak_obs = sn_ztf["mjd"].values[np.argmax(sn_ztf["flux"])]
+    t_peak_obs = sn_tot_df["mjd"].values[np.argmax(sn_tot_df["flux"])]
     sn_round1 = sn_tot_raw[
         (sn_tot_raw["mjd"] > t_peak_obs - 20) & (sn_tot_raw["mjd"] < t_peak_obs + 50)
     ]
@@ -559,14 +569,17 @@ def fit_one(
     t_max_err = result["errors"].get("t0", np.nan)
     sn_tot["phase"] = (sn_tot["mjd"] - t_max) / (1 + z)
 
-    ztfg_peakmag = fitted_model.source_peakmag("ztfg", magsys="ab")
-    ztfr_peakmag = fitted_model.source_peakmag("ztfr", magsys="ab")
-    atlaso_peakmag = fitted_model.source_peakmag("atlaso", magsys="ab")
-    atlasc_peakmag = fitted_model.source_peakmag("atlasc", magsys="ab")
+    peak_flux = {}
+    peak_mag = {}
+    for column_band, sncosmo_band in SALT2_PEAK_FLUX_BANDS.items():
+        peak_mag[column_band] = fitted_model.source_peakmag(sncosmo_band, magsys="ab")
+        peak_flux[f"{column_band}_flux_max"] = 10 ** (-0.4 * (peak_mag[column_band] - 30.0))
     log(
         f"{objid}: peak mags "
-        f"ztfg={ztfg_peakmag:.2f}, ztfr={ztfr_peakmag:.2f}, "
-        f"atlaso={atlaso_peakmag:.2f}, atlasc={atlasc_peakmag:.2f}"
+        f"ztfg={peak_mag['ztfg']:.2f}, ztfr={peak_mag['ztfr']:.2f}, "
+        f"sdssg_AB={peak_mag['sdssg_AB']:.2f}, sdssr_AB={peak_mag['sdssr_AB']:.2f}, "
+        f"g_PS1={peak_mag['g_PS1']:.2f}, r_PS1={peak_mag['r_PS1']:.2f}, "
+        f"g_CSP2_AB={peak_mag['g_CSP2_AB']:.2f}, r_CSP2_AB={peak_mag['r_CSP2_AB']:.2f}"
     )
 
     if save_diagnostics:
@@ -589,14 +602,14 @@ def fit_one(
             xerr=t_max_err,
         )
         fig = plt.gcf()
+        source_label = photometry_config_label(use_ztf=use_ztf, use_external=use_external)
         suffix = "salt2_mcmc_fit" if run_mcmc else "salt2_fit"
+        suffix = f"{source_label}_{suffix}"
         fig_path = DIAG_DIR / f"{objid}_{suffix}.png"
         fig.savefig(fig_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         log(f"{objid}: saved SALT2 diagnostic figure to {fig_path}")
 
-    zp_ztf = 30.0
-    zp_atlas = 2.5 * np.log10(3631.0) + 15.0
     row = {
         "ztfid": objid,
         "t0": result["parameters"][1],
@@ -607,14 +620,12 @@ def fit_one(
         "x0_err": result["errors"].get("x0", np.nan),
         "x1_err": result["errors"].get("x1", np.nan),
         "c_err": result["errors"].get("c", np.nan),
-        "ztfg_flux_max": 10 ** (-0.4 * (ztfg_peakmag - zp_ztf)),
-        "ztfr_flux_max": 10 ** (-0.4 * (ztfr_peakmag - zp_ztf)),
-        "atlaso_flux_max": 10 ** (-0.4 * (atlaso_peakmag - zp_atlas)),
-        "atlasc_flux_max": 10 ** (-0.4 * (atlasc_peakmag - zp_atlas)),
+        "peak_flux_zp": 30.0,
         "sampler": sampler,
         "status": "ok",
         "error": "",
     }
+    row.update(peak_flux)
     row.update(mcmc_summary)
     log(f"{objid}: completed SALT2 fit with sampler={sampler}")
     return row
@@ -629,6 +640,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-diagnostics", action="store_true", help="Do not save diagnostic figures.")
     parser.add_argument("--output", default=None, help="Output CSV path. Defaults to the full-sample SALT CSV.")
     parser.add_argument("--no-mcmc", action="store_true", help="Skip sncosmo.mcmc_lc and save least-squares fits only.")
+    parser.add_argument("--no-ztf", action="store_true", help="Exclude ZTF photometry from SALT2 fits.")
+    parser.add_argument("--external", action="store_true", help="Include normalized external photometry and fit only objects with external data.")
     parser.add_argument("--nwalkers", type=int, default=32, help="Number of emcee walkers for sncosmo.mcmc_lc.")
     parser.add_argument("--nburn", type=int, default=500, help="Burn-in steps for sncosmo.mcmc_lc.")
     parser.add_argument("--nsamples", type=int, default=2000, help="Production steps for sncosmo.mcmc_lc.")
@@ -637,15 +650,44 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def default_output_path(args: argparse.Namespace) -> Path:
+    """Return the default SALT2 output path for this source configuration."""
+
+    if args.limit is not None or args.objects:
+        return DATA_DIR / "ztf_early_Ia_salt_subset.csv"
+    if args.external and args.no_ztf:
+        return DATA_DIR / "ztf_early_Ia_salt_external_only.csv"
+    if args.external:
+        return DATA_DIR / "ztf_early_Ia_salt_ztf_external.csv"
+    return DATA_DIR / "ztf_early_Ia_salt.csv"
+
+
+def photometry_config_label(use_ztf: bool, use_external: bool) -> str:
+    """Return a compact label for the photometry sources used in a fit."""
+
+    if use_ztf and use_external:
+        return "ztf_external"
+    if use_external:
+        return "external_only"
+    return "ztf"
+
+
 def main() -> None:
     """Run SALT2 fitting for the requested sample and write the summary CSV."""
 
     args = parse_args()
+    if args.no_ztf and not args.external:
+        raise SystemExit("--no-ztf requires --external so at least one photometry source is enabled.")
     log("Starting SALT2 fitting script")
     sample = load_sample()
     objids = [str(x) for x in sample["ztfid"]]
     if args.objects:
         objids = [objid for objid in objids if objid in set(args.objects)]
+    if args.external:
+        external_objids = {path.stem.removesuffix("_external") for path in EXTERNAL_DIR.glob("*_external.csv")}
+        before_external = len(objids)
+        objids = [objid for objid in objids if objid in external_objids]
+        log(f"--external selected: {len(objids)}/{before_external} requested objects have external files")
     if args.limit is not None:
         objids = objids[: args.limit]
 
@@ -654,7 +696,7 @@ def main() -> None:
     t21_source = make_salt2_source()
     log(
         f"Loaded sample: {len(sample)} available objects, fitting {len(objids)} objects; "
-        f"MCMC={'off' if args.no_mcmc else 'on'}"
+        f"MCMC={'off' if args.no_mcmc else 'on'}; external={args.external}; use_ztf={not args.no_ztf}"
     )
 
     rows = []
@@ -673,19 +715,18 @@ def main() -> None:
                     nsamples=args.nsamples,
                     thin=args.thin,
                     t0_window=args.t0_window,
+                    use_ztf=not args.no_ztf,
+                    use_external=args.external,
                 )
             )
         except Exception as exc:
             log(f"{objid}: failed with error: {exc}")
             rows.append({"ztfid": objid, "status": "failed", "error": str(exc)})
 
-    default_output = DATA_DIR / "ztf_early_Ia_salt.csv"
     if args.output is not None:
         output = Path(args.output)
-    elif args.limit is not None or args.objects:
-        output = DATA_DIR / "ztf_early_Ia_salt_subset.csv"
     else:
-        output = default_output
+        output = default_output_path(args)
     out = pd.DataFrame(rows)
     out.to_csv(output, index=False, float_format="%.6f")
     n_ok = int((out.get("status") == "ok").sum()) if "status" in out else 0
