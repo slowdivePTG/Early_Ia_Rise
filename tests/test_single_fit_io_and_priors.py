@@ -4,9 +4,11 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import xarray as xr
 from astropy.table import Table
 
 from snia_rise.cli.fit_single import build_parser
+from snia_rise.fitting import save_single_fit_result, summarize_posterior
 from snia_rise.io import LightCurveRecord, read_light_curve_bundle, write_light_curve_bundle
 from snia_rise.prior_registry import (
     list_builtin_priors,
@@ -106,3 +108,57 @@ def test_public_pipeline_api_imports_from_package_root() -> None:
     assert callable(snia_rise.export_ztf_early_late_bundle)
     assert callable(snia_rise.calibrate_single_sn_bundle)
     assert callable(snia_rise.fit_single_sn_bundle)
+
+
+def test_summary_includes_single_object_rise_time() -> None:
+    class LightCurve:
+        post_sample = xr.Dataset(
+            {
+                "t_rise": (("chain", "draw", "obj"), np.array([[[15.0], [17.0], [19.0]]])),
+                "alpha_0": (
+                    ("chain", "draw", "obj", "filt"),
+                    np.array([[[[2.0, 2.5]], [[3.0, 3.5]], [[4.0, 4.5]]]]),
+                ),
+            },
+            coords={"obj": ["TEST"], "filt": ["ztfg", "ztfr"]},
+        )
+
+    summary = summarize_posterior(LightCurve())
+    assert summary is not None
+    rows = {(row["parameter"], row["filter"]): row for row in summary}
+
+    assert ("t_rise", "") in rows
+    assert rows[("t_rise", "")]["median"] == 17.0
+    assert ("alpha_0", "ztfg") in rows
+    assert ("alpha_0", "ztfr") in rows
+
+
+def test_save_single_fit_result_writes_light_curve_diagnostic() -> None:
+    class LightCurve:
+        def __init__(self) -> None:
+            self.inf_data = None
+            self.post_sample = xr.Dataset(
+                {"t_rise": (("chain", "draw", "obj"), np.array([[[16.0], [18.0]]]))},
+                coords={"obj": [0]},
+            )
+            self.plot_calls = []
+
+        def plot_lc(self, *, save: bool = False, filename: str | None = None, **kwargs) -> None:
+            self.plot_calls.append({"save": save, "filename": filename, **kwargs})
+            if save and filename is not None:
+                Path(filename + ".pdf").write_bytes(b"%PDF-1.4\n")
+
+    light_curve = LightCurve()
+    with tempfile.TemporaryDirectory() as tmp:
+        save_single_fit_result(
+            tmp,
+            _record(),
+            light_curve,
+            prior_config={},
+            prior_profile={"name": "test"},
+            run_config={},
+        )
+
+        assert light_curve.plot_calls == [{"save": True, "filename": str(Path(tmp) / "light_curve")}]
+        assert (Path(tmp) / "light_curve.pdf").exists()
+        assert (Path(tmp) / "summary.ecsv").exists()

@@ -75,6 +75,16 @@ def save_single_fit_result(
     elif getattr(light_curve, "post_sample", None) is not None:
         light_curve.post_sample.to_netcdf(output_dir / "posterior.nc")
 
+    plot_lc = getattr(light_curve, "plot_lc", None)
+    if callable(plot_lc):
+        plot_lc(save=True, filename=str(output_dir / "light_curve"))
+        try:
+            import matplotlib.pyplot as plt
+
+            plt.close("all")
+        except ImportError:
+            pass
+
     summary = summarize_posterior(light_curve)
     if summary is not None:
         summary.write(output_dir / "summary.ecsv", format="ascii.ecsv", overwrite=True)
@@ -104,6 +114,9 @@ def summarize_posterior(light_curve) -> Table | None:
             for i, filt_name in enumerate(filt_values):
                 flat = np.take(values, i, axis=axis).reshape(-1)
                 rows.append([var, str(filt_name), *np.percentile(flat, [16, 50, 84])])
+        elif "obj" in posterior[var].dims and posterior[var].sizes.get("obj") == 1:
+            flat = values.reshape(-1)
+            rows.append([var, "", *np.percentile(flat, [16, 50, 84])])
     if not rows:
         return None
     return Table(rows=rows, names=["parameter", "filter", "p16", "median", "p84"])

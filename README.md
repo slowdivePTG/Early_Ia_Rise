@@ -61,7 +61,11 @@ snia-rise-fit \
 ```
 
 The output directory contains a copy of the selected input bundle, the resolved
-prior, run settings, posterior inference NetCDF, and a compact summary table.
+prior, run settings, posterior inference NetCDF, a multiband light-curve
+diagnostic (`light_curve.pdf`), and a compact summary table (`summary.ecsv`).
+The summary table includes the posterior rise-time estimate (`t_rise`) in
+rest-frame days, along with per-filter parameters such as `alpha_0` and
+`Aprime`.
 
 The same functionality is available from Python:
 
